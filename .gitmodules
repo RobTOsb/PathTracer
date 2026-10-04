@@ -1,0 +1,6 @@
+[submodule "external/D3D12RenderContext"]
+	path = external/D3D12RenderContext
+	url = https://github.com/RobTOsb/D3D12RenderContext
+[submodule "external/GLTFScene"]
+	path = external/GLTFScene
+	url = https://github.com/RobTOsb/GLTFScene

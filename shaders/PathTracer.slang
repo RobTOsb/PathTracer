@@ -1,0 +1,591 @@
+#include "PathTracerInterop.h"
+
+import OpenPBRBaseSubstrate;
+
+// Resources
+
+ConstantBuffer<FrameConstants> g_Frame : register(b0);
+RaytracingAccelerationStructure g_Scene : register(t0);
+RWTexture2D<float4> g_Output : register(u0);
+SamplerState g_LinearWrap : register(s3); 
+
+struct PrimitiveDesc
+{
+    uint meshletOffset;
+    uint meshletVerticesOffset;
+    uint meshletTrianglesOffset;
+    uint meshletCount;
+    uint materialIndex;
+    uint vertexOffset;
+    uint vertexCount;
+    uint indexOffset;
+    uint indexCount;
+};
+
+StructuredBuffer<PrimitiveDesc> g_Primitives : register(t1);
+StructuredBuffer<uint> g_Indices : register(t2);
+StructuredBuffer<float3> g_Positions : register(t3);
+StructuredBuffer<float3> g_Normals : register(t4);
+StructuredBuffer<float2> g_TexCoords : register(t5);
+StructuredBuffer<float4> g_Tangents : register(t6);
+StructuredBuffer<GpuMaterial> g_Materials : register(t7);
+
+PrimitiveDesc LoadPrimitive(uint index)
+{
+    return g_Primitives[index];
+}
+
+GpuMaterial LoadGpuMaterial(uint index)
+{
+    return g_Materials[index];
+}
+
+float4 SampleTexture(uint textureIndex, float2 uv)
+{
+    // No ray differentials yet, so always the top mip.
+    Texture2D<float4> texture = ResourceDescriptorHeap[NonUniformResourceIndex(textureIndex)];
+    return texture.SampleLevel(g_LinearWrap, uv, 0.0);
+}
+
+// Scene interface
+
+struct HitInfo
+{
+    bool hit;
+    float t;
+    float3 position;
+    float3 Ng; // geometric normal, oriented outwards
+    float3 T;  // interpolated vertex tangent
+    float3 B;  // interpolated vertex bitangent
+    float3 N;  // interpolated vertex normal
+    float3 Ns; // shading normal from the normal map in world space, equal to N without a map
+    float2 uv;
+    float3 emission;
+    uint materialId;
+};
+
+struct LightSample
+{
+    float3 direction; // world space, towards the light
+    float distance;
+    float3 radiance;
+    float pdf;    // solid angle PDF
+    bool isDelta; // point or directional light, cannot be hit by BSDF sampling
+};
+
+// Ray types. Each one indexes both the hit group (every TLAS instance contributes 0 and the
+// geometry multiplier is 0) and the miss shader in the shader table, so PathTracerPass must add
+// its records in this order.
+static const uint STANDARD_RAY_INDEX = 0;
+static const uint SHADOW_RAY_INDEX = 1;
+
+struct ShadowRayPayload
+{
+    float3 visibility;
+};
+
+struct HitPayload
+{
+    float hitT;
+    float3 Ng;
+    uint materialId;
+    float3 N;
+    float tangentSign;
+    float3 T;
+    float2 uv;
+};
+
+HitInfo TraceClosest(float3 origin, float3 dir)
+{
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = dir;
+    ray.TMin = 0.0;
+    ray.TMax = FLT_MAX;
+
+    HitPayload payload = (HitPayload)0;
+    payload.hitT = -1.0;
+    TraceRay(g_Scene, RAY_FLAG_FORCE_OPAQUE, 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
+
+    HitInfo hit = (HitInfo)0;
+    hit.hit = payload.hitT >= 0.0;
+    if (!hit.hit)
+        return hit;
+
+    hit.t = payload.hitT;
+    hit.position = origin + dir * payload.hitT;
+    hit.Ng = payload.Ng;
+    hit.N = payload.N;
+    hit.T = normalize(payload.T - hit.N * dot(hit.N, payload.T));
+    hit.B = cross(hit.N, hit.T) * payload.tangentSign;
+    hit.uv = payload.uv;
+    hit.materialId = payload.materialId;
+    hit.emission = float3(0.0, 0.0, 0.0);
+    hit.Ns = hit.N; // LoadMaterial applies the normal map
+    return hit;
+}
+
+bool SunIsDelta()
+{
+    return g_Frame.sunIsDelta != 0;
+}
+
+// True when dir falls inside the sun disc.
+bool InSunDisc(float3 dir)
+{
+    return 1.0 - dot(dir, g_Frame.sunDirection) <= g_Frame.sunOneMinusCosMax;
+}
+
+// Radiance of the sun disc seen along dir, zero outside it.
+float3 SunRadiance(float3 dir)
+{
+    return !SunIsDelta() && InSunDisc(dir) ? g_Frame.sunRadiance : float3(0.0, 0.0, 0.0);
+}
+
+void BuildOrthonormalBasis(float3 n, out float3 t, out float3 b)
+{
+    // Duff et al. 2017
+    float s = n.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (s + n.z);
+    float c = n.x * n.y * a;
+    t = float3(1.0 + s * n.x * n.x * a, s * c, -s * n.x);
+    b = float3(c, s + n.y * n.y * a, -n.y);
+}
+
+LightSample SampleLight(float3 position, float2 u)
+{
+    LightSample ls;
+    ls.distance = FLT_MAX;
+    ls.radiance = g_Frame.sunRadiance;
+    ls.pdf = g_Frame.sunPdf;
+    ls.isDelta = SunIsDelta();
+
+    float3 sunDir = g_Frame.sunDirection;
+    if (ls.isDelta)
+    {
+        ls.direction = sunDir;
+        return ls;
+    }
+
+    // Uniform cone sampling around the sun direction.
+    float oneMinusCos = u.x * g_Frame.sunOneMinusCosMax;
+    float cosTheta = 1.0 - oneMinusCos;
+    float sinTheta = sqrt(max(0.0, oneMinusCos * (2.0 - oneMinusCos)));
+    float phi = TWO_PI * u.y;
+
+    float3 t, b;
+    BuildOrthonormalBasis(sunDir, t, b);
+    ls.direction = normalize(t * (sinTheta * cos(phi)) + b * (sinTheta * sin(phi)) + sunDir * cosTheta);
+    return ls;
+}
+
+// Solid angle PDF of SampleLight producing dir.
+float LightPdf(float3 origin, float3 dir, HitInfo hit)
+{
+    if (hit.hit || SunIsDelta())
+        return 0.0;
+    return InSunDisc(dir) ? g_Frame.sunPdf : 0.0;
+}
+
+// Constant sky; the sun disc is handled separately so it can be MIS weighted.
+float3 EnvironmentRadiance(float3 dir)
+{
+    return g_Frame.skyRadiance;
+}
+
+// Casts a shadow ray and returns the visibility of the light, from 0 (fully occluded) to 1 (unoccluded) per channel
+// Note that we use dedicated hit group with simpler shaders for shadow rays
+// The caller skips back-facing light directions on opaque surfaces before it gets here, so the
+// offset goes to whichever side the light is on, which is below the surface for transmission.
+float3 CastShadowRay(float3 hitPosition, float3 surfaceNormal, float3 directionToLight, float tracingDistance)
+{
+    RayDesc ray;
+    ray.Origin = OffsetRay(hitPosition, surfaceNormal, directionToLight);
+    ray.Direction = directionToLight;
+    ray.TMin = 0.0f;
+    ray.TMax = tracingDistance;
+
+    ShadowRayPayload payload;
+    payload.visibility = float3(1.0f, 1.0f, 1.0f);
+
+    uint rayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH;
+    TraceRay(g_Scene, rayFlags, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX, ray, payload);
+
+    return payload.visibility;
+}
+
+// Reads the material row once, samples all of its textures and applies the normal map to hit.Ns.
+OpenPBRBaseParams LoadMaterial(inout HitInfo hit)
+{
+    GpuMaterial material = LoadGpuMaterial(hit.materialId);
+    float2 uv = hit.uv;
+
+    // Tangent-space normal map: +X along the tangent, +Y along the bitangent, +Z along N.
+    if (material.normalTexture != INVALIDDESCRIPTORHANDLE)
+    {
+        float3 tn = SampleTexture(material.normalTexture, uv).xyz * 2.0 - 1.0;
+        tn.xy *= material.normalScale;
+        hit.Ns = normalize(hit.T * tn.x + hit.B * tn.y + hit.N * tn.z);
+    }
+
+    float3 baseColour = material.baseColour.rgb;
+    if (material.albedoTexture != INVALIDDESCRIPTORHANDLE)
+        baseColour *= SampleTexture(material.albedoTexture, uv).rgb;
+
+    float roughness = material.roughness;
+    float metallic = material.metallic;
+    if (material.roughMetalTexture != INVALIDDESCRIPTORHANDLE)
+    {
+        float4 roughMetal = SampleTexture(material.roughMetalTexture, uv);
+        roughness *= roughMetal.g;
+        metallic *= roughMetal.b;
+    }
+
+    OpenPBRBaseParams p = OpenPBRDefaults();
+    p.baseColour = baseColour;
+    p.baseMetalness = saturate(metallic);
+    p.specularRoughness = saturate(roughness);
+    return p;
+}
+
+void GenerateCameraRay(uint2 pixel, float2 u, out float3 origin, out float3 dir)
+{
+    uint2 dims = DispatchRaysDimensions().xy;
+    float2 ndc = (float2(pixel) + u) / float2(dims) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+
+    // Unproject a point on the near plane (z = 1 with reversed Z) into view space, then rotate into
+    // world space. Kept separate from the translation to avoid precision loss with a tiny near plane.
+    float4 viewPoint = mul(float4(ndc, 1.0, 1.0), g_Frame.invProj);
+    float3 viewDir = viewPoint.xyz / viewPoint.w;
+
+    origin = g_Frame.invView[3].xyz;
+    dir = normalize(mul(float4(viewDir, 0.0), g_Frame.invView).xyz);
+}
+
+// Random numbers
+
+static const uint RNG_CALLS_PER_FRAME = 256;
+
+uint3 Pcg3d(uint3 v)
+{
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    return v;
+}
+
+uint RngInit(uint frameIndex)
+{
+    return frameIndex * RNG_CALLS_PER_FRAME;
+}
+
+float3 Rand3(inout uint rng)
+{
+    uint3 h = Pcg3d(uint3(DispatchRaysIndex().xy, rng++));
+    return float3(h >> 8) * (1.0 / 16777216.0);
+}
+
+// Material helpers
+
+// Spec default values, with an identity basis that the caller overwrites per hit.
+OpenPBRBaseParams OpenPBRDefaults()
+{
+    OpenPBRBaseParams p;
+    p.baseWeight = 1.0;
+    p.baseColour = float3(0.8, 0.8, 0.8);
+    p.baseMetalness = 0.0;
+    p.baseDiffuseRoughness = 0.0;
+    p.specularWeight = 1.0;
+    p.specularColour = float3(1.0, 1.0, 1.0);
+    p.specularRoughness = 0.3;
+    p.specularRoughnessAnisotropy = 0.0;
+    p.specularIor = 1.5;
+    p.transmissionWeight = 0.0;
+    p.transmissionColour = float3(1.0, 1.0, 1.0);
+    p.transmissionDepth = 0.0;
+    p.subsurfaceWeight = 0.0;
+    p.subsurfaceColour = float3(0.8, 0.8, 0.8);
+    p.geometryTangent = float3(1.0, 0.0, 0.0);
+    p.geometryBitangent = float3(0.0, 1.0, 0.0);
+    p.geometryNormal = float3(0.0, 0.0, 1.0);
+    return p;
+}
+
+// Beer-Lambert extinction so that light reaching transmissionDepth has transmissionColor.
+float3 MediumExtinction(OpenPBRBaseParams p)
+{
+    if (p.transmissionWeight <= 0.0 || p.transmissionDepth <= 0.0)
+        return float3(0.0, 0.0, 0.0);
+    return -log(max(p.transmissionColour, 1.0e-4)) / p.transmissionDepth;
+}
+
+// Path tracing utilities
+
+float PowerHeuristic(float a, float b)
+{
+    float a2 = a * a;
+    float b2 = b * b;
+    return a2 + b2 > 0.0 ? a2 / (a2 + b2) : 0.0;
+}
+
+// OffsetRay function from Ray Tracing Gems chapter 6
+// Offsets the ray origin from current position p, along normal n (which must be geometric normal)
+// so that no self-intersection can occur.
+float3 OffsetRay(const float3 p, const float3 n)
+{
+    static const float origin = 1.0f / 32.0f;
+    static const float float_scale = 1.0f / 65536.0f;
+    static const float int_scale = 256.0f;
+
+    int3 of_i = int3(int_scale * n);
+
+    float3 p_i =
+        float3(asfloat(asint(p.x) + ((p.x < 0) ? -of_i.x : of_i.x)), asfloat(asint(p.y) + ((p.y < 0) ? -of_i.y : of_i.y)), asfloat(asint(p.z) + ((p.z < 0) ? -of_i.z : of_i.z)));
+
+    return float3(abs(p.x) < origin ? p.x + float_scale * n.x : p_i.x, abs(p.y) < origin ? p.y + float_scale * n.y : p_i.y, abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
+}
+
+// Offsets along whichever side of the geometric normal the new ray leaves from, so transmitted
+// rays start below the surface and reflected ones above it.
+float3 OffsetRay(float3 p, float3 Ng, float3 dir)
+{
+    return OffsetRay(p, dot(dir, Ng) < 0.0 ? -Ng : Ng);
+}
+
+static const uint RR_START_BOUNCE = 1;
+
+float3 TracePath(float3 origin, float3 dir, inout uint rng)
+{
+    float3 radiance = float3(0.0, 0.0, 0.0);
+    float3 throughput = float3(1.0, 1.0, 1.0);
+    float3 segmentExtinction = float3(0.0, 0.0, 0.0);
+    float prevBsdfPdf = 0.0;
+
+    // maxBounces counts indirect bounces, so the primary segment comes on top.
+    const uint maxSegments = g_Frame.maxBounces + 1;
+
+    for (uint bounce = 0; bounce < maxSegments; ++bounce)
+    {
+        HitInfo hit = TraceClosest(origin, dir);
+
+        // Absorption along the segment just travelled, if it was inside a medium.
+        if (any(segmentExtinction > 0.0))
+        {
+            if (!hit.hit)
+                break;
+            throughput *= exp(-segmentExtinction * hit.t);
+        }
+
+        if (!hit.hit)
+        {
+            // The sky is never light sampled, so BSDF sampling gets its full contribution.
+            radiance += throughput * EnvironmentRadiance(dir);
+
+            // The sun disc is also reached by NEE, so weight it against light sampling.
+            float3 Lsun = SunRadiance(dir);
+            if (any(Lsun > 0.0))
+            {
+                float w = bounce == 0 ? 1.0 : PowerHeuristic(prevBsdfPdf, LightPdf(origin, dir, hit));
+                radiance += throughput * Lsun * w;
+            }
+            break;
+        }
+
+        // Emission found by BSDF sampling. Emissive surfaces are not light sampled yet.
+        if (any(hit.emission > 0.0))
+            radiance += throughput * hit.emission;
+
+        // Material and shading basis for this hit.
+        OpenPBRBaseParams mat = LoadMaterial(hit);
+        float3 wo = -dir;
+
+        // Opaque surfaces are treated as two-sided: face the frame towards the viewer so a back
+        // face is not mistaken for the inside of a transmissive object.
+        bool opaque = mat.transmissionWeight <= 0.0;
+        if (opaque && dot(hit.Ng, wo) < 0.0)
+        {
+            hit.Ng = -hit.Ng;
+            hit.N = -hit.N;
+            hit.Ns = -hit.Ns;
+        }
+
+        SetShadingBasis(mat, hit.T, hit.B, hit.N, hit.Ns, wo);
+        OpenPBRContext ctx = OpenPBRSetup(mat, wo);
+        float3 extinction = MediumExtinction(mat);
+
+        // One hash covers the light sample (xy) and the Russian roulette decision (z).
+        float3 lightU = Rand3(rng);
+
+        LightSample ls = SampleLight(hit.position, lightU.xy);
+        float3 neeContribution = float3(0.0, 0.0, 0.0);
+        bool traceShadowRay = false;
+        if (ls.pdf > 0.0 && (!opaque || dot(ls.direction, hit.Ng) > 0.0))
+        {
+            float bsdfPdf;
+            float3 fCos = OpenPBREvalPdf(mat, ctx, ls.direction, bsdfPdf);
+            if (any(fCos > 0.0))
+            {
+                float w = ls.isDelta ? 1.0 : PowerHeuristic(ls.pdf, bsdfPdf);
+                float3 shadowTransmittance =
+                    dot(ls.direction, hit.Ng) < 0.0 ? exp(-extinction * ls.distance) : float3(1.0, 1.0, 1.0);
+                neeContribution = throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf);
+                traceShadowRay = true;
+            }
+        }
+
+        // Continue the path by sampling the BSDF, unless this is the last segment.
+        bool continuePath = false;
+        if (bounce + 1 < maxSegments)
+        {
+            BSDFSample bs = OpenPBRSample(mat, ctx, Rand3(rng));
+            continuePath = bs.lobe != LOBE_NONE;
+            if (continuePath)
+            {
+                throughput *= bs.weight;
+                prevBsdfPdf = bs.pdf;
+
+                // Heading into the object means travelling through its medium until the next hit.
+                segmentExtinction = dot(bs.wi, hit.Ng) < 0.0 ? extinction : float3(0.0, 0.0, 0.0);
+                dir = bs.wi;
+            }
+        }
+
+        if (traceShadowRay)
+            radiance += neeContribution * CastShadowRay(hit.position, hit.Ng, ls.direction, ls.distance);
+
+        if (!continuePath)
+            break;
+
+        origin = OffsetRay(hit.position, hit.Ng, dir);
+
+        // Russian roulette.
+        if (bounce >= RR_START_BOUNCE)
+        {
+            float q = saturate(max(throughput.x, max(throughput.y, throughput.z)));
+            if (lightU.z >= q)
+                break;
+            throughput /= q;
+        }
+    }
+
+    return radiance;
+}
+
+// Entry points
+
+[shader("raygeneration")]
+void RayGen()
+{
+    uint2 pixel = DispatchRaysIndex().xy;
+    uint2 dims = DispatchRaysDimensions().xy;
+    uint rng = RngInit(g_Frame.frameIndex);
+
+    float3 origin, dir;
+    GenerateCameraRay(pixel, Rand3(rng).xy, origin, dir);
+    float3 L = TracePath(origin, dir, rng);
+
+    // A single bad sample would otherwise stick in any temporal filter downstream.
+    if (any(isnan(L)) || any(isinf(L)))
+        L = float3(0.0, 0.0, 0.0);
+
+    g_Output[pixel] = float4(L, 1.0);
+}
+
+[shader("miss")]
+void Miss(inout HitPayload payload)
+{
+    payload.hitT = -1.0;
+}
+
+// Vertex indices of the triangle being hit, already rebased into the shared streams.
+uint3 LoadTriangle(PrimitiveDesc prim)
+{
+    uint first = prim.indexOffset + PrimitiveIndex() * 3;
+    return uint3(g_Indices[first], g_Indices[first + 1], g_Indices[first + 2]) + prim.vertexOffset;
+}
+
+float3 Barycentrics(BuiltInTriangleIntersectionAttributes attr)
+{
+    return float3(1.0 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
+}
+
+float2 InterpolateTexCoord(uint3 tri, float3 bary)
+{
+    return g_TexCoords[tri.x] * bary.x + g_TexCoords[tri.y] * bary.y + g_TexCoords[tri.z] * bary.z;
+}
+
+[shader("closesthit")]
+void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+{
+    PrimitiveDesc prim = LoadPrimitive(InstanceID());
+    uint3 tri = LoadTriangle(prim);
+    float3 bary = Barycentrics(attr);
+
+    float3 p0 = g_Positions[tri.x];
+    float3 p1 = g_Positions[tri.y];
+    float3 p2 = g_Positions[tri.z];
+    float3 objectNormal = g_Normals[tri.x] * bary.x + g_Normals[tri.y] * bary.y + g_Normals[tri.z] * bary.z;
+    float4 objectTangent = g_Tangents[tri.x] * bary.x + g_Tangents[tri.y] * bary.y + g_Tangents[tri.z] * bary.z;
+
+    float3x3 linearToWorld = (float3x3)ObjectToWorld3x4();
+    float3x3 cofactor = float3x3(cross(linearToWorld[1], linearToWorld[2]),
+                                 cross(linearToWorld[2], linearToWorld[0]),
+                                 cross(linearToWorld[0], linearToWorld[1]));
+    float det = dot(linearToWorld[0], cofactor[0]);
+    float handedness = det < 0.0 ? -1.0 : 1.0;
+
+    float3 Ng = normalize(mul(cofactor, cross(p1 - p0, p2 - p0)) * handedness);
+
+    payload.hitT = RayTCurrent();
+    payload.Ng = Ng;
+    payload.materialId = prim.materialIndex;
+    payload.N = normalize(mul(cofactor, objectNormal) * handedness);
+    payload.T = normalize(mul(linearToWorld, objectTangent.xyz));
+    // A mirroring transform flips cross(N, T), so fold its handedness into the bitangent sign.
+    payload.tangentSign = (objectTangent.w < 0.0 ? -1.0 : 1.0) * handedness;
+    payload.uv = InterpolateTexCoord(tri, bary);
+}
+
+[shader("miss")]
+void ShadowMiss(inout ShadowRayPayload payload)
+{
+}
+
+[shader("closesthit")]
+void ShadowClosestHit(inout ShadowRayPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+{
+    payload.visibility = float3(0.0, 0.0, 0.0);
+}
+
+[shader("anyhit")]
+void ShadowAnyHit(inout ShadowRayPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+{
+    PrimitiveDesc prim = LoadPrimitive(InstanceID());
+    GpuMaterial material = LoadGpuMaterial(prim.materialIndex);
+
+    float4 albedo = material.baseColour;
+    if (material.albedoTexture != INVALIDDESCRIPTORHANDLE)
+        albedo *= SampleTexture(material.albedoTexture, InterpolateTexCoord(LoadTriangle(prim), Barycentrics(attr)));
+
+    if (material.alphaMode == ALPHA_MODE_MASK)
+    {
+        if (albedo.a < material.alphaCutoff)
+            IgnoreHit();
+        AcceptHitAndEndSearch();
+    }
+
+    if (material.alphaMode == ALPHA_MODE_BLEND)
+    {
+        payload.visibility *= (1.0 - albedo.a) * lerp(float3(1.0, 1.0, 1.0), albedo.rgb, material.transmission);
+        if (dot(payload.visibility, 0.333) > 0.001)
+            IgnoreHit();
+    }
+
+    AcceptHitAndEndSearch();
+}
