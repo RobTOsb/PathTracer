@@ -38,6 +38,11 @@ namespace
 		{ DLSSMode::UltraPerformance, "Ultra Performance" },
 	};
 
+	constexpr ComboEntry<LightSamplingMode> kLightSamplingModes[] = {
+		{ LIGHT_SAMPLING_TREE, "Light tree" },
+		{ LIGHT_SAMPLING_UNIFORM, "Uniform" },
+	};
+
 	constexpr ComboEntry<DLSSRayReconstructionPreset> kRRPresets[] = {
 		{ DLSSRayReconstructionPreset::Default, "Default" },
 		{ DLSSRayReconstructionPreset::PresetD, "D" },
@@ -78,8 +83,12 @@ namespace
 	}
 } // namespace
 
-ImGuiPass::ImGuiPass(RenderSettings &settings, const Camera &camera, bool rayReconstructionSupported) :
-	settings_(settings), camera_(camera), rayReconstructionSupported_(rayReconstructionSupported)
+ImGuiPass::ImGuiPass(RenderSettings &settings,
+					 const Camera &camera,
+					 bool rayReconstructionSupported,
+					 uint32_t lightCount) :
+	settings_(settings), camera_(camera), rayReconstructionSupported_(rayReconstructionSupported),
+	lightCount_(lightCount)
 {
 }
 
@@ -158,6 +167,17 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		}
 		ImGui::ColorEdit3("Colour", &sun.colour.x);
 		ImGui::DragFloat("Intensity", &sun.intensity, 0.05f, 0.0f, 1000.0f, "%.2f");
+	}
+
+	if (ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		LightSettings &lights = settings_.lights;
+		ImGui::Text("%u point/area light(s)", lightCount_);
+		ImGui::BeginDisabled(lightCount_ == 0);
+		ImGui::Checkbox("Enabled", &lights.enabled);
+		EnumCombo("Sampling", kLightSamplingModes, lights.sampling);
+		ImGui::DragFloat("Light intensity", &lights.intensityScale, 0.01f, 0.0f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+		ImGui::EndDisabled();
 	}
 
 	if (ImGui::CollapsingHeader("Sky", ImGuiTreeNodeFlags_DefaultOpen))

@@ -6,13 +6,15 @@
 
 #include "DLSSUtil.h"
 
+#include <algorithm>
 #include <math.h>
 #include <stdexcept>
 
+#undef min
+#undef max
+
 namespace
 {
-	// Must cover HitPayload in PathTracer.slang (14 x 4 bytes). The driver sizes the ray stack from
-	// this, so keep it tight.
 	constexpr uint32_t kMaxPayloadSizeInBytes = 56;
 
 	// Halton phases before the jitter repeats. The DLSS guide asks for 8 * (output / render)^2, so
@@ -142,6 +144,16 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.sunRadiance = sunIsDelta ? irradiance : irradiance * (1.0f / solidAngle);
 	constants.sunPdf = sunIsDelta ? 1.0f : 1.0f / solidAngle;
 
+	// Split next event estimation evenly between the sun and the light buffer when both emit,
+	// otherwise give it all to whichever does.
+	const LightSettings &lights = settings_.lights;
+	const bool sunActive = std::max({ irradiance.x, irradiance.y, irradiance.z }) > 0.0f;
+	const bool lightsActive = lights.enabled && lights.intensityScale > 0.0f && scene_.GetLightCount() > 0;
+	constants.lightCount = lightsActive ? scene_.GetLightCount() : 0u;
+	constants.lightSampling = static_cast<uint>(lights.sampling);
+	constants.lightIntensityScale = lights.intensityScale;
+	constants.sunSelectProbability = sunActive ? (lightsActive ? 0.5f : 1.0f) : 0.0f;
+
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
 	constants.frameIndex = renderContext->GetCurrentFrame();
 	constants.maxBounces = static_cast<uint>(settings_.maxBounces);
@@ -182,6 +194,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	renderContext->SetRaytracingSRV(5, scene_.GetStreamBuffer(GPUStream::TexCoord0));
 	renderContext->SetRaytracingSRV(6, scene_.GetStreamBuffer(GPUStream::Tangent));
 	renderContext->SetRaytracingSRV(7, scene_.GetMaterialBuffer());
+	renderContext->SetRaytracingSRV(8, scene_.GetLightBuffer());
+	renderContext->SetRaytracingSRV(9, scene_.GetLightTreeNodeBuffer());
 	for (uint32_t i = 0; i < targetCount; ++i)
 	{
 		renderContext->SetRaytracingUAV(i, targets[i]);

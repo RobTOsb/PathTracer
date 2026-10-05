@@ -4,7 +4,9 @@
 #include "RenderContext.h"
 
 #include "Maths.h"
+#include "ShaderInterop.h"
 
+#include <span>
 #include <vector>
 
 namespace Scene
@@ -12,9 +14,6 @@ namespace Scene
 	class Texture;
 }
 
-// GPUScene backed by the RenderContext abstraction. Packs every primitive into the shared stream
-// buffers described by GPUScene, uploads materials/textures as bindless resources, and builds one
-// BLAS per primitive plus a single TLAS over every (node, primitive) pair.
 class RenderGPUScene final : public Scene::GPUScene
 {
 public:
@@ -30,9 +29,12 @@ public:
 	// up and is not refitted here yet.
 	void UpdateInstances(const Scene::GLTFScene &scene) override;
 
-	// Records texture transitions and the BLAS/TLAS builds on the current graphics command list.
-	// Call once after BuildGPUScene, between BeginGraphicsCommandList and EndGraphicsCommandList.
 	void BuildAccelerationStructures();
+
+	// Builds the SG light tree over point and area lights and uploads it with the light buffer.
+	// Built once at start up like the acceleration structures. Calling it again replaces both,
+	// which needs the GPU to be idle.
+	void BuildLights(std::span<const GpuLight> lights);
 
 	bool HasGeometry() const
 	{
@@ -71,6 +73,23 @@ public:
 		return primitiveBuffer_;
 	}
 
+	// The lights the light tree indexes (GpuLight) and its nodes (GpuLightTreeNode). Both always
+	// hold at least one element so they can stay bound, GetLightCount is 0 without lights.
+	ResourceHandle GetLightBuffer() const
+	{
+		return lightBuffer_;
+	}
+
+	ResourceHandle GetLightTreeNodeBuffer() const
+	{
+		return lightTreeNodeBuffer_;
+	}
+
+	uint32_t GetLightCount() const
+	{
+		return lightCount_;
+	}
+
 	// World-space bounds over every instanced primitive, for framing the camera.
 	float3 GetBoundsMin() const
 	{
@@ -85,10 +104,15 @@ public:
 private:
 	void UploadStreams(UploadBatchHandle batch);
 	void UploadMaterials(const Scene::GLTFScene &scene, UploadBatchHandle &batch);
-	uint32_t UploadTexture(const Scene::Texture &texture, Format format, const char *debugName, UploadBatchHandle &batch);
-	ResourceHandle UploadStream(const void *data, uint64_t sizeInBytes, uint32_t stride, const char *debugName, UploadBatchHandle batch);
+	uint32_t UploadTexture(const Scene::Texture &texture,
+						   Format format,
+						   const char *debugName,
+						   UploadBatchHandle &batch);
+	ResourceHandle UploadStream(
+			const void *data, uint64_t sizeInBytes, uint32_t stride, const char *debugName, UploadBatchHandle batch);
 	void ComputeBounds(const Scene::GLTFScene &scene);
 	void FillInstances(const Scene::GLTFScene &scene);
+	void DestroyLights();
 
 	RenderContext *renderContext_ = nullptr;
 
@@ -108,6 +132,10 @@ private:
 	ResourceHandle instanceBuffer_ = InvalidResourceHandle;
 	uint32_t primitiveBufferIndex_ = InvalidResourceDescriptorIndex;
 	uint32_t materialBufferIndex_ = InvalidResourceDescriptorIndex;
+
+	ResourceHandle lightBuffer_ = InvalidResourceHandle;
+	ResourceHandle lightTreeNodeBuffer_ = InvalidResourceHandle;
+	uint32_t lightCount_ = 0;
 
 	std::vector<ResourceHandle> textures_;
 	std::vector<bool> materialIsOpaque_; // per GpuMaterial row; decides each BLAS's opaque flag

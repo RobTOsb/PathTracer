@@ -1,12 +1,14 @@
 #include "RenderGPUScene.h"
 
 #include "GLTFScene.h"
+#include "LightTreeBuilder.h"
 #include "PathTracerInterop.h"
 
 #include "fmtlog.h"
 
 #include <algorithm>
 #include <cfloat>
+#include <chrono>
 #include <cstring>
 
 namespace
@@ -69,6 +71,61 @@ RenderGPUScene::~RenderGPUScene()
 			renderContext_->DestroyResource(buffer);
 		}
 	}
+	DestroyLights();
+}
+
+void RenderGPUScene::DestroyLights()
+{
+	for (ResourceHandle *buffer: { &lightBuffer_, &lightTreeNodeBuffer_ })
+	{
+		if (*buffer != InvalidResourceHandle)
+		{
+			renderContext_->DestroyResource(*buffer);
+			*buffer = InvalidResourceHandle;
+		}
+	}
+	lightCount_ = 0;
+}
+
+void RenderGPUScene::BuildLights(std::span<const GpuLight> lights)
+{
+	DestroyLights();
+
+	const auto start = std::chrono::steady_clock::now();
+	LightTree tree = BuildLightTree(lights);
+	const float buildMs = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+
+	if (tree.lights.size() < lights.size())
+	{
+		logw("GPUScene: light tree skipped {} light(s) that are not point/area lights or emit nothing",
+			 lights.size() - tree.lights.size());
+	}
+
+	lightCount_ = static_cast<uint32_t>(tree.lights.size());
+	if (lightCount_ == 0)
+	{
+		// One unused element each, so the shader's bindings stay valid.
+		tree.lights.push_back(GpuLight{});
+		tree.nodes.push_back(GpuLightTreeNode{});
+	}
+
+	UploadBatchHandle batch = renderContext_->BeginUpload();
+	lightBuffer_ = UploadStream(tree.lights.data(),
+								tree.lights.size() * sizeof(GpuLight),
+								sizeof(GpuLight),
+								"Scene_Lights",
+								batch);
+	lightTreeNodeBuffer_ = UploadStream(tree.nodes.data(),
+										tree.nodes.size() * sizeof(GpuLightTreeNode),
+										sizeof(GpuLightTreeNode),
+										"Scene_LightTreeNodes",
+										batch);
+	renderContext_->EndUpload(batch);
+
+	logi("GPUScene: light tree over {} light(s), {} node(s), built in {:.2f} ms",
+		 lightCount_,
+		 lightCount_ > 0 ? tree.nodes.size() : 0,
+		 buildMs);
 }
 
 void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
@@ -128,7 +185,8 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
 
 			static_assert(sizeof(Scene::Meshlet) % sizeof(uint32_t) == 0);
 			const auto &meshlets = primitive.GetMeshlets();
-			desc.meshletOffset = static_cast<uint32_t>(meshletData_.size() / (sizeof(Scene::Meshlet) / sizeof(uint32_t)));
+			desc.meshletOffset =
+					static_cast<uint32_t>(meshletData_.size() / (sizeof(Scene::Meshlet) / sizeof(uint32_t)));
 			desc.meshletCount = static_cast<uint32_t>(meshlets.size());
 			desc.meshletVerticesOffset = static_cast<uint32_t>(meshletVertices_.size());
 			desc.meshletTrianglesOffset = static_cast<uint32_t>(meshletTriangles_.size());
@@ -256,14 +314,34 @@ void RenderGPUScene::UploadStreams(UploadBatchHandle batch)
 	};
 
 	const StreamSource sources[] = {
-		{ GPUStream::Position, positions_.data(), positions_.size() * sizeof(float), kPositionStride, "Scene_Positions" },
-		{ GPUStream::TexCoord0, texCoords_.data(), texCoords_.size() * sizeof(float), 2 * sizeof(float), "Scene_TexCoord0" },
+		{ GPUStream::Position,
+		  positions_.data(),
+		  positions_.size() * sizeof(float),
+		  kPositionStride,
+		  "Scene_Positions" },
+		{ GPUStream::TexCoord0,
+		  texCoords_.data(),
+		  texCoords_.size() * sizeof(float),
+		  2 * sizeof(float),
+		  "Scene_TexCoord0" },
 		{ GPUStream::Normal, normals_.data(), normals_.size() * sizeof(float), 3 * sizeof(float), "Scene_Normals" },
 		{ GPUStream::Tangent, tangents_.data(), tangents_.size() * sizeof(float), 4 * sizeof(float), "Scene_Tangents" },
 		{ GPUStream::Index, indices_.data(), indices_.size() * sizeof(uint32_t), sizeof(uint32_t), "Scene_Indices" },
-		{ GPUStream::Meshlet, meshletData_.data(), meshletData_.size() * sizeof(uint32_t), sizeof(Scene::Meshlet), "Scene_Meshlets" },
-		{ GPUStream::MeshletVertices, meshletVertices_.data(), meshletVertices_.size() * sizeof(uint32_t), sizeof(uint32_t), "Scene_MeshletVertices" },
-		{ GPUStream::MeshletTriangles, meshletTriangles_.data(), meshletTriangles_.size() * sizeof(uint32_t), sizeof(uint32_t), "Scene_MeshletTriangles" },
+		{ GPUStream::Meshlet,
+		  meshletData_.data(),
+		  meshletData_.size() * sizeof(uint32_t),
+		  sizeof(Scene::Meshlet),
+		  "Scene_Meshlets" },
+		{ GPUStream::MeshletVertices,
+		  meshletVertices_.data(),
+		  meshletVertices_.size() * sizeof(uint32_t),
+		  sizeof(uint32_t),
+		  "Scene_MeshletVertices" },
+		{ GPUStream::MeshletTriangles,
+		  meshletTriangles_.data(),
+		  meshletTriangles_.size() * sizeof(uint32_t),
+		  sizeof(uint32_t),
+		  "Scene_MeshletTriangles" },
 	};
 
 	for (const StreamSource &source: sources)
@@ -294,8 +372,7 @@ void RenderGPUScene::UploadStreams(UploadBatchHandle batch)
 		desc.sizeInBytes = instances.size() * sizeof(InstanceGPU);
 		desc.structureByteStride = sizeof(InstanceGPU);
 		desc.debugName = "Scene_Instances";
-		instanceBuffer_ =
-				renderContext_->CreateUploadBuffer(desc, ResourceViewType::ShaderResource, instances.data());
+		instanceBuffer_ = renderContext_->CreateUploadBuffer(desc, ResourceViewType::ShaderResource, instances.data());
 	}
 }
 
@@ -330,9 +407,9 @@ uint32_t RenderGPUScene::UploadTexture(const Scene::Texture &texture,
 	mip.rowCount = desc.height;
 
 	const ResourceHandle gpuTexture = renderContext_->CreateTexture(desc,
-																 ResourceViewType::ShaderResource,
-																 std::span<const TextureMipData>(&mip, 1),
-																 batch);
+																	ResourceViewType::ShaderResource,
+																	std::span<const TextureMipData>(&mip, 1),
+																	batch);
 	pendingUploadBytes_ += sizeInBytes;
 	textures_.push_back(gpuTexture);
 	return renderContext_->GetResourceViewInfo(gpuTexture).descriptorIndex;
@@ -397,7 +474,10 @@ void RenderGPUScene::UpdateInstances(const Scene::GLTFScene &scene)
 	FillInstances(scene);
 	if (instanceBuffer_ != InvalidResourceHandle && instances.size() == previousCount)
 	{
-		renderContext_->UpdateUploadBuffer(instanceBuffer_, instances.data(), 0, instances.size() * sizeof(InstanceGPU));
+		renderContext_->UpdateUploadBuffer(instanceBuffer_,
+										   instances.data(),
+										   0,
+										   instances.size() * sizeof(InstanceGPU));
 	}
 }
 

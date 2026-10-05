@@ -2,6 +2,7 @@
 #include "DLSSUtil.h"
 
 import OpenPBRBaseSubstrate;
+import LightTree;
 
 // Resources
 
@@ -41,6 +42,9 @@ StructuredBuffer<float3> g_Normals : register(t4);
 StructuredBuffer<float2> g_TexCoords : register(t5);
 StructuredBuffer<float4> g_Tangents : register(t6);
 StructuredBuffer<GpuMaterial> g_Materials : register(t7);
+// Point and area lights, indexed by the light tree leaves. Never empty, so these stay bound.
+StructuredBuffer<GpuLight> g_Lights : register(t8);
+StructuredBuffer<GpuLightTreeNode> g_LightTreeNodes : register(t9);
 
 PrimitiveDesc LoadPrimitive(uint index)
 {
@@ -164,7 +168,7 @@ void BuildOrthonormalBasis(float3 n, out float3 t, out float3 b)
     b = float3(c, s + n.y * n.y * a, -n.y);
 }
 
-LightSample SampleLight(float3 position, float2 u)
+LightSample SampleSun(float2 u)
 {
     LightSample ls;
     ls.distance = FLT_MAX;
@@ -191,12 +195,101 @@ LightSample SampleLight(float3 position, float2 u)
     return ls;
 }
 
-// Solid angle PDF of SampleLight producing dir.
+// Samples one light from the light buffer as seen from position. The PDF excludes the selection
+// probability. The radiance map of a textured area light is not applied.
+LightSample SampleBufferLight(GpuLight light, float3 position, float2 u)
+{
+    LightSample ls;
+    if (light.GetLightType() == kLight_Point)
+    {
+        // Isotropic point light: radiance.xyz is the intensity, so it delivers intensity / d^2.
+        float3 toLight = light.v1.xyz - position;
+        float d2 = max(dot(toLight, toLight), 1.0e-8);
+        ls.distance = sqrt(d2);
+        ls.direction = toLight / ls.distance;
+        ls.radiance = light.radiance.xyz / d2;
+        ls.pdf = 1.0;
+        ls.isDelta = true;
+        return ls;
+    }
+
+    // Area light: uniform area sampling of the triangle, emitting from the front face (counter-
+    // clockwise v1, v2, v3), converted to a solid angle PDF.
+    float3 p0 = light.v1.xyz;
+    float3 p1 = light.v2.xyz;
+    float3 p2 = light.v3.xyz;
+    float su = sqrt(u.x);
+    float b0 = 1.0 - su;
+    float b1 = u.y * su;
+    float3 p = b0 * p0 + b1 * p1 + (1.0 - b0 - b1) * p2;
+
+    float3 crossE = cross(p1 - p0, p2 - p0);
+    float twiceArea = length(crossE);
+    float3 toLight = p - position;
+    float d2 = max(dot(toLight, toLight), 1.0e-8);
+    float d = sqrt(d2);
+    ls.direction = toLight / d;
+    float cosLight = -dot(crossE, ls.direction) / twiceArea;
+
+    ls.radiance = cosLight > 0.0 ? light.radiance.xyz : float3(0.0, 0.0, 0.0);
+    ls.pdf = cosLight > 0.0 ? 2.0 * d2 / (twiceArea * cosLight) : 0.0;
+    // Stop short of the emitter so it does not shadow itself.
+    ls.distance = d * 0.999;
+    ls.isDelta = false;
+    return ls;
+}
+
+// Next event estimation: picks the sun with sunSelectProbability, otherwise one light from the
+// light buffer, and samples it. The returned PDF includes the selection probability and is 0 when
+// there is nothing to sample. The light tree only handles opaque surfaces (lights below the
+// tangent plane get no importance), so transmissive ones fall back to uniform selection.
+LightSample SampleLight(float3 position, OpenPBRBaseParams mat, OpenPBRContext ctx, float3 wo, bool opaque,
+                        float2 u, inout uint rng)
+{
+    float pSun = g_Frame.sunSelectProbability;
+    if (u.x < pSun)
+    {
+        LightSample ls = SampleSun(float2(u.x / pSun, u.y));
+        ls.pdf *= pSun;
+        return ls;
+    }
+
+    LightSample ls = (LightSample)0;
+    if (g_Frame.lightCount == 0)
+        return ls;
+
+    float uSelect = min((u.x - pSun) / (1.0 - pSun), 0.99999994);
+    uint lightIndex;
+    float pmf;
+    if (g_Frame.lightSampling == LIGHT_SAMPLING_TREE && opaque)
+    {
+        LightTreeShadingContext treeCtx = MakeLightTreeShadingContext(
+            position, mat.geometryTangent, mat.geometryBitangent, mat.geometryNormal, wo,
+            ctx.probDiffuse, ctx.probSpecR, ctx.alpha.x, ctx.alpha.y);
+        if (!SampleLightTree(g_LightTreeNodes, treeCtx, uSelect, lightIndex, pmf))
+            return ls;
+    }
+    else
+    {
+        lightIndex = min(uint(uSelect * g_Frame.lightCount), g_Frame.lightCount - 1);
+        pmf = 1.0 / g_Frame.lightCount;
+    }
+
+    GpuLight light = g_Lights[lightIndex];
+    // Only area lights need a position on the light.
+    float2 uLight = light.GetLightType() == kLight_Area ? Rand3(rng).xy : float2(0.0, 0.0);
+    ls = SampleBufferLight(light, position, uLight);
+    ls.radiance *= g_Frame.lightIntensityScale;
+    ls.pdf *= pmf * (1.0 - pSun);
+    return ls;
+}
+
+// Solid angle PDF of SampleLight producing dir towards the sky, which only the sun disc can.
 float LightPdf(float3 origin, float3 dir, HitInfo hit)
 {
     if (hit.hit || SunIsDelta())
         return 0.0;
-    return InSunDisc(dir) ? g_Frame.sunPdf : 0.0;
+    return InSunDisc(dir) ? g_Frame.sunPdf * g_Frame.sunSelectProbability : 0.0;
 }
 
 // Constant sky; the sun disc is handled separately so it can be MIS weighted.
@@ -459,7 +552,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             break;
         }
 
-        // Emission found by BSDF sampling. Emissive surfaces are not light sampled yet.
+        // Emission found by BSDF sampling. Emissive surfaces are not in the light buffer yet; once
+        // they are, weight this against NEE with LightTreePmf (needs a triangle to light map).
         if (any(hit.emission > 0.0))
             radiance += throughput * hit.emission;
 
@@ -494,7 +588,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
         // One hash covers the light sample (xy) and the Russian roulette decision (z).
         float3 lightU = Rand3(rng);
 
-        LightSample ls = SampleLight(hit.position, lightU.xy);
+        LightSample ls = SampleLight(hit.position, mat, ctx, wo, opaque, lightU.xy, rng);
         float3 neeContribution = float3(0.0, 0.0, 0.0);
         bool traceShadowRay = false;
         if (ls.pdf > 0.0 && (!opaque || dot(ls.direction, hit.Ng) > 0.0))

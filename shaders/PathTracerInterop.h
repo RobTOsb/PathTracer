@@ -25,6 +25,21 @@ struct FrameConstants
 	uint maxBounces;
 	uint sunIsDelta; // zero angular radius, cannot be hit by BSDF sampling
 	float2 jitter;
+
+	// Next event estimation picks the sun with sunSelectProbability, otherwise one of the
+	// lightCount lights in the light buffer. lightCount is 0 while the lights are switched off.
+	uint lightCount;
+	uint lightSampling; // LightSamplingMode
+	float lightIntensityScale; // multiplies every light's radiance or intensity
+	float sunSelectProbability;
+};
+
+// How next event estimation picks one light from the light buffer.
+UnscopedEnum
+enum LightSamplingMode
+{
+	LIGHT_SAMPLING_TREE = 0, // SG light tree (Tokuyoshi et al. 2024)
+	LIGHT_SAMPLING_UNIFORM = 1,
 };
 
 // glTF alphaMode, matches Scene::AlphaMode.
@@ -67,7 +82,7 @@ struct TonemapConstants
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(FrameConstants) == 320,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 336,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuMaterial) == 64, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 24, "TonemapConstants must fit the root constants");
 #endif

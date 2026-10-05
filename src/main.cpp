@@ -21,17 +21,19 @@
 #include <exception>
 #include <math.h>
 #include <memory>
+#include <random>
 #include <stdio.h>
 #include <vector>
 
 #undef min
 #undef max
 
-//constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\intel_sponza\\intelsponza.glb";
-constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
+constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\intel_sponza\\intelsponza.glb";
+// constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
 
 constexpr uint kFramesInFlight = 2;
 constexpr float kMouseSensitivity = 0.15f; // degrees per pixel
+constexpr uint32_t kTestLightCount = 8;
 
 void UpdateCamera(Window &window, Camera &camera, RenderSettings &settings, float deltaSeconds)
 {
@@ -82,6 +84,44 @@ void FrameScene(const RenderGPUScene &gpuScene, Camera &camera, RenderSettings &
 	const float distance = radius / tanf(0.5f * camera.GetFovY());
 	camera.SetPosition(float3(centre.x, centre.y, centre.z + distance));
 	settings.cameraSpeed = std::max(radius * 0.25f, 0.01f);
+}
+
+// Light tree test: point lights scattered through the scene bounds with random colours and
+// intensities. The intensities span two decades so the tree has something to sort out, and are
+// scaled so their mean gives roughly unit irradiance from all of them at half the scene radius.
+std::vector<GpuLight> CreateTestLights(const RenderGPUScene &gpuScene, uint32_t count)
+{
+	const float3 lo = gpuScene.GetBoundsMin();
+	const float3 hi = gpuScene.GetBoundsMax();
+	const float3 extent = hi - lo;
+	const float radius = std::max(0.5f * sqrtf(Dot(extent, extent)), 0.01f);
+	// Mean of a log-uniform distribution over [0.1, 10] is 9.9 / ln(100).
+	const float meanIntensity = 0.25f * radius * radius / static_cast<float>(count);
+	const float baseIntensity = meanIntensity * logf(100.0f) / 9.9f;
+
+	std::mt19937 rng(1234u);
+	std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
+
+	std::vector<GpuLight> lights;
+	lights.reserve(count);
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		// Keep clear of the outer walls, where a light would only light the outside.
+		const float3 t = { 0.05f + 0.9f * uniform(rng), 0.05f + 0.9f * uniform(rng), 0.05f + 0.9f * uniform(rng) };
+		const float3 position = lo + extent * t;
+
+		// Fully bright HSV colour with a random hue and saturation.
+		const float hue = 6.0f * uniform(rng);
+		const float saturation = 0.3f + 0.7f * uniform(rng);
+		const float3 hueColour = { std::clamp(fabsf(hue - 3.0f) - 1.0f, 0.0f, 1.0f),
+								   std::clamp(2.0f - fabsf(hue - 2.0f), 0.0f, 1.0f),
+								   std::clamp(2.0f - fabsf(hue - 4.0f), 0.0f, 1.0f) };
+		const float3 colour = float3(1.0f, 1.0f, 1.0f) * (1.0f - saturation) + hueColour * saturation;
+
+		const float intensity = baseIntensity * powf(10.0f, 2.0f * uniform(rng) - 1.0f);
+		lights.push_back(MakePointLight(colour * intensity, position, 0.0f));
+	}
+	return lights;
 }
 
 void BuildPasses(RenderContext *renderContext,
@@ -135,14 +175,15 @@ void BuildPasses(RenderContext *renderContext,
 		passes.push_back(std::move(pathTracer));
 	}
 	passes.push_back(std::make_unique<TonemapPass>(renderContext, radiance, settings));
-	passes.push_back(std::make_unique<ImGuiPass>(settings, camera, ngx.IsRayReconstructionSupported()));
+	passes.push_back(std::make_unique<ImGuiPass>(settings, camera, ngx.IsRayReconstructionSupported(), gpuScene.GetLightCount()));
 }
 
 int Run(const char *scenePath)
 {
 	Window window(WindowDesc{ "PathTracer", 1920, 1080, true });
 
-	std::unique_ptr<RenderContext> renderContext(CreateRenderContext(&window, RenderAPI::D3D12, kFramesInFlight, false, true));
+	std::unique_ptr<RenderContext> renderContext(
+			CreateRenderContext(&window, RenderAPI::D3D12, kFramesInFlight, false, true));
 	renderContext->CreatePerFrameResources();
 	renderContext->InitialiseImgui(window.GetNativeWindow());
 
@@ -174,6 +215,10 @@ int Run(const char *scenePath)
 		loge("Scene '{}' has no renderable triangle geometry", scenePath);
 		return 1;
 	}
+
+	// The scene has no lights of its own yet, so the light tree gets the test lights, also built
+	// once at start up.
+	gpuScene.BuildLights(CreateTestLights(gpuScene, kTestLightCount));
 
 	RenderSettings settings;
 	Camera camera(90.0f, window.GetAspectRatio(), 0.01f, 1000.0f, false, true);

@@ -22,10 +22,19 @@ struct SunSettings
 	}
 };
 
+// The point and area lights in the scene's light buffer.
+struct LightSettings
+{
+	bool enabled = true;
+	float intensityScale = 1.0f; // multiplies every light, so the tree does not need rebuilding
+	LightSamplingMode sampling = LIGHT_SAMPLING_TREE;
+};
+
 // Everything the UI can tweak; passes read it every frame.
 struct RenderSettings
 {
 	SunSettings sun;
+	LightSettings lights;
 
 	float3 skyColour = { 0.45f, 0.65f, 1.0f };
 	float skyIntensity = 1.0f;
