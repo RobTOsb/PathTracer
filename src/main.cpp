@@ -24,8 +24,11 @@
 #include <stdio.h>
 #include <vector>
 
-constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\intel_sponza\\intelsponza.glb";
-// constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
+#undef min
+#undef max
+
+//constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\intel_sponza\\intelsponza.glb";
+constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
 
 constexpr uint kFramesInFlight = 2;
 constexpr float kMouseSensitivity = 0.15f; // degrees per pixel
@@ -45,12 +48,6 @@ void UpdateCamera(Window &window, Camera &camera, RenderSettings &settings, floa
 	if (wheel != 0.0f)
 	{
 		settings.cameraSpeed = std::clamp(settings.cameraSpeed * powf(1.2f, wheel), 0.01f, 1000.0f);
-	}
-
-	const ImGuiIO &io = ImGui::GetIO();
-	if (io.WantCaptureKeyboard)
-	{
-		return;
 	}
 
 	float distance = settings.cameraSpeed * deltaSeconds;
@@ -87,9 +84,6 @@ void FrameScene(const RenderGPUScene &gpuScene, Camera &camera, RenderSettings &
 	settings.cameraSpeed = std::max(radius * 0.25f, 0.01f);
 }
 
-// (Re)builds the frame's passes for the current DLSS settings. DLSS-RR picks the render resolution
-// for its mode; without it, or when it is unavailable, the path tracer runs at the window size.
-// The GPU must be idle, since the old passes' resources are destroyed here.
 void BuildPasses(RenderContext *renderContext,
 				 NGXContext &ngx,
 				 const RenderGPUScene &gpuScene,
@@ -126,7 +120,12 @@ void BuildPasses(RenderContext *renderContext,
 	ResourceHandle radiance = pathTracer->GetOutput();
 	if (rayReconstruction)
 	{
-		auto dlss = std::make_unique<DLSSPass>(renderContext, ngx, *pathTracer, camera, settings.dlssMode, settings.rrPreset);
+		auto dlss = std::make_unique<DLSSPass>(renderContext,
+											   ngx,
+											   *pathTracer,
+											   camera,
+											   settings.dlssMode,
+											   settings.rrPreset);
 		radiance = dlss->GetOutput();
 		passes.push_back(std::move(pathTracer));
 		passes.push_back(std::move(dlss));
@@ -143,7 +142,7 @@ int Run(const char *scenePath)
 {
 	Window window(WindowDesc{ "PathTracer", 1920, 1080, true });
 
-	std::unique_ptr<RenderContext> renderContext(CreateRenderContext(&window, RenderAPI::D3D12, kFramesInFlight));
+	std::unique_ptr<RenderContext> renderContext(CreateRenderContext(&window, RenderAPI::D3D12, kFramesInFlight, false, true));
 	renderContext->CreatePerFrameResources();
 	renderContext->InitialiseImgui(window.GetNativeWindow());
 

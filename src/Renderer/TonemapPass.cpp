@@ -8,6 +8,7 @@
 namespace
 {
 	constexpr uint32_t kGroupSize = 8;
+	constexpr float kPaperWhiteNits = 203.0f; // BT.2408 reference white for HDR10
 }
 
 TonemapPass::TonemapPass(RenderContext *renderContext, ResourceHandle hdrInput, const RenderSettings &settings) :
@@ -57,6 +58,8 @@ void TonemapPass::Execute(RenderContext *renderContext)
 	constants.toneMapOperator = static_cast<uint>(settings_.toneMapOperator);
 	constants.width = width_;
 	constants.height = height_;
+	constants.hdr10 = renderContext->GetUseHDR() ? 1u : 0u;
+	constants.paperWhiteNits = kPaperWhiteNits;
 
 	renderContext->SetComputePipeline(pipeline_);
 	renderContext->SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));

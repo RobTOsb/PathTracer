@@ -64,6 +64,29 @@ float3 LinearToSRGB(float3 c)
     return select(c <= 0.0031308, c * 12.92, 1.055 * pow(c, 1.0 / 2.4) - 0.055);
 }
 
+// Rec.709 primaries => Rec.2020 primaries (linear).
+float3 Rec709ToRec2020(float3 c)
+{
+    const float3x3 m = float3x3(
+        0.6274040, 0.3292820, 0.0433136,
+        0.0690970, 0.9195400, 0.0113612,
+        0.0163916, 0.0880132, 0.8955950);
+    return mul(m, c);
+}
+
+// SMPTE ST 2084 inverse EOTF. Input is absolute luminance in nits.
+float3 LinearToPQ(float3 nits)
+{
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+
+    float3 y = pow(saturate(nits / 10000.0), m1);
+    return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
+}
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -87,6 +110,13 @@ void main(uint3 id : SV_DispatchThreadID)
         default:
             colour = ACESFitted(colour);
             break;
+    }
+
+    if (g_PushConstants.hdr10 != 0)
+    {
+        float3 nits = Rec709ToRec2020(max(colour, 0.0)) * g_PushConstants.paperWhiteNits;
+        g_Output[id.xy] = float4(LinearToPQ(nits), 1.0);
+        return;
     }
 
     g_Output[id.xy] = float4(LinearToSRGB(colour), 1.0);
