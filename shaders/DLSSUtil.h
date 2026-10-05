@@ -126,7 +126,7 @@ INLINE float2 sampleDelta(uint32_t frameIndex)
 	float2 delta;
 	delta.x = wangHash(frameIndex) / float(~0u);
 	delta.y = wangHash(frameIndex * 2) / float(~0u);
-	return delta - float2(0.5f);
+	return delta - float2(0.5f, 0.5f);
 }
 
 INLINE float2 dlssJitter(uint32_t frameIndex)

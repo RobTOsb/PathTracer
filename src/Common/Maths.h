@@ -63,6 +63,11 @@ inline void StoreFloat4x4(float4x4 &f4x4, SIMDMatrix mat)
 }
 
 // Vector operations
+inline float2 operator-(const float2 &a, const float2 &b)
+{
+	return float2(a.x - b.x, a.y - b.y);
+}
+
 inline float3 operator+(const float3 &a, const float3 &b)
 {
 	float3 result;

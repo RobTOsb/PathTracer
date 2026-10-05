@@ -4,6 +4,8 @@
 #include "RenderSettings.h"
 #include "Scene/RenderGPUScene.h"
 
+#include "DLSSUtil.h"
+
 #include <math.h>
 #include <stdexcept>
 
@@ -12,13 +14,22 @@ namespace
 	// Must cover HitPayload in PathTracer.slang (14 x 4 bytes). The driver sizes the ray stack from
 	// this, so keep it tight.
 	constexpr uint32_t kMaxPayloadSizeInBytes = 56;
+
+	// Halton phases before the jitter repeats. The DLSS guide asks for 8 * (output / render)^2, so
+	// 72 at Ultra Performance, and the RR guide for at least 32 with no reason to limit it.
+	constexpr uint32_t kJitterPhaseCount = 128;
 } // namespace
 
 PathTracerPass::PathTracerPass(RenderContext *renderContext,
 							   const RenderGPUScene &scene,
 							   const Camera &camera,
-							   const RenderSettings &settings) :
-	renderContext_(renderContext), scene_(scene), camera_(camera), settings_(settings)
+							   const RenderSettings &settings,
+							   bool rayReconstruction) :
+	renderContext_(renderContext),
+	scene_(scene),
+	camera_(camera),
+	settings_(settings),
+	rayReconstruction_(rayReconstruction)
 {
 	RaytracingPipelineDesc desc = {};
 	desc.exports = { "RayGen", "Miss", "ClosestHit", "ShadowMiss", "ShadowClosestHit", "ShadowAnyHit" };
@@ -27,6 +38,10 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 	desc.maxPayloadSizeInBytes = kMaxPayloadSizeInBytes;
 	desc.maxAttributeSizeInBytes = 8; // triangle barycentrics
 	desc.maxTraceRecursionDepth = 1; // primary and shadow rays are both traced from raygen
+	if (rayReconstruction_)
+	{
+		desc.defines = { "DLSS_RR" };
+	}
 
 	pipeline_ = renderContext->CreateRaytracingPipeline(PATHTRACER_SHADER_DIR "PathTracer.slang", desc);
 	if (pipeline_ == InvalidPipelineHandle)
@@ -46,13 +61,17 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 	width_ = renderContext->GetRenderWidth();
 	height_ = renderContext->GetRenderHeight();
 
-	TextureDesc outputDesc = {};
-	outputDesc.width = width_;
-	outputDesc.height = height_;
-	outputDesc.format = Format::R16G16B16A16_FLOAT;
-	outputDesc.usageFlags = ResourceUsageFlags::UnorderedAccess;
-	outputDesc.debugName = "PathTracer_Radiance";
-	output_ = renderContext->CreateTexture(outputDesc, ResourceViewType::UnorderedAccess).handle;
+	output_ = CreateTarget(Format::R16G16B16A16_FLOAT, "PathTracer_Radiance");
+
+	if (rayReconstruction_)
+	{
+		guides_.diffuseAlbedo = CreateTarget(Format::R8G8B8A8_UNORM, "PathTracer_DiffuseAlbedo");
+		guides_.specularAlbedo = CreateTarget(Format::R16G16B16A16_FLOAT, "PathTracer_SpecularAlbedo");
+		guides_.normalRoughness = CreateTarget(Format::R16G16B16A16_FLOAT, "PathTracer_NormalRoughness");
+		guides_.motionVectors = CreateTarget(Format::R16G16_FLOAT, "PathTracer_MotionVectors");
+		guides_.depth = CreateTarget(Format::R32_FLOAT, "PathTracer_Depth");
+		guides_.specularHitDistance = CreateTarget(Format::R16_FLOAT, "PathTracer_SpecularHitDistance");
+	}
 
 	frameConstants_.resize(renderContext->GetFramesInFlight());
 	for (ResourceHandle &constants: frameConstants_)
@@ -63,11 +82,34 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 
 PathTracerPass::~PathTracerPass()
 {
-	renderContext_->DestroyResource(output_);
+	for (ResourceHandle target: { output_,
+								  guides_.diffuseAlbedo,
+								  guides_.specularAlbedo,
+								  guides_.normalRoughness,
+								  guides_.motionVectors,
+								  guides_.depth,
+								  guides_.specularHitDistance })
+	{
+		if (target != InvalidResourceHandle)
+		{
+			renderContext_->DestroyResource(target);
+		}
+	}
 	for (ResourceHandle constants: frameConstants_)
 	{
 		renderContext_->DestroyResource(constants);
 	}
+}
+
+ResourceHandle PathTracerPass::CreateTarget(Format format, const char *debugName) const
+{
+	TextureDesc desc = {};
+	desc.width = width_;
+	desc.height = height_;
+	desc.format = format;
+	desc.usageFlags = ResourceUsageFlags::UnorderedAccess;
+	desc.debugName = debugName;
+	return renderContext_->CreateTexture(desc, ResourceViewType::UnorderedAccess).handle;
 }
 
 void PathTracerPass::Execute(RenderContext *renderContext)
@@ -77,9 +119,16 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		return;
 	}
 
+	// Index 0 of the Halton sequence is the pixel corner, so start at 1.
+	jitter_ = rayReconstruction_ ? dlssJitter(jitterIndex_ % kJitterPhaseCount + 1) : float2(0.0f, 0.0f);
+	++jitterIndex_;
+
 	FrameConstants constants = {};
 	constants.invView = InvertMatrix(camera_.GetViewMatrix());
 	constants.invProj = InvertMatrix(camera_.GetProjectionMatrix());
+	constants.viewProj = camera_.GetViewMatrix() * camera_.GetProjectionMatrix();
+	constants.prevViewProj = camera_.GetPreviousViewMatrix() * camera_.GetPreviousProjectionMatrix();
+	constants.jitter = jitter_;
 
 	// Sun disc of angular radius r. 1 - cos(r) = 2 sin^2(r / 2) stays accurate for the tiny
 	// physical sun; the disc's radiance is its irradiance spread over the solid angle.
@@ -108,10 +157,22 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	renderContext->BeginEvent("PathTracer");
 	renderContext->BeginProfileScope("PathTracer");
 
-	renderContext->TransitionResource(output_,
-									  ResourceLayout::UnorderedAccess,
-									  ResourceSync::Raytracing,
-									  ResourceAccess::UnorderedAccess);
+	// The output and then the guides, in their u0..u6 register order.
+	const ResourceHandle targets[] = { output_,
+									   guides_.diffuseAlbedo,
+									   guides_.specularAlbedo,
+									   guides_.normalRoughness,
+									   guides_.motionVectors,
+									   guides_.depth,
+									   guides_.specularHitDistance };
+	const uint32_t targetCount = rayReconstruction_ ? 7 : 1;
+	for (uint32_t i = 0; i < targetCount; ++i)
+	{
+		renderContext->TransitionResource(targets[i],
+										  ResourceLayout::UnorderedAccess,
+										  ResourceSync::Raytracing,
+										  ResourceAccess::UnorderedAccess);
+	}
 
 	renderContext->SetRaytracingPipeline(pipeline_);
 	renderContext->SetRaytracingConstantBuffer(0, constantBuffer);
@@ -124,7 +185,10 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	renderContext->SetRaytracingSRV(5, scene_.GetStreamBuffer(GPUStream::TexCoord0));
 	renderContext->SetRaytracingSRV(6, scene_.GetStreamBuffer(GPUStream::Tangent));
 	renderContext->SetRaytracingSRV(7, scene_.GetMaterialBuffer());
-	renderContext->SetRaytracingUAV(0, output_);
+	for (uint32_t i = 0; i < targetCount; ++i)
+	{
+		renderContext->SetRaytracingUAV(i, targets[i]);
+	}
 	renderContext->DispatchRays(shaderTable_, width_, height_, 1);
 
 	renderContext->EndProfileScope();

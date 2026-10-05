@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DLSSCommon.h"
 #include "PathTracerInterop.h"
 
 #include <math.h>
@@ -29,10 +30,13 @@ struct RenderSettings
 	float3 skyColour = { 0.45f, 0.65f, 1.0f };
 	float skyIntensity = 1.0f;
 
-	int maxBounces = 6; // indirect bounces after the primary hit, 0 = direct lighting only
+	int maxBounces = 8;
 
 	float exposureEV = 0.0f;
 	ToneMappingOperator toneMapOperator = TONEMAP_ACES_FITTED;
+
+	DLSSMode dlssMode = DLSSMode::MaxQuality;
+	DLSSRayReconstructionPreset rrPreset = DLSSRayReconstructionPreset::PresetF;
 
 	float cameraSpeed = 5.0f; // world units per second
 };

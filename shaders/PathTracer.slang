@@ -1,4 +1,5 @@
 #include "PathTracerInterop.h"
+#include "DLSSUtil.h"
 
 import OpenPBRBaseSubstrate;
 
@@ -7,7 +8,18 @@ import OpenPBRBaseSubstrate;
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 RaytracingAccelerationStructure g_Scene : register(t0);
 RWTexture2D<float4> g_Output : register(u0);
-SamplerState g_LinearWrap : register(s3); 
+SamplerState g_LinearWrap : register(s3);
+
+// DLSS Ray Reconstruction guide buffers, all at render resolution. PathTracerPass compiles this
+// permutation (and binds these) only while DLSS-RR is enabled.
+#ifdef DLSS_RR
+RWTexture2D<float4> g_DiffuseAlbedo : register(u1);
+RWTexture2D<float4> g_SpecularAlbedo : register(u2);
+RWTexture2D<float4> g_NormalRoughness : register(u3); // world-space shading normal, .w = linear roughness
+RWTexture2D<float2> g_MotionVectors : register(u4);   // render pixels, current to previous
+RWTexture2D<float> g_Depth : register(u5);            // hardware depth, reversed Z
+RWTexture2D<float> g_SpecularHitDistance : register(u6);
+#endif
 
 struct PrimitiveDesc
 {
@@ -360,8 +372,55 @@ float3 OffsetRay(float3 p, float3 Ng, float3 dir)
 
 static const uint RR_START_BOUNCE = 1;
 
-float3 TracePath(float3 origin, float3 dir, inout uint rng)
+// FP16_MAX, what DLSS-RR expects as the specular hit distance of sky pixels.
+static const float SKY_HIT_DISTANCE = 65504.0;
+
+// What DLSS-RR needs to know about the primary surface. Defaults are the sky values from the RR
+// integration guide, so a primary miss leaves them as they are.
+struct PrimaryGuides
 {
+    float4 position; // homogeneous world position, w = 0 for the sky (a direction at infinity)
+    float3 diffuseAlbedo;
+    float3 specularAlbedo;
+    float3 normal;
+    float roughness;
+    float specularHitDistance; // world-space length of the primary specular reflection ray
+};
+
+PrimaryGuides DefaultGuides(float3 dir)
+{
+    PrimaryGuides g;
+    g.position = float4(dir, 0.0);
+    g.diffuseAlbedo = float3(0.5, 0.5, 0.5);
+    g.specularAlbedo = float3(0.0, 0.0, 0.0);
+    g.normal = float3(0.0, 0.0, 0.0);
+    g.roughness = 0.0;
+    g.specularHitDistance = SKY_HIT_DISTANCE;
+    return g;
+}
+
+// Directional reflectance of an OpenPBR base, split into its diffuse and specular parts.
+void ReflectanceGuides(OpenPBRBaseParams p, float3 wo, inout PrimaryGuides g)
+{
+    float M = p.baseMetalness;
+    float3 baseColour = p.baseWeight * p.baseColour;
+
+    float etaS = ModulatedIORRatio(p.specularIor, p.specularWeight);
+    float dielectricF0 = (1.0 - etaS) / (1.0 + etaS);
+    dielectricF0 *= dielectricF0;
+    float3 F0 = lerp(dielectricF0 * p.specularColour, p.specularWeight * baseColour, M);
+
+    float NdotV = dot(p.geometryNormal, wo);
+    float roughness = p.specularRoughness;
+    g.specularAlbedo = EnvBRDFApprox2(F0, roughness * roughness, NdotV);
+    g.diffuseAlbedo = (1.0 - M) * (1.0 - p.transmissionWeight) * lerp(baseColour, p.subsurfaceColour, p.subsurfaceWeight);
+}
+
+float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides guides)
+{
+    guides = DefaultGuides(dir);
+    bool primarySpecular = false;
+
     float3 radiance = float3(0.0, 0.0, 0.0);
     float3 throughput = float3(1.0, 1.0, 1.0);
     float3 segmentExtinction = float3(0.0, 0.0, 0.0);
@@ -373,6 +432,9 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
     for (uint bounce = 0; bounce < maxSegments; ++bounce)
     {
         HitInfo hit = TraceClosest(origin, dir);
+
+        if (bounce == 1 && primarySpecular)
+            guides.specularHitDistance = hit.hit ? hit.t : SKY_HIT_DISTANCE;
 
         // Absorption along the segment just travelled, if it was inside a medium.
         if (any(segmentExtinction > 0.0))
@@ -419,6 +481,16 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         OpenPBRContext ctx = OpenPBRSetup(mat, wo);
         float3 extinction = MediumExtinction(mat);
 
+        if (bounce == 0)
+        {
+            guides.position = float4(hit.position, 1.0);
+            guides.normal = mat.geometryNormal;
+            guides.roughness = mat.specularRoughness;
+            // Stays 0 (no reflection data) unless the path continues with a specular reflection.
+            guides.specularHitDistance = 0.0;
+            ReflectanceGuides(mat, wo, guides);
+        }
+
         // One hash covers the light sample (xy) and the Russian roulette decision (z).
         float3 lightU = Rand3(rng);
 
@@ -447,6 +519,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             continuePath = bs.lobe != LOBE_NONE;
             if (continuePath)
             {
+                primarySpecular = bounce == 0 && bs.lobe == LOBE_SPECULAR_REFLECTION;
                 throughput *= bs.weight;
                 prevBsdfPdf = bs.pdf;
 
@@ -486,15 +559,41 @@ void RayGen()
     uint2 dims = DispatchRaysDimensions().xy;
     uint rng = RngInit(g_Frame.frameIndex);
 
+#ifdef DLSS_RR
+    // Every pixel shares this frame's jitter, which DLSS is told about separately.
+    float2 subpixel = 0.5 + g_Frame.jitter;
+#else
+    float2 subpixel = Rand3(rng).xy;
+#endif
+
     float3 origin, dir;
-    GenerateCameraRay(pixel, Rand3(rng).xy, origin, dir);
-    float3 L = TracePath(origin, dir, rng);
+    GenerateCameraRay(pixel, subpixel, origin, dir);
+    PrimaryGuides guides;
+    float3 L = TracePath(origin, dir, rng, guides);
 
     // A single bad sample would otherwise stick in any temporal filter downstream.
     if (any(isnan(L)) || any(isinf(L)))
         L = float3(0.0, 0.0, 0.0);
 
     g_Output[pixel] = float4(L, 1.0);
+
+#ifdef DLSS_RR
+    // Static scene, so the primary point was in the same place last frame and only the camera
+    // moved. CalculateMotionVector works in NDC, whose +y is up in D3D, while DLSS wants +y down.
+    float2 motion = CalculateMotionVector(guides.position, guides.position, g_Frame.prevViewProj, g_Frame.viewProj, float2(dims));
+    motion.y = -motion.y;
+
+    // Reversed Z: the sky sits on the far plane at 0.
+    float4 clip = mul(guides.position, g_Frame.viewProj);
+    float depth = guides.position.w > 0.0 ? clip.z / clip.w : 0.0;
+
+    g_DiffuseAlbedo[pixel] = float4(guides.diffuseAlbedo, 1.0);
+    g_SpecularAlbedo[pixel] = float4(guides.specularAlbedo, 1.0);
+    g_NormalRoughness[pixel] = float4(guides.normal, guides.roughness);
+    g_MotionVectors[pixel] = motion;
+    g_Depth[pixel] = depth;
+    g_SpecularHitDistance[pixel] = guides.specularHitDistance;
+#endif
 }
 
 [shader("miss")]

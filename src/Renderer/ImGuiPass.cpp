@@ -22,6 +22,53 @@ namespace
 		{ TONEMAP_OFF, "Off (clamp)" },
 	};
 
+	template<typename T>
+	struct ComboEntry
+	{
+		T value;
+		const char *name;
+	};
+
+	constexpr ComboEntry<DLSSMode> kDLSSModes[] = {
+		{ DLSSMode::Off, "Off" },
+		{ DLSSMode::DLAA, "DLAA" },
+		{ DLSSMode::MaxQuality, "Quality" },
+		{ DLSSMode::Balanced, "Balanced" },
+		{ DLSSMode::MaxPerformance, "Performance" },
+		{ DLSSMode::UltraPerformance, "Ultra Performance" },
+	};
+
+	constexpr ComboEntry<DLSSRayReconstructionPreset> kRRPresets[] = {
+		{ DLSSRayReconstructionPreset::Default, "Default" },
+		{ DLSSRayReconstructionPreset::PresetD, "D" },
+		{ DLSSRayReconstructionPreset::PresetE, "E" },
+		{ DLSSRayReconstructionPreset::PresetF, "F" },
+	};
+
+	template<typename T, size_t Count>
+	void EnumCombo(const char *label, const ComboEntry<T> (&entries)[Count], T &value)
+	{
+		size_t current = 0;
+		for (size_t i = 0; i < Count; ++i)
+		{
+			if (entries[i].value == value)
+			{
+				current = i;
+			}
+		}
+		if (ImGui::BeginCombo(label, entries[current].name))
+		{
+			for (size_t i = 0; i < Count; ++i)
+			{
+				if (ImGui::Selectable(entries[i].name, i == current))
+				{
+					value = entries[i].value;
+				}
+			}
+			ImGui::EndCombo();
+		}
+	}
+
 	void ProfileRow(RenderContext *renderContext, const char *scope)
 	{
 		if (const GPUProfileScopeStats *stats = renderContext->GetProfileScopeStats(scope))
@@ -31,7 +78,8 @@ namespace
 	}
 } // namespace
 
-ImGuiPass::ImGuiPass(RenderSettings &settings, const Camera &camera) : settings_(settings), camera_(camera)
+ImGuiPass::ImGuiPass(RenderSettings &settings, const Camera &camera, bool rayReconstructionSupported) :
+	settings_(settings), camera_(camera), rayReconstructionSupported_(rayReconstructionSupported)
 {
 }
 
@@ -66,13 +114,31 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	}
 
 	const ImGuiIO &io = ImGui::GetIO();
-	ImGui::Text("%.1f fps (%.2f ms)  %ux%u, 1 spp",
+	ImGui::Text("%.1f fps (%.2f ms)  %ux%u -> %ux%u, 1 spp",
 				io.Framerate,
 				1000.0f / io.Framerate,
 				renderContext->GetRenderWidth(),
-				renderContext->GetRenderHeight());
+				renderContext->GetRenderHeight(),
+				renderContext->GetWindowWidth(),
+				renderContext->GetWindowHeight());
 	ProfileRow(renderContext, "PathTracer");
+	if (settings_.dlssMode != DLSSMode::Off)
+	{
+		ProfileRow(renderContext, "DLSS-RR");
+	}
 	ProfileRow(renderContext, "Tonemap");
+
+	if (ImGui::CollapsingHeader("DLSS Ray Reconstruction", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		if (!rayReconstructionSupported_)
+		{
+			ImGui::TextDisabled("Not supported on this GPU/driver (see the NGX log)");
+		}
+		ImGui::BeginDisabled(!rayReconstructionSupported_);
+		EnumCombo("Mode", kDLSSModes, settings_.dlssMode);
+		EnumCombo("Preset", kRRPresets, settings_.rrPreset);
+		ImGui::EndDisabled();
+	}
 
 	if (ImGui::CollapsingHeader("Sun", ImGuiTreeNodeFlags_DefaultOpen))
 	{

@@ -1,8 +1,11 @@
 #include "Camera.h"
+#include "D3D12RenderContext.h"
+#include "DLSSCommon.h"
 #include "GLTFScene.h"
 #include "RenderContext.h"
 #include "Window.h"
 
+#include "Renderer/DLSSPass.h"
 #include "Renderer/ImGuiPass.h"
 #include "Renderer/PathTracerPass.h"
 #include "Renderer/RenderPass.h"
@@ -21,8 +24,8 @@
 #include <stdio.h>
 #include <vector>
 
-// constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\intel_sponza\\intelsponza.glb";
-constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
+constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\intel_sponza\\intelsponza.glb";
+// constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
 
 constexpr uint kFramesInFlight = 2;
 constexpr float kMouseSensitivity = 0.15f; // degrees per pixel
@@ -84,6 +87,58 @@ void FrameScene(const RenderGPUScene &gpuScene, Camera &camera, RenderSettings &
 	settings.cameraSpeed = std::max(radius * 0.25f, 0.01f);
 }
 
+// (Re)builds the frame's passes for the current DLSS settings. DLSS-RR picks the render resolution
+// for its mode; without it, or when it is unavailable, the path tracer runs at the window size.
+// The GPU must be idle, since the old passes' resources are destroyed here.
+void BuildPasses(RenderContext *renderContext,
+				 NGXContext &ngx,
+				 const RenderGPUScene &gpuScene,
+				 const Camera &camera,
+				 RenderSettings &settings,
+				 std::vector<std::unique_ptr<RenderPass>> &passes)
+{
+	passes.clear();
+
+	DLSSOptimalSettings optimal;
+	const bool rayReconstruction = settings.dlssMode != DLSSMode::Off && ngx.IsRayReconstructionSupported() &&
+								   ngx.GetOptimalSettings(DLSSFeatureKind::RayReconstruction,
+														  settings.dlssMode,
+														  renderContext->GetWindowWidth(),
+														  renderContext->GetWindowHeight(),
+														  optimal);
+	if (rayReconstruction)
+	{
+		renderContext->SetRenderResolution(optimal.optimalRenderWidth, optimal.optimalRenderHeight);
+	}
+	else
+	{
+		settings.dlssMode = DLSSMode::Off;
+		renderContext->SetRenderResolution(0, 0);
+	}
+	logi("Render resolution {}x{}, output {}x{}, DLSS-RR {}",
+		 renderContext->GetRenderWidth(),
+		 renderContext->GetRenderHeight(),
+		 renderContext->GetWindowWidth(),
+		 renderContext->GetWindowHeight(),
+		 rayReconstruction ? "on" : "off");
+
+	auto pathTracer = std::make_unique<PathTracerPass>(renderContext, gpuScene, camera, settings, rayReconstruction);
+	ResourceHandle radiance = pathTracer->GetOutput();
+	if (rayReconstruction)
+	{
+		auto dlss = std::make_unique<DLSSPass>(renderContext, ngx, *pathTracer, camera, settings.dlssMode, settings.rrPreset);
+		radiance = dlss->GetOutput();
+		passes.push_back(std::move(pathTracer));
+		passes.push_back(std::move(dlss));
+	}
+	else
+	{
+		passes.push_back(std::move(pathTracer));
+	}
+	passes.push_back(std::make_unique<TonemapPass>(renderContext, radiance, settings));
+	passes.push_back(std::make_unique<ImGuiPass>(settings, camera, ngx.IsRayReconstructionSupported()));
+}
+
 int Run(const char *scenePath)
 {
 	Window window(WindowDesc{ "PathTracer", 1920, 1080, true });
@@ -125,12 +180,15 @@ int Run(const char *scenePath)
 	Camera camera(90.0f, window.GetAspectRatio(), 0.01f, 1000.0f, false, true);
 	FrameScene(gpuScene, camera, settings);
 
+	// Declared before the passes so it outlives the DLSS feature they use. Without it (no NVIDIA
+	// GPU, old driver, missing nvngx_dlssd.dll) DLSS-RR is simply unavailable.
+	NGXContext ngx;
+	ngx.Initialise(static_cast<D3D12RenderContext *>(renderContext.get())->GetDevice());
+
 	std::vector<std::unique_ptr<RenderPass>> passes;
-	auto pathTracer = std::make_unique<PathTracerPass>(renderContext.get(), gpuScene, camera, settings);
-	const ResourceHandle radiance = pathTracer->GetOutput();
-	passes.push_back(std::move(pathTracer));
-	passes.push_back(std::make_unique<TonemapPass>(renderContext.get(), radiance, settings));
-	passes.push_back(std::make_unique<ImGuiPass>(settings, camera));
+	BuildPasses(renderContext.get(), ngx, gpuScene, camera, settings, passes);
+	DLSSMode builtMode = settings.dlssMode;
+	DLSSRayReconstructionPreset builtPreset = settings.rrPreset;
 
 	auto lastTime = std::chrono::steady_clock::now();
 	while (window.ProcessEvents())
@@ -139,6 +197,18 @@ int Run(const char *scenePath)
 		const float deltaSeconds = std::chrono::duration<float>(now - lastTime).count();
 		lastTime = now;
 
+		// The UI changes these while the previous frame is recorded, so they apply from here.
+		if (settings.dlssMode != builtMode || settings.rrPreset != builtPreset)
+		{
+			renderContext->WaitForGPUIdle();
+			ngx.ReleaseFeature();
+			BuildPasses(renderContext.get(), ngx, gpuScene, camera, settings, passes);
+			builtMode = settings.dlssMode;
+			builtPreset = settings.rrPreset;
+		}
+
+		// Last frame's matrices, for the motion vectors.
+		camera.UpdatePreviousMatrices();
 		UpdateCamera(window, camera, settings, deltaSeconds);
 
 		renderContext->BeginFrame();

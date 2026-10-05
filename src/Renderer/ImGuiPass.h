@@ -5,13 +5,11 @@
 class Camera;
 struct RenderSettings;
 
-// Builds the settings UI and draws ImGui on top of the back buffer. Edits to RenderSettings take
-// effect from the next frame, since the passes before this one have already been recorded.
-// Leaves the back buffer in the RenderTarget layout.
 class ImGuiPass final : public RenderPass
 {
 public:
-	ImGuiPass(RenderSettings &settings, const Camera &camera);
+	// rayReconstructionSupported greys out the DLSS controls when NGX reports no DLSS-RR.
+	ImGuiPass(RenderSettings &settings, const Camera &camera, bool rayReconstructionSupported);
 
 	void Execute(RenderContext *renderContext) override;
 
@@ -20,4 +18,5 @@ private:
 
 	RenderSettings &settings_;
 	const Camera &camera_;
+	const bool rayReconstructionSupported_;
 };

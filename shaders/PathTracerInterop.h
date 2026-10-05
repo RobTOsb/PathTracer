@@ -8,6 +8,9 @@ struct FrameConstants
 {
 	RowMajor float4x4 invView;
 	RowMajor float4x4 invProj;
+	// Unjittered view-projections for the DLSS-RR depth and motion vector guides.
+	RowMajor float4x4 viewProj;
+	RowMajor float4x4 prevViewProj;
 
 	// Directional sun: a uniform disc of angular radius r around sunDirection. Everything derived
 	// from the light settings is computed once on the CPU rather than per sample.
@@ -21,8 +24,7 @@ struct FrameConstants
 
 	uint maxBounces;
 	uint sunIsDelta; // zero angular radius, cannot be hit by BSDF sampling
-	uint pad0;
-	uint pad1;
+	float2 jitter;
 };
 
 // glTF alphaMode, matches Scene::AlphaMode.
@@ -63,7 +65,7 @@ struct TonemapConstants
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(FrameConstants) == 192, "FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 320,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuMaterial) == 64, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 16, "TonemapConstants must fit the root constants");
 #endif
