@@ -34,7 +34,7 @@ DLSSPass::DLSSPass(RenderContext *renderContext,
 	desc.format = Format::R16G16B16A16_FLOAT;
 	desc.usageFlags = ResourceUsageFlags::UnorderedAccess;
 	desc.debugName = "DLSS_Output";
-	output_ = renderContext->CreateTexture(desc, ResourceViewType::UnorderedAccess).handle;
+	output_ = renderContext->CreateTexture(desc, ResourceViewType::UnorderedAccess);
 }
 
 DLSSPass::~DLSSPass()

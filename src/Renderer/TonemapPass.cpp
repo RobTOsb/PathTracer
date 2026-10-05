@@ -30,7 +30,7 @@ TonemapPass::TonemapPass(RenderContext *renderContext, ResourceHandle hdrInput, 
 	desc.format = renderContext->GetBackBufferFormat();
 	desc.usageFlags = ResourceUsageFlags::UnorderedAccess;
 	desc.debugName = "Tonemap_LDR";
-	ldrOutput_ = renderContext->CreateTexture(desc, ResourceViewType::UnorderedAccess).handle;
+	ldrOutput_ = renderContext->CreateTexture(desc, ResourceViewType::UnorderedAccess);
 }
 
 TonemapPass::~TonemapPass()

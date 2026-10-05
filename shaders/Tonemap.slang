@@ -1,5 +1,3 @@
-// Exposure + tone mapping + sRGB encode of the path tracer's HDR radiance into the LDR image that
-// gets copied to the (UNORM, non-sRGB) back buffer.
 
 #include "PathTracerInterop.h"
 

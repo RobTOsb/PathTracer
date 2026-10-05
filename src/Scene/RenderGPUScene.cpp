@@ -233,7 +233,7 @@ void RenderGPUScene::ComputeBounds(const Scene::GLTFScene &scene)
 	boundsMax_ = hi;
 }
 
-ResourceViewInfo RenderGPUScene::UploadStream(
+ResourceHandle RenderGPUScene::UploadStream(
 		const void *data, uint64_t sizeInBytes, uint32_t stride, const char *debugName, UploadBatchHandle batch)
 {
 	BufferDesc desc = {};
@@ -272,20 +272,19 @@ void RenderGPUScene::UploadStreams(UploadBatchHandle batch)
 		{
 			continue; // stays InvalidResourceDescriptorIndex
 		}
-		const ResourceViewInfo view = UploadStream(source.data, source.sizeInBytes, source.stride, source.name, batch);
-		streamBuffers_[(uint32_t) source.stream] = view.handle;
-		streamBufferIndices[(uint32_t) source.stream] = view.descriptorIndex;
+		const ResourceHandle buffer = UploadStream(source.data, source.sizeInBytes, source.stride, source.name, batch);
+		streamBuffers_[(uint32_t) source.stream] = buffer;
+		streamBufferIndices[(uint32_t) source.stream] = renderContext_->GetResourceViewInfo(buffer).descriptorIndex;
 	}
 
 	if (!primitiveDescs.empty())
 	{
-		const ResourceViewInfo view = UploadStream(primitiveDescs.data(),
-												   primitiveDescs.size() * sizeof(PrimitiveGPUDesc),
-												   sizeof(PrimitiveGPUDesc),
-												   "Scene_PrimitiveDescs",
-												   batch);
-		primitiveBuffer_ = view.handle;
-		primitiveBufferIndex_ = view.descriptorIndex;
+		primitiveBuffer_ = UploadStream(primitiveDescs.data(),
+										primitiveDescs.size() * sizeof(PrimitiveGPUDesc),
+										sizeof(PrimitiveGPUDesc),
+										"Scene_PrimitiveDescs",
+										batch);
+		primitiveBufferIndex_ = renderContext_->GetResourceViewInfo(primitiveBuffer_).descriptorIndex;
 	}
 
 	if (!instances.empty())
@@ -296,7 +295,7 @@ void RenderGPUScene::UploadStreams(UploadBatchHandle batch)
 		desc.structureByteStride = sizeof(InstanceGPU);
 		desc.debugName = "Scene_Instances";
 		instanceBuffer_ =
-				renderContext_->CreateUploadBuffer(desc, ResourceViewType::ShaderResource, instances.data()).handle;
+				renderContext_->CreateUploadBuffer(desc, ResourceViewType::ShaderResource, instances.data());
 	}
 }
 
@@ -330,13 +329,13 @@ uint32_t RenderGPUScene::UploadTexture(const Scene::Texture &texture,
 	mip.rowPitch = rowPitch;
 	mip.rowCount = desc.height;
 
-	const ResourceViewInfo view = renderContext_->CreateTexture(desc,
-																ResourceViewType::ShaderResource,
-																std::span<const TextureMipData>(&mip, 1),
-																batch);
+	const ResourceHandle gpuTexture = renderContext_->CreateTexture(desc,
+																 ResourceViewType::ShaderResource,
+																 std::span<const TextureMipData>(&mip, 1),
+																 batch);
 	pendingUploadBytes_ += sizeInBytes;
-	textures_.push_back(view.handle);
-	return view.descriptorIndex;
+	textures_.push_back(gpuTexture);
+	return renderContext_->GetResourceViewInfo(gpuTexture).descriptorIndex;
 }
 
 void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene, UploadBatchHandle &batch)
@@ -384,13 +383,12 @@ void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene, UploadBatchH
 	materials.push_back(fallback);
 	materialIsOpaque_.push_back(true);
 
-	const ResourceViewInfo view = UploadStream(materials.data(),
-											   materials.size() * sizeof(GpuMaterial),
-											   sizeof(GpuMaterial),
-											   "Scene_Materials",
-											   batch);
-	materialBuffer_ = view.handle;
-	materialBufferIndex_ = view.descriptorIndex;
+	materialBuffer_ = UploadStream(materials.data(),
+								   materials.size() * sizeof(GpuMaterial),
+								   sizeof(GpuMaterial),
+								   "Scene_Materials",
+								   batch);
+	materialBufferIndex_ = renderContext_->GetResourceViewInfo(materialBuffer_).descriptorIndex;
 }
 
 void RenderGPUScene::UpdateInstances(const Scene::GLTFScene &scene)

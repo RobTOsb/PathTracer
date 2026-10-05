@@ -25,10 +25,7 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 							   const Camera &camera,
 							   const RenderSettings &settings,
 							   bool rayReconstruction) :
-	renderContext_(renderContext),
-	scene_(scene),
-	camera_(camera),
-	settings_(settings),
+	renderContext_(renderContext), scene_(scene), camera_(camera), settings_(settings),
 	rayReconstruction_(rayReconstruction)
 {
 	RaytracingPipelineDesc desc = {};
@@ -76,7 +73,7 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 	frameConstants_.resize(renderContext->GetFramesInFlight());
 	for (ResourceHandle &constants: frameConstants_)
 	{
-		constants = renderContext->CreateConstantBuffer(sizeof(FrameConstants), "PathTracer_FrameConstants").handle;
+		constants = renderContext->CreateConstantBuffer(sizeof(FrameConstants), "PathTracer_FrameConstants");
 	}
 }
 
@@ -109,7 +106,7 @@ ResourceHandle PathTracerPass::CreateTarget(Format format, const char *debugName
 	desc.format = format;
 	desc.usageFlags = ResourceUsageFlags::UnorderedAccess;
 	desc.debugName = debugName;
-	return renderContext_->CreateTexture(desc, ResourceViewType::UnorderedAccess).handle;
+	return renderContext_->CreateTexture(desc, ResourceViewType::UnorderedAccess);
 }
 
 void PathTracerPass::Execute(RenderContext *renderContext)

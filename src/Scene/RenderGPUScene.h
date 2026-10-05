@@ -86,7 +86,7 @@ private:
 	void UploadStreams(UploadBatchHandle batch);
 	void UploadMaterials(const Scene::GLTFScene &scene, UploadBatchHandle &batch);
 	uint32_t UploadTexture(const Scene::Texture &texture, Format format, const char *debugName, UploadBatchHandle &batch);
-	ResourceViewInfo UploadStream(const void *data, uint64_t sizeInBytes, uint32_t stride, const char *debugName, UploadBatchHandle batch);
+	ResourceHandle UploadStream(const void *data, uint64_t sizeInBytes, uint32_t stride, const char *debugName, UploadBatchHandle batch);
 	void ComputeBounds(const Scene::GLTFScene &scene);
 	void FillInstances(const Scene::GLTFScene &scene);
 
