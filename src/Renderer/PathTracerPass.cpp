@@ -18,7 +18,7 @@
 
 namespace
 {
-	constexpr uint32_t kMaxPayloadSizeInBytes = 56;
+	constexpr uint32_t kMaxPayloadSizeInBytes = 60;
 
 	// Halton phases before the jitter repeats. The DLSS guide asks for 8 * (output / render)^2, so
 	// 72 at Ultra Performance, and the RR guide for at least 32 with no reason to limit it.
@@ -198,11 +198,14 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	// otherwise give it all to whichever does.
 	const LightSettings &lights = settings_.lights;
 	const bool sunActive = std::max({ irradiance.x, irradiance.y, irradiance.z }) > 0.0f;
-	const bool lightsActive = lights.enabled && lights.intensityScale > 0.0f && scene_.GetLightCount() > 0;
+	// The intensity scale only applies to point lights, so it does not switch off the emitters.
+	const bool lightsActive = lights.enabled && scene_.GetLightCount() > 0;
 	constants.lightCount = lightsActive ? scene_.GetLightCount() : 0u;
 	constants.lightSampling = static_cast<uint>(lights.sampling);
 	constants.lightIntensityScale = lights.intensityScale;
 	constants.sunSelectProbability = sunActive ? (lightsActive ? 0.5f : 1.0f) : 0.0f;
+	constants.lightTreeGlossyBounces = static_cast<uint>(std::max(lights.glossyImportanceBounces, 0));
+	constants.lightTreeFarFieldSharpness = lights.farFieldImportance ? lights.farFieldSharpness : FLT_MAX;
 	constants.lightTreeDiffuseOnlyAlpha = lights.diffuseOnlyRoughLobes
 											  ? lights.diffuseOnlyRoughness * lights.diffuseOnlyRoughness
 											  : FLT_MAX;
@@ -259,6 +262,10 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	renderContext->SetRaytracingSRV(7, scene_.GetMaterialBuffer());
 	renderContext->SetRaytracingSRV(8, scene_.GetLightBuffer());
 	renderContext->SetRaytracingSRV(9, scene_.GetLightTreeNodeBuffer());
+	renderContext->SetRaytracingSRV(10, scene_.GetLightLeafBuffer());
+	renderContext->SetRaytracingSRV(11, scene_.GetEmitterBuffer());
+	renderContext->SetRaytracingSRV(12, scene_.GetLightTreeParentBuffer());
+	renderContext->SetRaytracingSRV(13, scene_.GetLightTreeLeafLightBuffer());
 	for (uint32_t i = 0; i < targetCount; ++i)
 	{
 		renderContext->SetRaytracingUAV(i, targets[i]);

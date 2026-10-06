@@ -1,6 +1,7 @@
 #include "ImGuiPass.h"
 
 #include "Camera.h"
+#include "LightTreeInterop.h"
 #include "RenderContext.h"
 #include "RenderSettings.h"
 #include "Scene/RenderGPUScene.h"
@@ -173,7 +174,13 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	{
 		LightSettings &lights = settings_.lights;
 		const uint32_t lightCount = scene_.GetLightCount();
-		ImGui::Text("%u point/area light(s), tree built in %.3f ms", lightCount, scene_.GetLightTreeBuildMs());
+		ImGui::Text("%u light(s) (%u emissive triangles), tree built in %.3f ms",
+					lightCount,
+					scene_.GetEmissiveTriangleCount(),
+					scene_.GetLightTreeBuildMs());
+		ImGui::Text("Tree depth: %u max, %.1f average (4-wide)",
+					scene_.GetLightTreeMaxDepth(),
+					scene_.GetLightTreeAverageDepth());
 		ImGui::BeginDisabled(lightCount == 0);
 		ImGui::Checkbox("Enabled", &lights.enabled);
 		EnumCombo("Sampling", kLightSamplingModes, lights.sampling);
@@ -184,8 +191,24 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::BeginDisabled(!lights.diffuseOnlyRoughLobes);
 		ImGui::SliderFloat("Min roughness", &lights.diffuseOnlyRoughness, 0.0f, 1.0f, "%.2f");
 		ImGui::EndDisabled();
+		ImGui::SliderInt("Glossy importance bounces", &lights.glossyImportanceBounces, 0, 16);
+		ImGui::SetItemTooltip("Path vertices (0 = primary hit) that get the glossy light tree importance, "
+							  "later ones use the diffuse one only");
+		ImGui::SliderInt("Lights per leaf", &lights.maxLeafLights, 1, static_cast<int>(LIGHT_TREE_MAX_LEAF_LIGHTS));
+		ImGui::SetItemTooltip("Light tree leaf size; a leaf's lights are picked in proportion to their flux");
+		ImGui::Checkbox("Far-field importance", &lights.farFieldImportance);
+		ImGui::SetItemTooltip("Treat small, distant light clusters wholly above the horizon as point lights");
+		ImGui::SameLine();
+		ImGui::BeginDisabled(!lights.farFieldImportance);
+		ImGui::SliderFloat("Min sharpness",
+						   &lights.farFieldSharpness,
+						   1.0f,
+						   1000.0f,
+						   "%.0f",
+						   ImGuiSliderFlags_Logarithmic);
 		ImGui::EndDisabled();
-		ImGui::DragFloat("Light intensity",
+		ImGui::EndDisabled();
+		ImGui::DragFloat("Point light intensity",
 						 &lights.intensityScale,
 						 0.01f,
 						 0.0f,

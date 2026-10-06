@@ -42,9 +42,12 @@ StructuredBuffer<float3> g_Normals : register(t4);
 StructuredBuffer<float2> g_TexCoords : register(t5);
 StructuredBuffer<float4> g_Tangents : register(t6);
 StructuredBuffer<GpuMaterial> g_Materials : register(t7);
-// Point and area lights, indexed by the light tree leaves. Never empty, so these stay bound.
 StructuredBuffer<GpuLight> g_Lights : register(t8);
 StructuredBuffer<GpuLightTreeNode> g_LightTreeNodes : register(t9);
+StructuredBuffer<GpuLightTreeLeafEntry> g_LightLeaves : register(t10);
+StructuredBuffer<uint> g_Emitters : register(t11);
+StructuredBuffer<uint> g_LightTreeParents : register(t12);
+StructuredBuffer<GpuLightTreeLeafEntry> g_LightTreeLeafLights : register(t13);
 
 PrimitiveDesc LoadPrimitive(uint index)
 {
@@ -76,8 +79,9 @@ struct HitInfo
     float3 N;  // interpolated vertex normal
     float3 Ns; // shading normal from the normal map in world space, equal to N without a map
     float2 uv;
-    float3 emission;
+    float3 emission; // emitted radiance (both faces), set by LoadMaterial
     uint materialId;
+    uint emitter; // entry of the hit triangle in g_Emitters, INVALID_LIGHT_INDEX if its instance does not emit
 };
 
 struct LightSample
@@ -111,6 +115,7 @@ struct HitPayload
     float tangentSign;
     float3 T;
     float2 uv;
+    uint emitter;
 };
 
 // First bounce whose hits the SER pipeline reorders. Camera rays leave raygen in screen order, so
@@ -159,6 +164,7 @@ HitInfo TraceClosest(float3 origin, float3 dir, bool reorder, inout uint rng)
     hit.B = cross(hit.N, hit.T) * payload.tangentSign;
     hit.uv = payload.uv;
     hit.materialId = payload.materialId;
+    hit.emitter = payload.emitter;
     hit.emission = float3(0.0, 0.0, 0.0);
     hit.Ns = hit.N; // LoadMaterial applies the normal map
     return hit;
@@ -262,7 +268,8 @@ LightSample SampleBufferLight(GpuLight light, float3 position, float2 u)
     float su = sqrt(u.x);
     float b0 = 1.0 - su;
     float b1 = u.y * su;
-    float3 p = b0 * p0 + b1 * p1 + (1.0 - b0 - b1) * p2;
+    float b2 = 1.0 - b0 - b1;
+    float3 p = b0 * p0 + b1 * p1 + b2 * p2;
 
     float3 crossE = cross(p1 - p0, p2 - p0);
     float twiceArea = length(crossE);
@@ -272,22 +279,102 @@ LightSample SampleBufferLight(GpuLight light, float3 position, float2 u)
     ls.direction = toLight / d;
     float cosLight = -dot(crossE, ls.direction) / twiceArea;
 
-    ls.radiance = cosLight > 0.0 ? light.radiance.xyz : float3(0.0, 0.0, 0.0);
-    ls.pdf = cosLight > 0.0 ? 2.0 * d2 / (twiceArea * cosLight) : 0.0;
+    bool front = cosLight > 0.0;
+    float3 radiance = light.radiance.xyz;
+    uint radianceMap = asuint(light.radiance.w);
+    if (front && radianceMap != INVALIDDESCRIPTORHANDLE)
+    {
+        float2 uv = b0 * UnpackHalf2(light.v1.w) + b1 * UnpackHalf2(light.v2.w) + b2 * UnpackHalf2(light.v3.w);
+        radiance *= SampleTexture(radianceMap, uv).rgb;
+    }
+
+    ls.radiance = front ? radiance : float3(0.0, 0.0, 0.0);
+    ls.pdf = front ? 2.0 * d2 / (twiceArea * cosLight) : 0.0;
     // Stop short of the emitter so it does not shadow itself.
     ls.distance = d * 0.999;
-    // Not in the scene geometry either, so BSDF sampling never finds its emission. Switch this
-    // back to MIS once emissive hits are weighted against NEE with LightTreePmf.
-    ls.lightSamplingOnly = true;
+    ls.lightSamplingOnly = false;
     return ls;
+}
+
+// The two halves of a float's bits as float16 values, low half in x (PackUVsToFloat).
+float2 UnpackHalf2(float packed)
+{
+    uint bits = asuint(packed);
+    return float2(f16tof32(bits & 0xFFFF), f16tof32(bits >> 16));
+}
+
+struct LightSelectVertex
+{
+    float3 position;
+    float3 normal;  // the shading frame (mat.geometryNormal), the bitangent is cross(normal, tangent)
+    float3 tangent;
+    float3 wo;
+    float diffuseWeight;
+    float specularWeight;
+    float2 alpha;
+    bool tree; // the light tree picks the light, otherwise uniform selection
+};
+
+// The light tree only handles opaque surfaces (lights below the tangent plane get no importance),
+// so transmissive ones fall back to uniform selection. From bounce lightTreeGlossyBounces on, the
+// specular weight is folded into the diffuse one, as for rough lobes in MakeLightTreeShadingContext:
+// the glossy importance is the expensive half of the traversal, and those vertices carry little
+// throughput.
+LightSelectVertex MakeLightSelectVertex(float3 position, OpenPBRBaseParams mat, OpenPBRContext ctx, float3 wo, bool opaque,
+                                        uint bounce)
+{
+    LightSelectVertex v;
+    v.position = position;
+    v.normal = mat.geometryNormal;
+    v.tangent = mat.geometryTangent;
+    v.wo = wo;
+    v.diffuseWeight = ctx.probDiffuse;
+    v.specularWeight = ctx.probSpecR;
+    if (bounce >= g_Frame.lightTreeGlossyBounces)
+    {
+        v.diffuseWeight += dot(wo, v.normal) > 0.0 ? v.specularWeight : 0.0;
+        v.specularWeight = 0.0;
+    }
+    v.alpha = ctx.alpha;
+    v.tree = g_Frame.lightSampling == LIGHT_SAMPLING_TREE && opaque;
+    return v;
+}
+
+LightTreeShadingContext MakeLightTreeShadingContext(LightSelectVertex v)
+{
+    return MakeLightTreeShadingContext(v.position, v.tangent, cross(v.normal, v.tangent), v.normal, v.wo,
+                                       v.diffuseWeight, v.specularWeight, v.alpha.x, v.alpha.y,
+                                       g_Frame.lightTreeDiffuseOnlyAlpha, g_Frame.lightTreeFarFieldSharpness);
+}
+
+// Probability of SampleLight at v picking lightIndex from the light buffer, sun selection included.
+float LightSelectPmf(LightSelectVertex v, uint lightIndex)
+{
+    float pmf = v.tree ? LightTreePmf(g_LightTreeNodes, g_LightTreeParents, g_LightLeaves, MakeLightTreeShadingContext(v), lightIndex)
+                       : 1.0 / g_Frame.lightCount;
+    return pmf * (1.0 - g_Frame.sunSelectProbability);
+}
+
+// Solid angle PDF of SampleLight at v producing position on the emissive triangle lightIndex,
+// reached along dir.
+float EmitterLightPdf(LightSelectVertex v, uint lightIndex, float3 dir, float3 position)
+{
+    GpuLight light = g_Lights[lightIndex];
+    float3 crossE = cross(light.v2.xyz - light.v1.xyz, light.v3.xyz - light.v1.xyz);
+    float twiceArea = length(crossE);
+    float cosLight = -dot(crossE, dir) / twiceArea;
+    if (!(cosLight > 0.0))
+        return 0.0;
+
+    float3 toLight = position - v.position;
+    float d2 = max(dot(toLight, toLight), 1.0e-8);
+    return LightSelectPmf(v, lightIndex) * 2.0 * d2 / (twiceArea * cosLight);
 }
 
 // Next event estimation: picks the sun with sunSelectProbability, otherwise one light from the
 // light buffer, and samples it. The returned PDF includes the selection probability and is 0 when
-// there is nothing to sample. The light tree only handles opaque surfaces (lights below the
-// tangent plane get no importance), so transmissive ones fall back to uniform selection.
-LightSample SampleLight(float3 position, OpenPBRBaseParams mat, OpenPBRContext ctx, float3 wo, bool opaque,
-                        float2 u, inout uint rng)
+// there is nothing to sample.
+LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
 {
     float pSun = g_Frame.sunSelectProbability;
     if (u.x < pSun)
@@ -304,12 +391,9 @@ LightSample SampleLight(float3 position, OpenPBRBaseParams mat, OpenPBRContext c
     float uSelect = min((u.x - pSun) / (1.0 - pSun), 0.99999994);
     uint lightIndex;
     float pmf;
-    if (g_Frame.lightSampling == LIGHT_SAMPLING_TREE && opaque)
+    if (v.tree)
     {
-        LightTreeShadingContext treeCtx = MakeLightTreeShadingContext(
-            position, mat.geometryTangent, mat.geometryBitangent, mat.geometryNormal, wo,
-            ctx.probDiffuse, ctx.probSpecR, ctx.alpha.x, ctx.alpha.y, g_Frame.lightTreeDiffuseOnlyAlpha);
-        if (!SampleLightTree(g_LightTreeNodes, treeCtx, uSelect, lightIndex, pmf))
+        if (!SampleLightTree(g_LightTreeNodes, g_LightTreeLeafLights, MakeLightTreeShadingContext(v), uSelect, lightIndex, pmf))
             return ls;
     }
     else
@@ -323,8 +407,10 @@ LightSample SampleLight(float3 position, OpenPBRBaseParams mat, OpenPBRContext c
     GpuLightType type = light.GetLightType();
     bool hasArea = type == kLight_Area || (type == kLight_Point && light.v2.x > 0.0);
     float2 uLight = hasArea ? Rand3(rng).xy : float2(0.0, 0.0);
-    ls = SampleBufferLight(light, position, uLight);
-    ls.radiance *= g_Frame.lightIntensityScale;
+    ls = SampleBufferLight(light, v.position, uLight);
+    // Emissive triangles stay unscaled, as BSDF sampling sees them.
+    if (type == kLight_Point)
+        ls.radiance *= g_Frame.lightIntensityScale;
     ls.pdf *= pmf * (1.0 - pSun);
     return ls;
 }
@@ -389,6 +475,13 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit)
         float4 roughMetal = SampleTexture(material.roughMetalTexture, uv);
         roughness *= roughMetal.g;
         metallic *= roughMetal.b;
+    }
+
+    if (any(material.emissive > 0.0))
+    {
+        hit.emission = material.emissive;
+        if (material.emissiveTexture != INVALIDDESCRIPTORHANDLE)
+            hit.emission *= SampleTexture(material.emissiveTexture, uv).rgb;
     }
 
     OpenPBRBaseParams p = OpenPBRDefaults();
@@ -563,6 +656,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
     float3 throughput = float3(1.0, 1.0, 1.0);
     float3 segmentExtinction = float3(0.0, 0.0, 0.0);
     float prevBsdfPdf = 0.0;
+    LightSelectVertex prevVertex = (LightSelectVertex)0; // where the current segment started, from bounce 1
 
     // maxBounces counts indirect bounces, so the primary segment comes on top.
     const uint maxSegments = g_Frame.maxBounces + 1;
@@ -597,14 +691,25 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             break;
         }
 
-        // Emission found by BSDF sampling. Emissive surfaces are not in the light buffer yet; once
-        // they are, weight this against NEE with LightTreePmf (needs a triangle to light map).
-        if (any(hit.emission > 0.0))
-            radiance += throughput * hit.emission;
-
         // Material and shading basis for this hit.
         OpenPBRBaseParams mat = LoadMaterial(hit);
         float3 wo = -dir;
+
+        // Emission found by BSDF sampling, from front faces only like the area lights NEE samples.
+        // NEE at the previous vertex could have picked this triangle too, so weight it against that,
+        // unless the triangle has no light (degenerate, or black by the CPU texture estimate) or NEE
+        // of the light buffer is off.
+        if (any(hit.emission > 0.0) && dot(hit.Ng, wo) > 0.0)
+        {
+            float w = 1.0;
+            if (bounce > 0 && g_Frame.lightCount > 0 && hit.emitter != INVALID_LIGHT_INDEX)
+            {
+                uint lightIndex = g_Emitters[hit.emitter];
+                if (lightIndex != INVALID_LIGHT_INDEX)
+                    w = PowerHeuristic(prevBsdfPdf, EmitterLightPdf(prevVertex, lightIndex, dir, hit.position));
+            }
+            radiance += throughput * hit.emission * w;
+        }
 
         // Opaque surfaces are treated as two-sided: face the frame towards the viewer so a back
         // face is not mistaken for the inside of a transmissive object.
@@ -633,7 +738,9 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
         // One hash covers the light sample (xy) and the Russian roulette decision (z).
         float3 lightU = Rand3(rng);
 
-        LightSample ls = SampleLight(hit.position, mat, ctx, wo, opaque, lightU.xy, rng);
+        LightSelectVertex vertex = MakeLightSelectVertex(hit.position, mat, ctx, wo, opaque, bounce);
+        LightSample ls = SampleLight(vertex, lightU.xy, rng);
+        bool lastSegment = bounce + 1 >= maxSegments;
         float3 neeContribution = float3(0.0, 0.0, 0.0);
         bool traceShadowRay = false;
         if (ls.pdf > 0.0 && (!opaque || dot(ls.direction, hit.Ng) > 0.0))
@@ -642,7 +749,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             float3 fCos = OpenPBREvalPdf(mat, ctx, ls.direction, bsdfPdf);
             if (any(fCos > 0.0))
             {
-                float w = ls.lightSamplingOnly ? 1.0 : PowerHeuristic(ls.pdf, bsdfPdf);
+                // The last segment takes no BSDF sample, which leaves NEE as the only strategy there.
+                float w = ls.lightSamplingOnly || lastSegment ? 1.0 : PowerHeuristic(ls.pdf, bsdfPdf);
                 float3 shadowTransmittance =
                     dot(ls.direction, hit.Ng) < 0.0 ? exp(-extinction * ls.distance) : float3(1.0, 1.0, 1.0);
                 neeContribution = throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf);
@@ -652,7 +760,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
 
         // Continue the path by sampling the BSDF, unless this is the last segment.
         bool continuePath = false;
-        if (bounce + 1 < maxSegments)
+        if (!lastSegment)
         {
             BSDFSample bs = OpenPBRSample(mat, ctx, Rand3(rng));
             continuePath = bs.lobe != LOBE_NONE;
@@ -661,6 +769,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
                 primarySpecular = bounce == 0 && bs.lobe == LOBE_SPECULAR_REFLECTION;
                 throughput *= bs.weight;
                 prevBsdfPdf = bs.pdf;
+                prevVertex = vertex;
 
                 // Heading into the object means travelling through its medium until the next hit.
                 segmentExtinction = dot(bs.wi, hit.Ng) < 0.0 ? extinction : float3(0.0, 0.0, 0.0);
@@ -788,6 +897,9 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     // A mirroring transform flips cross(N, T), so fold its handedness into the bitangent sign.
     payload.tangentSign = (objectTangent.w < 0.0 ? -1.0 : 1.0) * handedness;
     payload.uv = InterpolateTexCoord(tri, bary);
+
+    uint emitterTable = g_Emitters[InstanceIndex()];
+    payload.emitter = emitterTable != INVALID_LIGHT_INDEX ? emitterTable + PrimitiveIndex() : INVALID_LIGHT_INDEX;
 }
 
 // Base colour and alpha at the candidate hit, for the any-hit shaders.

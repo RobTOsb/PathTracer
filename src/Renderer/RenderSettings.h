@@ -22,15 +22,26 @@ struct SunSettings
 	}
 };
 
-// The point and area lights in the scene's light buffer.
+// The point lights and emissive triangles in the scene's light buffer.
 struct LightSettings
 {
+	// Next event estimation of the light buffer. Without it the point lights go dark and emissive
+	// surfaces are only found by BSDF sampling.
 	bool enabled = true;
-	float intensityScale = 1.0f; // multiplies every light, so the tree does not need rebuilding
+	float intensityScale = 1.0f; // multiplies the point lights, so the tree does not need rebuilding
 	LightSamplingMode sampling = LIGHT_SAMPLING_TREE;
 	// Light tree: skip the glossy importance for lobes at least this rough (perceptual roughness).
 	bool diffuseOnlyRoughLobes = true;
 	float diffuseOnlyRoughness = 0.7f;
+	// Light tree: vertices from this bounce on (0 = primary hit) skip the glossy importance.
+	int glossyImportanceBounces = 1;
+	// Light tree: nodes wholly above the horizon whose SG light is at least this sharp (squared
+	// distance over spatial variance) use the cheap point light form of the importance.
+	bool farFieldImportance = true;
+	float farFieldSharpness = 16.0f;
+	// Light tree: lights per leaf, picked by flux within it, 1 to LIGHT_TREE_MAX_LEAF_LIGHTS. More
+	// makes the tree shallower at the cost of ignoring where the leaf's lights are relative to each other.
+	int maxLeafLights = 4;
 	bool animate = true; // moves the test lights, the tree is rebuilt every frame either way
 	float animationSpeed = 1.0f;
 };

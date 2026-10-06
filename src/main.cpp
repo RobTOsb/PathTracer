@@ -64,13 +64,14 @@ static float QueryDisplayPeakNits(void *hwnd)
 	return 0.0f;
 }
 
-constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
+constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
+//constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\Sponza\\glTF\\Sponza.gltf";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
 
 constexpr uint kFramesInFlight = 2;
 constexpr float kMouseSensitivity = 0.15f; // degrees per pixel
-constexpr uint32_t kTestLightCount = 1024;
+constexpr uint32_t kTestLightCount = 0;
 constexpr float kTestLightMinRadius = 0.005f; // fraction of the scene radius, the largest is 10x this
 constexpr float kTestLightMinPeriod = 10.0f; // seconds per swing along one axis
 constexpr float kTestLightMaxPeriod = 30.0f;
@@ -351,7 +352,7 @@ int Run(const char *scenePath)
 
 		// After BeginFrame, which frees this frame's light buffers.
 		PlaceTestLights(testLights, lightTime, lights);
-		gpuScene.UpdateLights(lights);
+		gpuScene.UpdateLights(lights, static_cast<uint32_t>(settings.lights.maxLeafLights));
 
 		renderContext->BeginGraphicsCommandList();
 		renderContext->SetDescriptorHeaps();

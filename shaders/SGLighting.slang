@@ -112,6 +112,13 @@ float SGDiffuseImportance(SGLight sg, float3 normal)
     return sg.amplitude * SG_INV_PI * SGClampedCosineProductIntegral(dot(sg.axis, normal), sg.sharpness);
 }
 
+// The kappa -> infinity limit of SGDiffuseImportance, for an SG lobe that lies above the horizon:
+// int g(o; xi, kappa) max(dot(o, n), 0) do -> 2 pi max(dot(xi, n), 0) / kappa. No exp or erf.
+float SGDiffuseImportanceFarField(SGLight sg, float3 normal)
+{
+    return sg.amplitude * 2.0 * saturate(dot(sg.axis, normal)) / sg.sharpness;
+}
+
 // Normalised hemispherical integral of an SG [Tokuyoshi 2022]:
 // (integral over the upper hemisphere of g) / (integral over S^2 of g), given cosine = dot(xi, n).
 // Used for the filtered visibility V in Section 5.2.
@@ -226,4 +233,13 @@ float SGGlossyImportance(SGLight sg, GlossyContext g)
     float visibility = SGNormalisedHemisphericalIntegral(dot(vAxis, g.normal), vSharpness);
 
     return sg.amplitude * visibility * lobe * SGIntegral(sg.sharpness);
+}
+
+// The kappa -> infinity limit of SGGlossyImportance, for an SG lobe that lies above the horizon: the
+// filtered roughness tends to A, the filtered visibility to 1 and the SG integral to 2 pi / kappa.
+float SGGlossyImportanceFarField(SGLight sg, GlossyContext g)
+{
+    float3 xiTS = float3(dot(sg.axis, g.tangent), dot(sg.axis, g.bitangent), dot(sg.axis, g.normal));
+    float lobe = SGGGXReflectionLobe(xiTS, g.viewTS, float3(g.alpha2.x, 0.0, g.alpha2.y));
+    return sg.amplitude * lobe * SG_TWO_PI / sg.sharpness;
 }

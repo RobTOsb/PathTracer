@@ -136,6 +136,9 @@ struct GpuVirtualAddressRangeAndStride
 
 #define INVALIDDESCRIPTORHANDLE 0xFFFFFFFF
 
+// An emissive triangle (or other emitter) that has no light in the light buffer.
+#define INVALID_LIGHT_INDEX 0xFFFFFFFFu
+
 // Angular radius of the physical sun disc in radians (~0.53 degrees full-angle).
 #define SUN_ANGULAR_RADIUS_DEFAULT 0.004675f
 

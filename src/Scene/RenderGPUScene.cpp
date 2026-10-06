@@ -7,6 +7,7 @@
 #include "fmtlog.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cfloat>
 #include <chrono>
@@ -33,6 +34,71 @@ namespace
 		return { x * m[0] + y * m[4] + z * m[8] + m[3],
 				 x * m[1] + y * m[5] + z * m[9] + m[7],
 				 x * m[2] + y * m[6] + z * m[10] + m[11] };
+	}
+
+	float Determinant3x3(const float *m)
+	{
+		return m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8]) +
+			   m[2] * (m[4] * m[9] - m[5] * m[8]);
+	}
+
+	float Luminance(const float3 &c)
+	{
+		return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+	}
+
+	float SrgbToLinear(uint8_t value)
+	{
+		static const std::array<float, 256> table = []
+		{
+			std::array<float, 256> t = {};
+			for (int i = 0; i < 256; ++i)
+			{
+				const float c = static_cast<float>(i) / 255.0f;
+				t[i] = c <= 0.04045f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f);
+			}
+			return t;
+		}();
+		return table[value];
+	}
+
+	// Nearest texel of an sRGB texture with wrapping, decoded to linear RGB.
+	float3 FetchSrgbTexel(const Scene::Texture &texture, float u, float v)
+	{
+		const int32_t w = texture.GetWidth();
+		const int32_t h = texture.GetHeight();
+		const int32_t x = std::min(static_cast<int32_t>((u - floorf(u)) * static_cast<float>(w)), w - 1);
+		const int32_t y = std::min(static_cast<int32_t>((v - floorf(v)) * static_cast<float>(h)), h - 1);
+		const uint8_t *texel = texture.GetPixels() + (static_cast<size_t>(y) * w + x) * 4;
+		return { SrgbToLinear(texel[0]), SrgbToLinear(texel[1]), SrgbToLinear(texel[2]) };
+	}
+
+	// Average of an sRGB texture over a triangle in UV space, from the centroids of its 16 sub-triangles
+	// after splitting each edge in four. Only sets the light tree importance, so it need not be exact.
+	float3 AverageSrgbTexture(const Scene::Texture &texture, const float2 (&uv)[3])
+	{
+		constexpr int kSplits = 4;
+		const float2 e1 = uv[1] - uv[0];
+		const float2 e2 = uv[2] - uv[0];
+		float3 sum = { 0.0f, 0.0f, 0.0f };
+		auto add = [&](float a, float b)
+		{
+			a /= kSplits;
+			b /= kSplits;
+			sum = sum + FetchSrgbTexel(texture, uv[0].x + e1.x * a + e2.x * b, uv[0].y + e1.y * a + e2.y * b);
+		};
+		for (int i = 0; i < kSplits; ++i)
+		{
+			for (int j = 0; i + j < kSplits; ++j)
+			{
+				add(i + 1.0f / 3.0f, j + 1.0f / 3.0f);
+				if (i + j + 1 < kSplits)
+				{
+					add(i + 2.0f / 3.0f, j + 2.0f / 3.0f);
+				}
+			}
+		}
+		return sum * (1.0f / (kSplits * kSplits));
 	}
 
 	template<typename T>
@@ -90,7 +156,7 @@ RenderGPUScene::~RenderGPUScene()
 			renderContext_->DestroyResource(buffer);
 		}
 	}
-	for (ResourceHandle buffer: { primitiveBuffer_, materialBuffer_, instanceBuffer_ })
+	for (ResourceHandle buffer: { primitiveBuffer_, materialBuffer_, instanceBuffer_, emitterBuffer_ })
 	{
 		if (buffer != InvalidResourceHandle)
 		{
@@ -104,7 +170,7 @@ void RenderGPUScene::DestroyLights()
 {
 	for (LightFrameBuffers &frame: lightFrames_)
 	{
-		for (ResourceHandle buffer: { frame.lights, frame.nodes })
+		for (ResourceHandle buffer: { frame.lights, frame.nodes, frame.leaves, frame.parents, frame.leafLights })
 		{
 			if (buffer != InvalidResourceHandle)
 			{
@@ -116,25 +182,51 @@ void RenderGPUScene::DestroyLights()
 	lightCount_ = 0;
 }
 
-void RenderGPUScene::UpdateLights(std::span<const GpuLight> lights)
+void RenderGPUScene::UpdateLights(std::span<const GpuLight> lights, uint32_t maxLeafLights)
 {
+	// The emissive triangles stay at the front of the input, so only the lights after them change.
+	const size_t emissiveCount = emissiveLights_.size();
+	lightInput_.resize(emissiveCount + lights.size());
+	std::copy(lights.begin(), lights.end(), lightInput_.begin() + emissiveCount);
+	lightFluxScales_.resize(lightInput_.size(), 1.0f);
+
 	const auto start = std::chrono::steady_clock::now();
-	LightTree tree = BuildLightTree(lights);
+	LightTreeBuildSettings buildSettings;
+	buildSettings.maxLeafLights = maxLeafLights;
+	LightTree tree = BuildLightTree(lightInput_, lightFluxScales_, buildSettings);
 	lightTreeBuildMs_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+	lightTreeMaxDepth_ = tree.maxDepth;
+	lightTreeAverageDepth_ = tree.averageDepth;
 
 	const uint32_t lightCount = static_cast<uint32_t>(tree.lights.size());
-	if (lightCount != lightCount_ && lightCount < lights.size())
+	if (lightCount != lightCount_ && lightCount < lightInput_.size())
 	{
 		logw("GPUScene: light tree skipped {} light(s) that are not point/area lights or emit nothing",
-			 lights.size() - lightCount);
+			 lightInput_.size() - lightCount);
 	}
 	lightCount_ = lightCount;
+
+	// The emitter buffer holds input indices of the emissive triangles. CollectEmitters only keeps
+	// triangles the tree accepts, so they are also the tree's light indices.
+	if (emissiveCount > 0 &&
+		(tree.sourceIndex.size() < emissiveCount || tree.sourceIndex[emissiveCount - 1] != emissiveCount - 1))
+	{
+		static bool reported = false;
+		if (!reported)
+		{
+			loge("GPUScene: the light tree skipped an emissive triangle, emitter MIS weights will be wrong");
+			reported = true;
+		}
+	}
 
 	if (lightCount_ == 0)
 	{
 		// One unused element each, so the shader's bindings stay valid.
 		tree.lights.push_back(GpuLight{});
 		tree.nodes.push_back(GpuLightTreeNode{});
+		tree.leafOfLight.push_back({});
+		tree.parents.push_back(0);
+		tree.leafLights.push_back({});
 	}
 
 	// BeginFrame has waited for the frame that last read this slot, so it can be overwritten.
@@ -143,6 +235,9 @@ void RenderGPUScene::UpdateLights(std::span<const GpuLight> lights)
 	LightFrameBuffers &frame = lightFrames_[lightFrame_];
 	WriteLightBuffer(renderContext_, frame.lights, frame.lightCapacity, tree.lights, "Scene_Lights");
 	WriteLightBuffer(renderContext_, frame.nodes, frame.nodeCapacity, tree.nodes, "Scene_LightTreeNodes");
+	WriteLightBuffer(renderContext_, frame.leaves, frame.leafCapacity, tree.leafOfLight, "Scene_LightLeaves");
+	WriteLightBuffer(renderContext_, frame.parents, frame.parentCapacity, tree.parents, "Scene_LightTreeParents");
+	WriteLightBuffer(renderContext_, frame.leafLights, frame.leafLightCapacity, tree.leafLights, "Scene_LightTreeLeafLights");
 }
 
 void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
@@ -234,7 +329,9 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
 	pendingUploadBytes_ = 0;
 
 	UploadStreams(batch);
-	UploadMaterials(scene, batch);
+	std::vector<GpuMaterial> materials;
+	UploadMaterials(scene, batch, materials);
+	CollectEmitters(scene, materials, batch);
 
 	renderContext_->EndUpload(batch);
 
@@ -432,9 +529,11 @@ uint32_t RenderGPUScene::UploadTexture(const Scene::Texture &texture,
 	return renderContext_->GetResourceViewInfo(gpuTexture).descriptorIndex;
 }
 
-void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene, UploadBatchHandle &batch)
+void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene,
+									 UploadBatchHandle &batch,
+									 std::vector<GpuMaterial> &materials)
 {
-	std::vector<GpuMaterial> materials;
+	materials.clear();
 	materials.reserve(scene.GetMaterialCount() + 1);
 	materialAlphaModes_.clear();
 	materialAlphaModes_.reserve(scene.GetMaterialCount() + 1);
@@ -458,6 +557,18 @@ void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene, UploadBatchH
 				UploadTexture(material.GetRoughMetalTexture(), Format::R8G8B8A8_UNORM, "Material_RoughMetal", batch);
 		gpu.normalTexture =
 				UploadTexture(material.GetNormalTexture(), Format::R8G8B8A8_UNORM, "Material_Normal", batch);
+		if (material.IsEmissive())
+		{
+			const float *emissive = material.GetEmissive();
+			const float strength = material.GetEmissiveStrength();
+			gpu.emissive = float3(emissive[0] * strength, emissive[1] * strength, emissive[2] * strength);
+		}
+		gpu.emissiveTexture = gpu.emissive.x > 0.0f || gpu.emissive.y > 0.0f || gpu.emissive.z > 0.0f
+									  ? UploadTexture(material.GetEmissiveTexture(),
+													  Format::R8G8B8A8_UNORM_SRGB,
+													  "Material_Emissive",
+													  batch)
+									  : INVALIDDESCRIPTORHANDLE;
 		materials.push_back(gpu);
 		materialAlphaModes_.push_back(gpu.alphaMode);
 	}
@@ -472,6 +583,7 @@ void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene, UploadBatchH
 	fallback.albedoTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.roughMetalTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.normalTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.emissiveTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.alphaCutoff = 0.5f;
 	fallback.alphaMode = ALPHA_MODE_OPAQUE;
 	materials.push_back(fallback);
@@ -495,6 +607,124 @@ void RenderGPUScene::UpdateInstances(const Scene::GLTFScene &scene)
 										   instances.data(),
 										   0,
 										   instances.size() * sizeof(InstanceGPU));
+	}
+}
+
+std::vector<RenderGPUScene::TLASInstanceRef> RenderGPUScene::EnumerateTLASInstances() const
+{
+	std::vector<TLASInstanceRef> refs;
+	for (uint32_t i = 0; i < static_cast<uint32_t>(instances.size()); ++i)
+	{
+		const MeshGPUDesc &mesh = meshDescs[instances[i].meshIndex];
+		for (uint32_t p = 0; p < mesh.primitiveCount; ++p)
+		{
+			// Primitives without geometry get no BLAS.
+			const uint32_t primitive = mesh.primitiveOffset + p;
+			if (primitiveDescs[primitive].indexCount != 0)
+			{
+				refs.push_back({ i, p, primitive });
+			}
+		}
+	}
+	return refs;
+}
+
+void RenderGPUScene::CollectEmitters(const Scene::GLTFScene &scene,
+									 const std::vector<GpuMaterial> &materials,
+									 UploadBatchHandle batch)
+{
+	emissiveLights_.clear();
+	emissiveFluxScales_.clear();
+
+	// The per-instance offsets come first, then a triangle table for each emissive instance.
+	const std::vector<TLASInstanceRef> tlasInstances = EnumerateTLASInstances();
+	std::vector<uint32_t> emitters(std::max<size_t>(tlasInstances.size(), 1), INVALID_LIGHT_INDEX);
+	uint32_t emissiveInstances = 0;
+
+	for (size_t i = 0; i < tlasInstances.size(); ++i)
+	{
+		const TLASInstanceRef &ref = tlasInstances[i];
+		const uint32_t materialIndex = primitiveDescs[ref.primitive].materialIndex;
+		const GpuMaterial &material = materials[materialIndex];
+		const float3 emissive = material.emissive;
+		if (!(emissive.x > 0.0f || emissive.y > 0.0f || emissive.z > 0.0f))
+		{
+			continue;
+		}
+
+		const InstanceGPU &instance = instances[ref.instance];
+		const Scene::Primitive &primitive = scene.GetMesh(instance.meshIndex).GetPrimitives()[ref.meshPrimitive];
+		const std::vector<float> &positions = primitive.GetPositions();
+		const std::vector<float> &texCoords = primitive.GetTexCoord0();
+		const std::vector<uint32_t> &indices = primitive.GetIndices();
+		const bool textured = material.emissiveTexture != INVALIDDESCRIPTORHANDLE;
+		const Scene::Texture *texture = textured ? &scene.GetMaterial(materialIndex).GetEmissiveTexture() : nullptr;
+		const float emissiveLuminance = Luminance(emissive);
+
+		// The hit shader orients Ng by the object-space winding, so a mirroring transform swaps two
+		// corners to keep the area light's front face (counter-clockwise) on the same side.
+		const bool mirrored = Determinant3x3(instance.worldMatrix) < 0.0f;
+
+		emitters[i] = static_cast<uint32_t>(emitters.size());
+		++emissiveInstances;
+		for (size_t t = 0; t + 2 < indices.size(); t += 3)
+		{
+			const uint32_t corners[3] = { indices[t], indices[t + (mirrored ? 2 : 1)], indices[t + (mirrored ? 1 : 2)] };
+			float3 p[3];
+			float2 uv[3];
+			for (int c = 0; c < 3; ++c)
+			{
+				const size_t v = corners[c];
+				p[c] = TransformPoint(instance.worldMatrix, positions[3 * v], positions[3 * v + 1], positions[3 * v + 2]);
+				uv[c] = 2 * v + 1 < texCoords.size() ? float2(texCoords[2 * v], texCoords[2 * v + 1]) : float2(0.0f, 0.0f);
+			}
+
+			GpuLight light;
+			float fluxScale = 1.0f;
+			if (texture != nullptr)
+			{
+				fluxScale = Luminance(emissive * AverageSrgbTexture(*texture, uv)) / emissiveLuminance;
+				// Whole texture repeats do not change what wrap sampling reads, and shifting by them
+				// keeps the UVs near zero where the light's half precision copies are accurate.
+				const float shiftU = floorf(std::min({ uv[0].x, uv[1].x, uv[2].x }));
+				const float shiftV = floorf(std::min({ uv[0].y, uv[1].y, uv[2].y }));
+				for (float2 &corner: uv)
+				{
+					corner = float2(corner.x - shiftU, corner.y - shiftV);
+				}
+				light = MakeAreaLight(emissive, p[0], p[1], p[2], material.emissiveTexture, uv[0], uv[1], uv[2]);
+			}
+			else
+			{
+				light = MakeAreaLight(emissive, p[0], p[1], p[2]);
+			}
+
+			// Degenerate and (by the texture estimate) black triangles get no light. BSDF sampling
+			// still finds whatever they emit, at full weight.
+			uint32_t lightIndex = INVALID_LIGHT_INDEX;
+			if (LightTreeFlux(light, fluxScale) > 0.0f)
+			{
+				lightIndex = static_cast<uint32_t>(emissiveLights_.size());
+				emissiveLights_.push_back(light);
+				emissiveFluxScales_.push_back(fluxScale);
+			}
+			emitters.push_back(lightIndex);
+		}
+	}
+
+	emitterBuffer_ = UploadStream(emitters.data(),
+								  emitters.size() * sizeof(uint32_t),
+								  sizeof(uint32_t),
+								  "Scene_Emitters",
+								  batch);
+
+	lightInput_ = emissiveLights_;
+	lightFluxScales_ = emissiveFluxScales_;
+	if (emissiveInstances > 0)
+	{
+		logi("GPUScene: {} emissive triangle light(s) over {} TLAS instance(s)",
+			 emissiveLights_.size(),
+			 emissiveInstances);
 	}
 }
 
@@ -543,31 +773,22 @@ void RenderGPUScene::BuildAccelerationStructures()
 	renderContext_->UAVBarrierForAccelerationStructures();
 
 	// One TLAS instance per (node, primitive). InstanceID is the primitive's row in the
-	// PrimitiveGPUDesc table, which is all the hit shader needs to find its data.
+	// PrimitiveGPUDesc table, which is all the hit shader needs to find its data. The order must
+	// match the emitter buffer, which is indexed by InstanceIndex().
 	std::vector<TLASInstance> tlasInstances;
-	for (const InstanceGPU &instance: instances)
+	for (const TLASInstanceRef &ref: EnumerateTLASInstances())
 	{
 		// The scene stores row-vector matrices; DXR wants the 3x4 for column vectors.
 		float transform[12];
-		Scene::RowMajorToBLASTransform(instance.worldMatrix, transform);
+		Scene::RowMajorToBLASTransform(instances[ref.instance].worldMatrix, transform);
 
-		const MeshGPUDesc &mesh = meshDescs[instance.meshIndex];
-		for (uint32_t p = 0; p < mesh.primitiveCount; ++p)
-		{
-			const uint32_t primitiveIndex = mesh.primitiveOffset + p;
-			if (blases_[primitiveIndex] == InvalidAccelerationStructureHandle)
-			{
-				continue;
-			}
-
-			TLASInstance tlasInstance = {};
-			tlasInstance.blas = blases_[primitiveIndex];
-			std::memcpy(tlasInstance.transform, transform, sizeof(tlasInstance.transform));
-			tlasInstance.instanceID = primitiveIndex;
-			tlasInstance.instanceMask = 0xFF;
-			tlasInstance.hitGroupIndex = 0;
-			tlasInstances.push_back(tlasInstance);
-		}
+		TLASInstance tlasInstance = {};
+		tlasInstance.blas = blases_[ref.primitive];
+		std::memcpy(tlasInstance.transform, transform, sizeof(tlasInstance.transform));
+		tlasInstance.instanceID = ref.primitive;
+		tlasInstance.instanceMask = 0xFF;
+		tlasInstance.hitGroupIndex = 0;
+		tlasInstances.push_back(tlasInstance);
 	}
 
 	if (tlasInstances.empty())

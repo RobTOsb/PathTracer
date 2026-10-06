@@ -37,8 +37,8 @@ struct FrameConstants
 	// Shader execution reordering (SER pipeline only): bits of the material index used as the
 	// coherence hint, enough for every material row and at most 16.
 	uint serCoherenceHintBits;
-	uint framePad1;
-	uint framePad2;
+	uint lightTreeGlossyBounces; // path vertices from this bounce on use the diffuse light tree importance only
+	float lightTreeFarFieldSharpness; // SG sharpness from which tree nodes count as point lights, FLT_MAX = off
 };
 
 // How next event estimation picks one light from the light buffer.
@@ -75,6 +75,8 @@ struct GpuMaterial
 	uint pad0;
 	uint pad1;
 	uint pad2;
+	float3 emissive; // emissiveFactor * KHR_materials_emissive_strength, linear, front faces only
+	uint emissiveTexture; // sRGB, multiplies emissive
 };
 
 // Root constants for the tonemap compute pass (bound as g_PushConstants).
@@ -92,7 +94,7 @@ struct TonemapConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(FrameConstants) == 352,"FrameConstants must match the HLSL cbuffer layout");
-static_assert(sizeof(GpuMaterial) == 64, "GpuMaterial must match the structured buffer stride");
+static_assert(sizeof(GpuMaterial) == 80, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 32, "TonemapConstants must fit the root constants");
 #endif
 

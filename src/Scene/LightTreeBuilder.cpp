@@ -85,8 +85,9 @@ namespace
 		uint32_t light;
 	};
 
-	// Cluster parameters of a single light, the leaf case of Eqs. 2 to 5.
-	struct LeafCluster
+	// Cluster parameters (Eqs. 2 to 5) in full precision, of a single light or of a node while
+	// building. Packed into GpuLightTreeNode at the end, so the bottom-up pass reads unrounded values.
+	struct Cluster
 	{
 		float3 mean;
 		float variance;
@@ -94,6 +95,68 @@ namespace
 		float flux;
 		float3 averageDirection; // nu bar in Eq. 2, 0 for an isotropic emitter
 	};
+
+	// Merges count clusters, get(i) returning the i-th: flux weighted mean, variance and average
+	// direction, and a bounding sphere around the new mean that holds theirs. For two clusters the
+	// variance is the paper's w_l var_l + w_r var_r + w_l w_r |mu_l - mu_r|^2.
+	template <typename Get>
+	Cluster Combine(uint32_t count, Get get)
+	{
+		Cluster c = {};
+		for (uint32_t i = 0; i < count; ++i)
+		{
+			c.flux += get(i).flux;
+		}
+		c.mean = { 0.0f, 0.0f, 0.0f };
+		c.averageDirection = { 0.0f, 0.0f, 0.0f };
+		for (uint32_t i = 0; i < count; ++i)
+		{
+			const Cluster &child = get(i);
+			const float w = child.flux / c.flux;
+			c.mean = c.mean + child.mean * w;
+			c.averageDirection = c.averageDirection + child.averageDirection * w;
+		}
+		for (uint32_t i = 0; i < count; ++i)
+		{
+			const Cluster &child = get(i);
+			const float3 d = child.mean - c.mean;
+			c.variance += child.flux / c.flux * (child.variance + Dot(d, d));
+			c.radius = std::max(c.radius, Length(d) + child.radius);
+		}
+		return c;
+	}
+
+	// Node of the binary top-down build, which is then collapsed into the 4-wide tree.
+	struct BinaryNode
+	{
+		uint32_t left; // the right child is left + 1, 0 for a leaf
+		uint32_t begin; // range of the build primitives under it
+		uint32_t end;
+	};
+
+	constexpr uint32_t kEmptyNode = UINT32_MAX;
+
+	// Octahedral encoding of a unit vector as snorm16x2, x in the low half. LightTreeAxis in
+	// LightTree.slang decodes it.
+	uint32_t PackOctahedralSnorm16x2(const float3 &v)
+	{
+		const float l1 = fabsf(v.x) + fabsf(v.y) + fabsf(v.z);
+		float x = v.x / l1;
+		float y = v.y / l1;
+		if (v.z < 0.0f)
+		{
+			const float ox = x;
+			x = (1.0f - fabsf(y)) * (ox >= 0.0f ? 1.0f : -1.0f);
+			y = (1.0f - fabsf(ox)) * (y >= 0.0f ? 1.0f : -1.0f);
+		}
+		auto snorm = [](float f)
+		{ return static_cast<uint32_t>(static_cast<int32_t>(lroundf(std::clamp(f, -1.0f, 1.0f) * 32767.0f)) & 0xFFFF); };
+		return snorm(x) | (snorm(y) << 16);
+	}
+
+	// float16 tops out at 65504, so a larger spatial deviation (a cluster wider than that in world
+	// units) is clamped. It only shapes the importance, which stays positive either way.
+	constexpr float kMaxHalf = 65504.0f;
 
 	struct BuildTask
 	{
@@ -135,9 +198,9 @@ namespace
 		return bounds;
 	}
 
-	// Fills the leaf cluster and the build primitive of one light. Returns false for light types the
-	// tree does not handle and for lights that emit nothing.
-	bool MakeLeaf(GpuLight light, LeafCluster &leaf, Primitive &primitive)
+	// Fills the leaf cluster and the build primitive of one light, with its flux multiplied by
+	// fluxScale. Returns false for light types the tree does not handle and for lights that emit nothing.
+	bool MakeLeaf(GpuLight light, float fluxScale, Cluster &leaf, Primitive &primitive)
 	{
 		const GpuLightType type = light.GetLightType();
 		if (type == kLight_Point)
@@ -155,8 +218,8 @@ namespace
 		}
 		else if (type == kLight_Area)
 		{
-			// One-sided Lambertian triangle, Phi = pi L A. A radiance map is not accounted for, the
-			// radiance factor alone sets the flux.
+			// One-sided Lambertian triangle, Phi = pi L A. A radiance map is not accounted for here,
+			// the caller passes its average over the triangle as fluxScale.
 			const float3 p0 = XYZ(light.v1);
 			const float3 p1 = XYZ(light.v2);
 			const float3 p2 = XYZ(light.v3);
@@ -181,6 +244,7 @@ namespace
 			return false;
 		}
 
+		leaf.flux *= fluxScale;
 		primitive.centroid = leaf.mean;
 		primitive.flux = leaf.flux;
 		return leaf.flux > 0.0f;
@@ -383,11 +447,20 @@ namespace
 	}
 } // namespace
 
-LightTree BuildLightTree(std::span<const GpuLight> lights, const LightTreeBuildSettings &settings)
+float LightTreeFlux(const GpuLight &light, float fluxScale)
+{
+	Cluster leaf = {};
+	Primitive primitive = {};
+	return MakeLeaf(light, fluxScale, leaf, primitive) ? leaf.flux : 0.0f;
+}
+
+LightTree BuildLightTree(std::span<const GpuLight> lights,
+						 std::span<const float> fluxScales,
+						 const LightTreeBuildSettings &settings)
 {
 	LightTree tree;
 	std::vector<Primitive> prims;
-	std::vector<LeafCluster> leaves;
+	std::vector<Cluster> leaves;
 	prims.reserve(lights.size());
 	leaves.reserve(lights.size());
 	tree.lights.reserve(lights.size());
@@ -395,9 +468,10 @@ LightTree BuildLightTree(std::span<const GpuLight> lights, const LightTreeBuildS
 
 	for (uint32_t i = 0; i < static_cast<uint32_t>(lights.size()); ++i)
 	{
-		LeafCluster leaf = {};
+		Cluster leaf = {};
 		Primitive primitive = {};
-		if (!MakeLeaf(lights[i], leaf, primitive))
+		const float fluxScale = fluxScales.empty() ? 1.0f : fluxScales[i];
+		if (!MakeLeaf(lights[i], fluxScale, leaf, primitive))
 		{
 			continue;
 		}
@@ -415,13 +489,18 @@ LightTree BuildLightTree(std::span<const GpuLight> lights, const LightTreeBuildS
 		return tree;
 	}
 
-	tree.leafOfLight.resize(lightCount);
-	tree.nodes.reserve(2 * lightCount - 1);
-	tree.nodes.push_back(GpuLightTreeNode{});
-	tree.nodes[0].parent = 0;
+	if (lightCount > LIGHT_TREE_LEAF_FIRST_MASK + 1)
+	{
+		// Leaves address their range with 29 bits.
+		return LightTree{};
+	}
 
-	// Top down topology. Children are allocated as adjacent pairs, so a child always has a larger
-	// index than its parent, which lets the bottom-up pass below run in reverse index order.
+	// Top down binary topology. Children are allocated as adjacent pairs, so a child always has a
+	// larger index than its parent. Ranges of maxLeafLights or fewer become leaves.
+	const uint32_t maxLeafLights = std::clamp(settings.maxLeafLights, 1u, LIGHT_TREE_MAX_LEAF_LIGHTS);
+	std::vector<BinaryNode> binary;
+	binary.reserve(2 * lightCount - 1);
+	binary.push_back({ 0, 0, lightCount });
 	std::vector<BuildTask> stack;
 	stack.push_back({ 0, 0, lightCount, CentroidBounds(prims, 0, lightCount) });
 	const uint32_t binCount = std::clamp(settings.binCount, 2u, kMaxBins);
@@ -433,11 +512,8 @@ LightTree BuildLightTree(std::span<const GpuLight> lights, const LightTreeBuildS
 		stack.pop_back();
 
 		const uint32_t count = task.end - task.begin;
-		if (count == 1)
+		if (count <= maxLeafLights)
 		{
-			const uint32_t light = prims[task.begin].light;
-			tree.nodes[task.node].childOrLight = light | LIGHT_TREE_LEAF_BIT;
-			tree.leafOfLight[light] = task.node;
 			continue;
 		}
 
@@ -467,63 +543,160 @@ LightTree BuildLightTree(std::span<const GpuLight> lights, const LightTreeBuildS
 			rightCentroids = CentroidBounds(prims, mid, task.end);
 		}
 
-		const uint32_t left = static_cast<uint32_t>(tree.nodes.size());
-		tree.nodes.push_back(GpuLightTreeNode{});
-		tree.nodes.push_back(GpuLightTreeNode{});
-		tree.nodes[task.node].childOrLight = left;
-		tree.nodes[left].parent = task.node;
-		tree.nodes[left + 1].parent = task.node;
+		const uint32_t left = static_cast<uint32_t>(binary.size());
+		binary.push_back({ 0, task.begin, mid });
+		binary.push_back({ 0, mid, task.end });
+		binary[task.node].left = left;
 
 		stack.push_back({ left + 1, mid, task.end, rightCentroids });
 		stack.push_back({ left, task.begin, mid, leftCentroids });
 	}
 
-	// Bottom up cluster parameters (Eqs. 2 to 5).
-	std::vector<float3> averageDirection(tree.nodes.size());
-	std::vector<float> flux(tree.nodes.size());
-	for (size_t index = tree.nodes.size(); index-- > 0;)
+	// Collapse into groups of LIGHT_TREE_WIDTH: a group starts as the two children of a binary node,
+	// and the member with the most lights is replaced by its own two children until the group is full
+	// or holds only leaves. Opening the largest keeps the tree shallow. Groups are appended while the
+	// nodes are visited in index order, so a child always has a larger index than its parent, which
+	// lets the bottom-up pass below run in reverse index order.
+	std::vector<uint32_t> nodeBinary; // binary node of each node, kEmptyNode for padding
+	std::vector<uint32_t> depth; // levels of groups from the root down to the node
+	nodeBinary.reserve(2 * lightCount);
+	depth.reserve(2 * lightCount);
+	auto addGroup = [&](uint32_t binaryNode, uint32_t parent, uint32_t parentDepth)
 	{
-		GpuLightTreeNode &node = tree.nodes[index];
-
-		if (node.childOrLight & LIGHT_TREE_LEAF_BIT)
+		uint32_t members[LIGHT_TREE_WIDTH];
+		uint32_t memberCount = 0;
+		if (binary[binaryNode].left == 0)
 		{
-			const LeafCluster &leaf = leaves[node.childOrLight & ~LIGHT_TREE_LEAF_BIT];
-			node.mean = leaf.mean;
-			node.variance = leaf.variance;
-			node.radius = leaf.radius;
-			flux[index] = leaf.flux;
-			averageDirection[index] = leaf.averageDirection;
+			members[memberCount++] = binaryNode; // a single leaf under the root
+		}
+		else
+		{
+			members[memberCount++] = binary[binaryNode].left;
+			members[memberCount++] = binary[binaryNode].left + 1;
+		}
+		while (memberCount < LIGHT_TREE_WIDTH)
+		{
+			uint32_t open = UINT32_MAX;
+			uint32_t openCount = 0;
+			for (uint32_t i = 0; i < memberCount; ++i)
+			{
+				const BinaryNode &b = binary[members[i]];
+				if (b.left != 0 && b.end - b.begin > openCount)
+				{
+					open = i;
+					openCount = b.end - b.begin;
+				}
+			}
+			if (open == UINT32_MAX)
+			{
+				break;
+			}
+			const uint32_t left = binary[members[open]].left;
+			members[open] = left;
+			members[memberCount++] = left + 1;
+		}
+
+		const uint32_t first = static_cast<uint32_t>(nodeBinary.size());
+		for (uint32_t i = 0; i < LIGHT_TREE_WIDTH; ++i)
+		{
+			nodeBinary.push_back(i < memberCount ? members[i] : kEmptyNode);
+			depth.push_back(parentDepth + 1);
+		}
+		tree.parents.push_back(parent);
+		return first;
+	};
+
+	std::vector<uint32_t> childOrLight;
+	childOrLight.reserve(2 * lightCount);
+	addGroup(0, 0, 0);
+	for (uint32_t index = 0; index < static_cast<uint32_t>(nodeBinary.size()); ++index)
+	{
+		const uint32_t b = nodeBinary[index];
+		if (b == kEmptyNode)
+		{
+			childOrLight.push_back(0);
+		}
+		else if (binary[b].left == 0)
+		{
+			const uint32_t count = binary[b].end - binary[b].begin;
+			childOrLight.push_back(LIGHT_TREE_LEAF_BIT | ((count - 1) << LIGHT_TREE_LEAF_COUNT_SHIFT) | binary[b].begin);
+			tree.maxDepth = std::max(tree.maxDepth, depth[index]);
+			tree.averageDepth += static_cast<float>(depth[index] * count);
+		}
+		else
+		{
+			childOrLight.push_back(addGroup(b, index, depth[index]));
+		}
+	}
+	tree.averageDepth /= static_cast<float>(lightCount);
+
+	// Bottom up cluster parameters (Eqs. 2 to 5), and the leaf entries: each light is picked from its
+	// leaf in proportion to its flux.
+	tree.leafLights.resize(lightCount);
+	tree.leafOfLight.resize(lightCount);
+	std::vector<Cluster> clusters(nodeBinary.size());
+	for (uint32_t index = static_cast<uint32_t>(nodeBinary.size()); index-- > 0;)
+	{
+		const uint32_t b = nodeBinary[index];
+		if (b == kEmptyNode)
+		{
+			continue;
+		}
+		if (binary[b].left == 0)
+		{
+			const uint32_t begin = binary[b].begin;
+			const uint32_t count = binary[b].end - begin;
+			clusters[index] = Combine(count, [&](uint32_t i) -> const Cluster & { return leaves[prims[begin + i].light]; });
+			for (uint32_t i = 0; i < count; ++i)
+			{
+				const uint32_t light = prims[begin + i].light;
+				const float pmf = leaves[light].flux / clusters[index].flux;
+				tree.leafLights[begin + i] = { light, pmf };
+				tree.leafOfLight[light] = { index, pmf };
+			}
 			continue;
 		}
 
-		const uint32_t l = node.childOrLight;
-		const uint32_t r = l + 1;
-		const GpuLightTreeNode &a = tree.nodes[l];
-		const GpuLightTreeNode &b = tree.nodes[r];
-		flux[index] = flux[l] + flux[r];
-		const float wl = flux[l] / flux[index];
-		const float wr = flux[r] / flux[index];
-
-		const float3 mean = a.mean * wl + b.mean * wr;
-		const float3 dLR = a.mean - b.mean;
-
-		node.mean = mean;
-		node.variance = wl * a.variance + wr * b.variance + wl * wr * Dot(dLR, dLR);
-		node.radius = std::max(Length(a.mean - mean) + a.radius, Length(b.mean - mean) + b.radius);
-		averageDirection[index] = averageDirection[l] * wl + averageDirection[r] * wr;
+		const uint32_t first = childOrLight[index];
+		uint32_t members[LIGHT_TREE_WIDTH];
+		uint32_t memberCount = 0;
+		for (uint32_t i = 0; i < LIGHT_TREE_WIDTH; ++i)
+		{
+			if (nodeBinary[first + i] != kEmptyNode)
+			{
+				members[memberCount++] = first + i;
+			}
+		}
+		clusters[index] = Combine(memberCount, [&](uint32_t i) -> const Cluster & { return clusters[members[i]]; });
 	}
 
 	// Convert average directions to the vMF axis and sharpness (Eq. 3), and fold the flux and the
-	// sharpness dependent normalisation into one amplitude so the shader does not recompute it per visit.
-	for (size_t index = 0; index < tree.nodes.size(); ++index)
+	// sharpness dependent normalisation into one amplitude so the shader does not recompute it per
+	// visit. Then pack each node; sharpness stays below about 1e4 (len <= 0.9999), within float16.
+	tree.nodes.resize(nodeBinary.size());
+	for (size_t index = 0; index < nodeBinary.size(); ++index)
 	{
-		const float3 v = averageDirection[index];
+		GpuLightTreeNode &packed = tree.nodes[index];
+		if (nodeBinary[index] == kEmptyNode)
+		{
+			packed = {};
+			packed.radius = -FLT_MAX; // rejected by LightTreeNodeImportance as below the horizon
+			continue;
+		}
+
+		const Cluster &node = clusters[index];
+		const float3 v = node.averageDirection;
 		float len = Length(v);
-		tree.nodes[index].axis = len > 0.0f ? v * (1.0f / len) : float3(0.0f, 0.0f, 1.0f);
+		const float3 axis = len > 0.0f ? v * (1.0f / len) : float3(0.0f, 0.0f, 1.0f);
 		len = std::min(len, 0.9999f);
 		const float sharpness = (3.0f * len - len * len * len) / (1.0f - len * len);
-		tree.nodes[index].sharpness = sharpness;
-		tree.nodes[index].amplitude = flux[index] / (2.0f * Pi * SGIntegral(sharpness));
+
+		packed.mean = node.mean;
+		packed.amplitude = node.flux / (2.0f * Pi * SGIntegral(sharpness));
+		packed.childOrLight = childOrLight[index];
+		packed.axis = PackOctahedralSnorm16x2(axis);
+		packed.sharpnessStdDev = PackF16Pair(sharpness, std::min(sqrtf(std::max(node.variance, 0.0f)), kMaxHalf));
+		packed.radius = node.radius;
 	}
 
 	return tree;
