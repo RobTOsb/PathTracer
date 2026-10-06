@@ -28,6 +28,9 @@ struct LightSettings
 	bool enabled = true;
 	float intensityScale = 1.0f; // multiplies every light, so the tree does not need rebuilding
 	LightSamplingMode sampling = LIGHT_SAMPLING_TREE;
+	// Light tree: skip the glossy importance for lobes at least this rough (perceptual roughness).
+	bool diffuseOnlyRoughLobes = true;
+	float diffuseOnlyRoughness = 0.7f;
 	bool animate = true; // moves the test lights, the tree is rebuilt every frame either way
 	float animationSpeed = 1.0f;
 };

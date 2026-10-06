@@ -289,7 +289,7 @@ LightSample SampleLight(float3 position, OpenPBRBaseParams mat, OpenPBRContext c
     {
         LightTreeShadingContext treeCtx = MakeLightTreeShadingContext(
             position, mat.geometryTangent, mat.geometryBitangent, mat.geometryNormal, wo,
-            ctx.probDiffuse, ctx.probSpecR, ctx.alpha.x, ctx.alpha.y);
+            ctx.probDiffuse, ctx.probSpecR, ctx.alpha.x, ctx.alpha.y, g_Frame.lightTreeDiffuseOnlyAlpha);
         if (!SampleLightTree(g_LightTreeNodes, treeCtx, uSelect, lightIndex, pmf))
             return ls;
     }

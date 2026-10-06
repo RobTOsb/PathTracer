@@ -177,6 +177,14 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::BeginDisabled(lightCount == 0);
 		ImGui::Checkbox("Enabled", &lights.enabled);
 		EnumCombo("Sampling", kLightSamplingModes, lights.sampling);
+		ImGui::BeginDisabled(lights.sampling != LIGHT_SAMPLING_TREE);
+		ImGui::Checkbox("Diffuse-only importance", &lights.diffuseOnlyRoughLobes);
+		ImGui::SetItemTooltip("Skip the glossy light tree importance for lobes at least this rough");
+		ImGui::SameLine();
+		ImGui::BeginDisabled(!lights.diffuseOnlyRoughLobes);
+		ImGui::SliderFloat("Min roughness", &lights.diffuseOnlyRoughness, 0.0f, 1.0f, "%.2f");
+		ImGui::EndDisabled();
+		ImGui::EndDisabled();
 		ImGui::DragFloat("Light intensity",
 						 &lights.intensityScale,
 						 0.01f,

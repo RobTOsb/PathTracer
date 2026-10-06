@@ -32,6 +32,11 @@ struct FrameConstants
 	uint lightSampling; // LightSamplingMode
 	float lightIntensityScale; // multiplies every light's radiance or intensity
 	float sunSelectProbability;
+
+	float lightTreeDiffuseOnlyAlpha;
+	uint framePad0;
+	uint framePad1;
+	uint framePad2;
 };
 
 // How next event estimation picks one light from the light buffer.
@@ -82,7 +87,7 @@ struct TonemapConstants
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(FrameConstants) == 336,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 352,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuMaterial) == 64, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 24, "TonemapConstants must fit the root constants");
 #endif

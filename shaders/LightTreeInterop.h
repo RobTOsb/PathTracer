@@ -18,7 +18,7 @@ struct GpuLightTreeNode
 	float3 axis; // nu, vMF axis of the radiant intensity
 	float sharpness; // lambda, vMF sharpness, 0 for isotropic emitters
 	float radius; // bounding sphere radius around the mean
-	float flux; // Phi, radiant flux (luminance)
+	float amplitude; // Phi / (2 pi int g(w; -nu, lambda) dw), the node constant part of the SG light amplitude
 	uint childOrLight; // interior: left child, the right child is next to it; leaf: light index | LIGHT_TREE_LEAF_BIT
 	uint parent; // parent node, the root points to itself
 };

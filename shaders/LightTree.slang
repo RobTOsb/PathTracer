@@ -24,15 +24,21 @@ struct LightTreeShadingContext
     GlossyContext glossy;
 };
 
+// diffuseOnlyAlpha: GGX alpha (roughness squared) on both axes at or above which the glossy importance
+// is replaced by the diffuse one. Such lobes are wide enough that the diffuse estimate ranks clusters
+// about as well, and the glossy evaluation is the expensive half of LightTreeNodeImportance.
 LightTreeShadingContext MakeLightTreeShadingContext(float3 position, float3 T, float3 B, float3 N, float3 V,
                                                     float diffuseWeight, float specularWeight,
-                                                    float alphaX, float alphaY)
+                                                    float alphaX, float alphaY, float diffuseOnlyAlpha)
 {
     LightTreeShadingContext ctx;
     ctx.position = position;
     ctx.normal = N;
-    ctx.diffuseWeight = diffuseWeight;
-    ctx.specularWeight = dot(V, N) > 0.0 ? specularWeight : 0.0;
+    float specular = dot(V, N) > 0.0 ? specularWeight : 0.0;
+    // Depends only on the shading point, so SampleLightTree and LightTreePmf still agree.
+    bool roughLobe = min(alphaX, alphaY) >= diffuseOnlyAlpha;
+    ctx.diffuseWeight = roughLobe ? diffuseWeight + specular : diffuseWeight;
+    ctx.specularWeight = roughLobe ? 0.0 : specular;
     ctx.glossy = MakeGlossyContext(T, B, N, V, alphaX, alphaY);
     return ctx;
 }
@@ -54,10 +60,22 @@ SGLight MakeSGLight(GpuLightTreeNode node, float3 x, float3 n)
     float invSigma2 = 1.0 / sigma2;
     float s = d2 * invSigma2;
 
+    // node.amplitude already holds Phi / (2 pi int g(w; -nu, lambda) dw).
     SGLight sg;
-    float logScale;
-    SGProduct(-node.axis, node.sharpness, dir, s, sg.axis, sg.sharpness, logScale);
-    sg.amplitude = node.flux * exp(logScale) * invSigma2 / (SG_TWO_PI * SGIntegral(node.sharpness));
+    if (node.sharpness > 0.0)
+    {
+        float logScale;
+        SGProduct(-node.axis, node.sharpness, dir, s, sg.axis, sg.sharpness, logScale);
+        sg.amplitude = node.amplitude * exp(logScale) * invSigma2;
+    }
+    else
+    {
+        // Isotropic cluster (point lights only): the emission SG is constant, so the product is
+        // the distance SG itself with a unit scale.
+        sg.axis = dir;
+        sg.sharpness = s;
+        sg.amplitude = node.amplitude * invSigma2;
+    }
     return sg;
 }
 

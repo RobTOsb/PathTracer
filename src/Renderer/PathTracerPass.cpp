@@ -7,6 +7,7 @@
 #include "DLSSUtil.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <math.h>
 #include <stdexcept>
 
@@ -153,6 +154,9 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.lightSampling = static_cast<uint>(lights.sampling);
 	constants.lightIntensityScale = lights.intensityScale;
 	constants.sunSelectProbability = sunActive ? (lightsActive ? 0.5f : 1.0f) : 0.0f;
+	constants.lightTreeDiffuseOnlyAlpha = lights.diffuseOnlyRoughLobes
+											  ? lights.diffuseOnlyRoughness * lights.diffuseOnlyRoughness
+											  : FLT_MAX;
 
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
 	constants.frameIndex = renderContext->GetCurrentFrame();

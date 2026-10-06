@@ -26,6 +26,16 @@ namespace
 		return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
 	}
 
+	// Full spherical integral of an SG, 2 pi (1 - exp(-2 kappa)) / kappa. Matches SGIntegral in SGLighting.slang.
+	float SGIntegral(float kappa)
+	{
+		if (kappa < 0.05f)
+		{
+			return 2.0f * Pi * (2.0f + kappa * (-2.0f + kappa * (4.0f / 3.0f + kappa * (-2.0f / 3.0f))));
+		}
+		return 2.0f * Pi * (1.0f - expf(-2.0f * kappa)) / kappa;
+	}
+
 	// Kept in full 16 byte vectors: binning grows the same bin for consecutive primitives, and
 	// 12 byte float3 stores followed by wider loads stall on store forwarding.
 	struct Bounds
@@ -470,6 +480,7 @@ LightTree BuildLightTree(std::span<const GpuLight> lights, const LightTreeBuildS
 
 	// Bottom up cluster parameters (Eqs. 2 to 5).
 	std::vector<float3> averageDirection(tree.nodes.size());
+	std::vector<float> flux(tree.nodes.size());
 	for (size_t index = tree.nodes.size(); index-- > 0;)
 	{
 		GpuLightTreeNode &node = tree.nodes[index];
@@ -480,7 +491,7 @@ LightTree BuildLightTree(std::span<const GpuLight> lights, const LightTreeBuildS
 			node.mean = leaf.mean;
 			node.variance = leaf.variance;
 			node.radius = leaf.radius;
-			node.flux = leaf.flux;
+			flux[index] = leaf.flux;
 			averageDirection[index] = leaf.averageDirection;
 			continue;
 		}
@@ -489,9 +500,9 @@ LightTree BuildLightTree(std::span<const GpuLight> lights, const LightTreeBuildS
 		const uint32_t r = l + 1;
 		const GpuLightTreeNode &a = tree.nodes[l];
 		const GpuLightTreeNode &b = tree.nodes[r];
-		const float flux = a.flux + b.flux;
-		const float wl = a.flux / flux;
-		const float wr = b.flux / flux;
+		flux[index] = flux[l] + flux[r];
+		const float wl = flux[l] / flux[index];
+		const float wr = flux[r] / flux[index];
 
 		const float3 mean = a.mean * wl + b.mean * wr;
 		const float3 dLR = a.mean - b.mean;
@@ -499,18 +510,20 @@ LightTree BuildLightTree(std::span<const GpuLight> lights, const LightTreeBuildS
 		node.mean = mean;
 		node.variance = wl * a.variance + wr * b.variance + wl * wr * Dot(dLR, dLR);
 		node.radius = std::max(Length(a.mean - mean) + a.radius, Length(b.mean - mean) + b.radius);
-		node.flux = flux;
 		averageDirection[index] = averageDirection[l] * wl + averageDirection[r] * wr;
 	}
 
-	// Convert average directions to the vMF axis and sharpness (Eq. 3).
+	// Convert average directions to the vMF axis and sharpness (Eq. 3), and fold the flux and the
+	// sharpness dependent normalisation into one amplitude so the shader does not recompute it per visit.
 	for (size_t index = 0; index < tree.nodes.size(); ++index)
 	{
 		const float3 v = averageDirection[index];
 		float len = Length(v);
 		tree.nodes[index].axis = len > 0.0f ? v * (1.0f / len) : float3(0.0f, 0.0f, 1.0f);
 		len = std::min(len, 0.9999f);
-		tree.nodes[index].sharpness = (3.0f * len - len * len * len) / (1.0f - len * len);
+		const float sharpness = (3.0f * len - len * len * len) / (1.0f - len * len);
+		tree.nodes[index].sharpness = sharpness;
+		tree.nodes[index].amplitude = flux[index] / (2.0f * Pi * SGIntegral(sharpness));
 	}
 
 	return tree;

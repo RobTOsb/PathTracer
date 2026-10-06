@@ -9,27 +9,30 @@ static const float SG_TWO_PI = 6.28318530717959;
 static const float SG_INV_PI = 0.318309886183791;
 static const float SG_INV_SQRT_PI = 0.564189583547756;
 
-// Complementary error function, fractional error < 1.2e-7 (Numerical Recipes erfcc).
-float SGErfc(float x)
+// erfc(z) ~ SGErfcPoly(z) exp(-z^2) for z >= 0, absolute error < 1.5e-7 (Abramowitz and Stegun 7.1.26).
+// Kept apart from the exp so callers that also need exp(-z^2) evaluate it once. These functions only
+// feed sampling importance, where ~1e-4 relative accuracy is plenty: errors change variance, not bias,
+// as long as SampleLightTree and LightTreePmf evaluate the same code.
+float SGErfcPoly(float z)
 {
-    float z = abs(x);
-    float t = 1.0 / (1.0 + 0.5 * z);
-    float r = t * exp(-z * z - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 +
-              t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 +
-              t * (-0.82215223 + t * 0.17087277)))))))));
-    return x >= 0.0 ? r : 2.0 - r;
+    float t = 1.0 / (1.0 + 0.3275911 * z);
+    return t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
 }
 
-// Error function. Uses a Taylor series near zero to avoid cancellation in 1 - erfc(x).
+// Error function, one exp and no branch on the argument.
 float SGErf(float x)
 {
-    if (abs(x) < 0.5)
-    {
-        float x2 = x * x;
-        return 1.12837916709551 * x * (1.0 + x2 * (-1.0 / 3.0 + x2 * (0.1 + x2 * (-1.0 / 42.0 + x2 * (1.0 / 216.0)))));
-    }
-    float r = 1.0 - SGErfc(abs(x));
+    float z = abs(x);
+    float r = 1.0 - SGErfcPoly(z) * exp(-z * z);
     return x >= 0.0 ? r : -r;
+}
+
+// q(x) = x erfc(-x) + exp(-x^2) / sqrt(pi), the antiderivative used by the diffuse interpolation.
+// For z = |x|: erfc(-x) = 2 - erfc(z) when x >= 0 and erfc(z) otherwise, so both cases share exp(-z^2).
+float SGErfcAntiderivative(float x)
+{
+    float z = abs(x);
+    return 2.0 * max(x, 0.0) + exp(-z * z) * (SG_INV_SQRT_PI - z * SGErfcPoly(z));
 }
 
 // Full spherical integral of an SG: 2 * pi * (1 - exp(-2 * kappa)) / kappa.
@@ -76,9 +79,8 @@ float SGClampedCosineProductIntegral(float cosine, float kappa)
     float u;
     if (t > 1e-6)
     {
-        float tc = t * c;
-        float qc = tc * SGErfc(-tc) + exp(-tc * tc) * SG_INV_SQRT_PI;
-        float qm = -t * SGErfc(t) + exp(-t * t) * SG_INV_SQRT_PI;
+        float qc = SGErfcAntiderivative(t * c);
+        float qm = SGErfcAntiderivative(-t);
         u = saturate((qc - qm) / (2.0 * t));
     }
     else
