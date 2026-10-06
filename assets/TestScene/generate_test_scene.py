@@ -18,6 +18,10 @@ def nm(x, y):
     else: n = (0.0, 0.0, 1.0)
     return tuple(int(round((c*0.5+0.5)*255)) for c in n) + (255,)
 png(os.path.join(out, 'normal.png'), 256, 256, nm)
+# alpha-masked lattice: opaque wooden bars, alpha 0 in the holes
+png(os.path.join(out, 'lattice.png'), 128, 128, lambda x, y: (150,105,65,255) if (x%32 < 8 or y%32 < 8) else (0,0,0,0))
+# alpha-blended pane: white, alpha ramping 0.1 -> 0.9 across U (the tint comes from baseColorFactor)
+png(os.path.join(out, 'alpharamp.png'), 64, 64, lambda x, y: (255,255,255,int(round(255*(0.1+0.8*x/63)))))
 
 bufdata = bytearray(); views = []; accessors = []
 def add(data, fmt, count, comptype, typ, target, minmax=None):
@@ -74,6 +78,8 @@ m_sphere_r = add_mesh('SphereRed', sphere(1.0), 1)
 m_sphere_g = add_mesh('SphereGold', sphere(1.0), 2)
 m_sphere_c = add_mesh('SphereCoated', sphere(1.0), 3)
 m_box = add_mesh('Box', box(0.75), 4)
+m_lattice = add_mesh('Lattice', plane(1.25, 2), 5)
+m_pane = add_mesh('Pane', plane(1.25, 1), 6)
 
 materials = [
     {'name': 'Ground', 'pbrMetallicRoughness': {'baseColorTexture': {'index': 0}, 'metallicRoughnessTexture': {'index': 1}, 'metallicFactor': 1.0, 'roughnessFactor': 1.0}, 'normalTexture': {'index': 2, 'scale': 1.0}},
@@ -81,8 +87,11 @@ materials = [
     {'name': 'Gold', 'pbrMetallicRoughness': {'baseColorFactor': [1.0, 0.78, 0.34, 1], 'metallicFactor': 1.0, 'roughnessFactor': 0.25}},
     {'name': 'BlueGlossy', 'pbrMetallicRoughness': {'baseColorFactor': [0.1, 0.25, 0.8, 1], 'metallicFactor': 0.0, 'roughnessFactor': 0.05}},
     {'name': 'Chrome', 'pbrMetallicRoughness': {'baseColorFactor': [0.95, 0.95, 0.95, 1], 'metallicFactor': 1.0, 'roughnessFactor': 0.02}},
+    {'name': 'LatticeMask', 'pbrMetallicRoughness': {'baseColorTexture': {'index': 3}, 'metallicFactor': 0.0, 'roughnessFactor': 0.7}, 'alphaMode': 'MASK', 'alphaCutoff': 0.5, 'doubleSided': True},
+    {'name': 'PaneBlend', 'pbrMetallicRoughness': {'baseColorFactor': [0.3, 0.7, 1.0, 1], 'baseColorTexture': {'index': 4}, 'metallicFactor': 0.0, 'roughnessFactor': 0.1}, 'alphaMode': 'BLEND', 'doubleSided': True},
 ]
 q = (0.0, math.sin(math.radians(30)/2), 0.0, math.cos(math.radians(30)/2))  # 30 deg about Y
+upright = (math.sin(math.radians(90)/2), 0.0, 0.0, math.cos(math.radians(90)/2))  # 90 deg about X: ground plane -> wall facing +Z
 # column-major matrix: rotate 45 deg about Y, translate (3, 0.75, -1)
 c, s = math.cos(math.radians(45)), math.sin(math.radians(45))
 mat = [c,0,-s,0,  0,1,0,0,  s,0,c,0,  3,0.75,-1,1]
@@ -93,10 +102,12 @@ nodes = [
     {'name': 'BlueStretched', 'mesh': m_sphere_c, 'translation': [2.5, 0.6, 2.0], 'rotation': list(q), 'scale': [1.0, 0.6, 0.5]},
     {'name': 'BoxMatrix', 'mesh': m_box, 'matrix': mat},
     {'name': 'BoxMirrored', 'mesh': m_box, 'translation': [-3.0, 0.75, -2.5], 'scale': [-1, 1, 1], 'rotation': list(q)},
+    {'name': 'LatticeMasked', 'mesh': m_lattice, 'translation': [-2.5, 1.25, 2.5], 'rotation': list(upright)},
+    {'name': 'PaneBlended', 'mesh': m_pane, 'translation': [0.5, 1.25, 3.2], 'rotation': list(upright)},
 ]
 gltf = {'asset': {'version': '2.0'}, 'scene': 0, 'scenes': [{'nodes': list(range(len(nodes)))}], 'nodes': nodes, 'meshes': meshes,
-        'materials': materials, 'textures': [{'source': 0}, {'source': 1}, {'source': 2}],
-        'images': [{'uri': 'checker.png'}, {'uri': 'roughmetal.png'}, {'uri': 'normal.png'}],
+        'materials': materials, 'textures': [{'source': i} for i in range(5)],
+        'images': [{'uri': 'checker.png'}, {'uri': 'roughmetal.png'}, {'uri': 'normal.png'}, {'uri': 'lattice.png'}, {'uri': 'alpharamp.png'}],
         'buffers': [{'uri': 'scene.bin', 'byteLength': len(bufdata)}], 'bufferViews': views, 'accessors': accessors}
 open(os.path.join(out, 'scene.bin'), 'wb').write(bufdata)
 json.dump(gltf, open(os.path.join(out, 'scene.gltf'), 'w'), indent=1)

@@ -106,14 +106,14 @@ struct HitPayload
 {
     float hitT;
     float3 Ng;
-    uint materialId;
+    uint materialId; // on the way in, the seed AnyHit draws its blend decisions from
     float3 N;
     float tangentSign;
     float3 T;
     float2 uv;
 };
 
-HitInfo TraceClosest(float3 origin, float3 dir)
+HitInfo TraceClosest(float3 origin, float3 dir, inout uint rng)
 {
     RayDesc ray;
     ray.Origin = origin;
@@ -123,7 +123,9 @@ HitInfo TraceClosest(float3 origin, float3 dir)
 
     HitPayload payload = (HitPayload)0;
     payload.hitT = -1.0;
-    TraceRay(g_Scene, RAY_FLAG_FORCE_OPAQUE, 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
+    payload.materialId = rng++;
+    // Masked and blended geometry runs AnyHit; everything else is flagged opaque in its BLAS.
+    TraceRay(g_Scene, RAY_FLAG_NONE, 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
 
     HitInfo hit = (HitInfo)0;
     hit.hit = payload.hitT >= 0.0;
@@ -548,7 +550,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
 
     for (uint bounce = 0; bounce < maxSegments; ++bounce)
     {
-        HitInfo hit = TraceClosest(origin, dir);
+        HitInfo hit = TraceClosest(origin, dir, rng);
 
         if (bounce == 1 && primarySpecular)
             guides.specularHitDistance = hit.hit ? hit.t : SKY_HIT_DISTANCE;
@@ -769,6 +771,40 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     payload.uv = InterpolateTexCoord(tri, bary);
 }
 
+// Base colour and alpha at the candidate hit, for the any-hit shaders.
+float4 LoadBaseColourAlpha(GpuMaterial material, PrimitiveDesc prim, BuiltInTriangleIntersectionAttributes attr)
+{
+    float4 albedo = material.baseColour;
+    if (material.albedoTexture != INVALIDDESCRIPTORHANDLE)
+        albedo *= SampleTexture(material.albedoTexture, InterpolateTexCoord(LoadTriangle(prim), Barycentrics(attr)));
+    return albedo;
+}
+
+// Uniform random number for the candidate hit. Hashing the instance and primitive in gives every
+// surface along the ray its own number, and a repeated any-hit call for the same triangle the same one.
+float SurfaceRandom(uint seed)
+{
+    uint3 h = Pcg3d(uint3(DispatchRaysIndex().xy, seed));
+    h = Pcg3d(uint3(h.x, InstanceID(), PrimitiveIndex()));
+    return float(h.x >> 8) * (1.0 / 16777216.0);
+}
+
+// Alpha for camera and bounce rays. Masked surfaces are cut at alphaCutoff. Blended ones use
+// stochastic transparency: the ray stops at each with probability alpha, so on average a surface
+// contributes alpha times its shading and lets 1 - alpha of what is behind it through.
+[shader("anyhit")]
+void AnyHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+{
+    PrimitiveDesc prim = LoadPrimitive(InstanceID());
+    GpuMaterial material = LoadGpuMaterial(prim.materialIndex);
+    float alpha = LoadBaseColourAlpha(material, prim, attr).a;
+
+    bool cutOut = material.alphaMode == ALPHA_MODE_MASK ? alpha < material.alphaCutoff
+                                                        : SurfaceRandom(payload.materialId) >= alpha;
+    if (cutOut)
+        IgnoreHit();
+}
+
 [shader("miss")]
 void ShadowMiss(inout ShadowRayPayload payload)
 {
@@ -785,10 +821,7 @@ void ShadowAnyHit(inout ShadowRayPayload payload, in BuiltInTriangleIntersection
 {
     PrimitiveDesc prim = LoadPrimitive(InstanceID());
     GpuMaterial material = LoadGpuMaterial(prim.materialIndex);
-
-    float4 albedo = material.baseColour;
-    if (material.albedoTexture != INVALIDDESCRIPTORHANDLE)
-        albedo *= SampleTexture(material.albedoTexture, InterpolateTexCoord(LoadTriangle(prim), Barycentrics(attr)));
+    float4 albedo = LoadBaseColourAlpha(material, prim, attr);
 
     if (material.alphaMode == ALPHA_MODE_MASK)
     {

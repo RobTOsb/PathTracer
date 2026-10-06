@@ -436,8 +436,8 @@ void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene, UploadBatchH
 {
 	std::vector<GpuMaterial> materials;
 	materials.reserve(scene.GetMaterialCount() + 1);
-	materialIsOpaque_.clear();
-	materialIsOpaque_.reserve(scene.GetMaterialCount() + 1);
+	materialAlphaModes_.clear();
+	materialAlphaModes_.reserve(scene.GetMaterialCount() + 1);
 
 	for (size_t i = 0; i < scene.GetMaterialCount(); ++i)
 	{
@@ -459,7 +459,7 @@ void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene, UploadBatchH
 		gpu.normalTexture =
 				UploadTexture(material.GetNormalTexture(), Format::R8G8B8A8_UNORM, "Material_Normal", batch);
 		materials.push_back(gpu);
-		materialIsOpaque_.push_back(material.GetAlphaMode() == Scene::AlphaMode::Opaque);
+		materialAlphaModes_.push_back(gpu.alphaMode);
 	}
 
 	// Default material (glTF spec defaults would be metallic 1, which reads badly on untextured
@@ -475,7 +475,7 @@ void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene, UploadBatchH
 	fallback.alphaCutoff = 0.5f;
 	fallback.alphaMode = ALPHA_MODE_OPAQUE;
 	materials.push_back(fallback);
-	materialIsOpaque_.push_back(true);
+	materialAlphaModes_.push_back(fallback.alphaMode);
 
 	materialBuffer_ = UploadStream(materials.data(),
 								   materials.size() * sizeof(GpuMaterial),
@@ -529,8 +529,12 @@ void RenderGPUScene::BuildAccelerationStructures()
 		geometry.indexBuffer = indexBuffer;
 		geometry.indexBufferOffset = static_cast<uint64_t>(desc.indexOffset) * sizeof(uint32_t);
 		geometry.indexCount = desc.indexCount;
-		// Only masked and blended materials need the shadow any-hit shader; opaque geometry skips it.
-		geometry.isOpaque = materialIsOpaque_[desc.materialIndex];
+		// Only masked and blended materials need the any-hit shaders; opaque geometry skips them. The
+		// shadow any-hit multiplies in each blended surface's transmittance, so a duplicate call for the
+		// same triangle would darken the shadow.
+		const uint32_t alphaMode = materialAlphaModes_[desc.materialIndex];
+		geometry.isOpaque = alphaMode == ALPHA_MODE_OPAQUE;
+		geometry.noDuplicateAnyHit = alphaMode == ALPHA_MODE_BLEND;
 
 		blases_[i] = renderContext_->CreateBLAS(geometry);
 		renderContext_->BuildAccelerationStructure(blases_[i]);

@@ -29,12 +29,12 @@
 #undef min
 #undef max
 
-constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\intel_sponza\\intelsponza.glb";
+constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\Sponza\\glTF\\Sponza.gltf";
 // constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
 
 constexpr uint kFramesInFlight = 2;
 constexpr float kMouseSensitivity = 0.15f; // degrees per pixel
-constexpr uint32_t kTestLightCount = 8192;
+constexpr uint32_t kTestLightCount = 16;
 constexpr float kTestLightMinRadius = 0.005f; // fraction of the scene radius, the largest is 10x this
 constexpr float kTestLightMinPeriod = 10.0f; // seconds per swing along one axis
 constexpr float kTestLightMaxPeriod = 30.0f;

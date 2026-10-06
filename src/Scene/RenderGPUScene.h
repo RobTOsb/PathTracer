@@ -156,7 +156,7 @@ private:
 	float lightTreeBuildMs_ = 0.0f;
 
 	std::vector<ResourceHandle> textures_;
-	std::vector<bool> materialIsOpaque_; // per GpuMaterial row; decides each BLAS's opaque flag
+	std::vector<uint32_t> materialAlphaModes_; // GpuAlphaMode per GpuMaterial row; decides each BLAS's geometry flags
 	uint64_t pendingUploadBytes_ = 0;
 
 	std::vector<AccelerationStructureHandle> blases_; // one per primitive desc, invalid for skipped primitives

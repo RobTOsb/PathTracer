@@ -11,7 +11,9 @@
     2,
     3,
     4,
-    5
+    5,
+    6,
+    7
    ]
   }
  ],
@@ -99,6 +101,36 @@
     0.0,
     0.9659258262890683
    ]
+  },
+  {
+   "name": "LatticeMasked",
+   "mesh": 5,
+   "translation": [
+    -2.5,
+    1.25,
+    2.5
+   ],
+   "rotation": [
+    0.7071067811865476,
+    0.0,
+    0.0,
+    0.7071067811865476
+   ]
+  },
+  {
+   "name": "PaneBlended",
+   "mesh": 6,
+   "translation": [
+    0.5,
+    1.25,
+    3.2
+   ],
+   "rotation": [
+    0.7071067811865476,
+    0.0,
+    0.0,
+    0.7071067811865476
+   ]
   }
  ],
  "meshes": [
@@ -169,6 +201,34 @@
      },
      "indices": 19,
      "material": 4
+    }
+   ]
+  },
+  {
+   "name": "Lattice",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 20,
+      "NORMAL": 21,
+      "TEXCOORD_0": 22
+     },
+     "indices": 23,
+     "material": 5
+    }
+   ]
+  },
+  {
+   "name": "Pane",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 24,
+      "NORMAL": 25,
+      "TEXCOORD_0": 26
+     },
+     "indices": 27,
+     "material": 6
     }
    ]
   }
@@ -242,6 +302,37 @@
     "metallicFactor": 1.0,
     "roughnessFactor": 0.02
    }
+  },
+  {
+   "name": "LatticeMask",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 3
+    },
+    "metallicFactor": 0.0,
+    "roughnessFactor": 0.7
+   },
+   "alphaMode": "MASK",
+   "alphaCutoff": 0.5,
+   "doubleSided": true
+  },
+  {
+   "name": "PaneBlend",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.3,
+     0.7,
+     1.0,
+     1
+    ],
+    "baseColorTexture": {
+     "index": 4
+    },
+    "metallicFactor": 0.0,
+    "roughnessFactor": 0.1
+   },
+   "alphaMode": "BLEND",
+   "doubleSided": true
   }
  ],
  "textures": [
@@ -253,6 +344,12 @@
   },
   {
    "source": 2
+  },
+  {
+   "source": 3
+  },
+  {
+   "source": 4
   }
  ],
  "images": [
@@ -264,12 +361,18 @@
   },
   {
    "uri": "normal.png"
+  },
+  {
+   "uri": "lattice.png"
+  },
+  {
+   "uri": "alpharamp.png"
   }
  ],
  "buffers": [
   {
    "uri": "scene.bin",
-   "byteLength": 201608
+   "byteLength": 201912
   }
  ],
  "bufferViews": [
@@ -391,6 +494,54 @@
    "buffer": 0,
    "byteOffset": 201464,
    "byteLength": 144,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 201608,
+   "byteLength": 48,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 201656,
+   "byteLength": 48,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 201704,
+   "byteLength": 32,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 201736,
+   "byteLength": 24,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 201760,
+   "byteLength": 48,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 201808,
+   "byteLength": 48,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 201856,
+   "byteLength": 32,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 201888,
+   "byteLength": 24,
    "target": 34963
   }
  ],
@@ -563,6 +714,74 @@
    "bufferView": 19,
    "componentType": 5125,
    "count": 36,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 20,
+   "componentType": 5126,
+   "count": 4,
+   "type": "VEC3",
+   "min": [
+    -1.25,
+    0,
+    -1.25
+   ],
+   "max": [
+    1.25,
+    0,
+    1.25
+   ]
+  },
+  {
+   "bufferView": 21,
+   "componentType": 5126,
+   "count": 4,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 22,
+   "componentType": 5126,
+   "count": 4,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 23,
+   "componentType": 5125,
+   "count": 6,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 24,
+   "componentType": 5126,
+   "count": 4,
+   "type": "VEC3",
+   "min": [
+    -1.25,
+    0,
+    -1.25
+   ],
+   "max": [
+    1.25,
+    0,
+    1.25
+   ]
+  },
+  {
+   "bufferView": 25,
+   "componentType": 5126,
+   "count": 4,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 26,
+   "componentType": 5126,
+   "count": 4,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 27,
+   "componentType": 5125,
+   "count": 6,
    "type": "SCALAR"
   }
  ]

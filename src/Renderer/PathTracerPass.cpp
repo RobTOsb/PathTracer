@@ -31,8 +31,8 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 	rayReconstruction_(rayReconstruction)
 {
 	RaytracingPipelineDesc desc = {};
-	desc.exports = { "RayGen", "Miss", "ClosestHit", "ShadowMiss", "ShadowClosestHit", "ShadowAnyHit" };
-	desc.hitGroups = { RaytracingHitGroup{ "HitGroup", "ClosestHit", "", "" },
+	desc.exports = { "RayGen", "Miss", "ClosestHit", "AnyHit", "ShadowMiss", "ShadowClosestHit", "ShadowAnyHit" };
+	desc.hitGroups = { RaytracingHitGroup{ "HitGroup", "ClosestHit", "AnyHit", "" },
 					   RaytracingHitGroup{ "ShadowHitGroup", "ShadowClosestHit", "ShadowAnyHit", "" } };
 	desc.maxPayloadSizeInBytes = kMaxPayloadSizeInBytes;
 	desc.maxAttributeSizeInBytes = 8; // triangle barycentrics

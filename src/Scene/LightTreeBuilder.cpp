@@ -11,16 +11,6 @@ namespace
 		return sqrtf(Dot(v, v));
 	}
 
-	float3 Min(const float3 &a, const float3 &b)
-	{
-		return { std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z) };
-	}
-
-	float3 Max(const float3 &a, const float3 &b)
-	{
-		return { std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z) };
-	}
-
 	float Component(const float3 &v, int axis)
 	{
 		return (&v.x)[axis];
@@ -36,26 +26,33 @@ namespace
 		return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
 	}
 
+	// Kept in full 16 byte vectors: binning grows the same bin for consecutive primitives, and
+	// 12 byte float3 stores followed by wider loads stall on store forwarding.
 	struct Bounds
 	{
-		float3 lo = { FLT_MAX, FLT_MAX, FLT_MAX };
-		float3 hi = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+		SIMDVector lo = XMVectorReplicate(FLT_MAX);
+		SIMDVector hi = XMVectorReplicate(-FLT_MAX);
+
+		void Grow(SIMDVector p)
+		{
+			lo = XMVectorMin(lo, p);
+			hi = XMVectorMax(hi, p);
+		}
 
 		void Grow(const float3 &p)
 		{
-			lo = Min(lo, p);
-			hi = Max(hi, p);
+			Grow(LoadFloat3(p));
 		}
 
 		void Grow(const Bounds &b)
 		{
-			lo = Min(lo, b.lo);
-			hi = Max(hi, b.hi);
+			lo = XMVectorMin(lo, b.lo);
+			hi = XMVectorMax(hi, b.hi);
 		}
 
 		bool IsValid() const
 		{
-			return lo.x <= hi.x;
+			return XMVectorGetX(lo) <= XMVectorGetX(hi);
 		}
 
 		float SurfaceArea() const
@@ -64,8 +61,9 @@ namespace
 			{
 				return 0.0f;
 			}
-			const float3 d = hi - lo;
-			return 2.0f * (d.x * d.y + d.y * d.z + d.z * d.x);
+			const SIMDVector d = XMVectorSubtract(hi, lo);
+			const SIMDVector products = XMVectorMultiply(d, XMVectorSwizzle<XM_SWIZZLE_Y, XM_SWIZZLE_Z, XM_SWIZZLE_X, XM_SWIZZLE_W>(d));
+			return 2.0f * XMVectorGetX(XMVector3Dot(products, XMVectorSplatOne()));
 		}
 	};
 
@@ -260,12 +258,16 @@ namespace
 					 BinnedSplitResult &result)
 	{
 		const uint32_t count = task.end - task.begin;
+		float3 centroidLo;
+		float3 centroidHi;
+		StoreFloat3(centroidLo, task.centroidBounds.lo);
+		StoreFloat3(centroidHi, task.centroidBounds.hi);
 		float lo[3];
 		float scale[3];
 		for (int axis = 0; axis < 3; ++axis)
 		{
-			lo[axis] = Component(task.centroidBounds.lo, axis);
-			const float extent = Component(task.centroidBounds.hi, axis) - lo[axis];
+			lo[axis] = Component(centroidLo, axis);
+			const float extent = Component(centroidHi, axis) - lo[axis];
 			// A flat axis puts everything in bin 0, which the sweep below rejects.
 			scale[axis] = extent > 0.0f ? static_cast<float>(binCount) / extent : 0.0f;
 		}
@@ -358,7 +360,8 @@ namespace
 	// Fallback for coincident centroids: median split by count on the largest axis.
 	uint32_t MedianSplit(std::vector<Primitive> &prims, uint32_t begin, uint32_t end, const Bounds &centroidBounds)
 	{
-		const float3 d = centroidBounds.hi - centroidBounds.lo;
+		float3 d;
+		StoreFloat3(d, XMVectorSubtract(centroidBounds.hi, centroidBounds.lo));
 		const int axis = (d.x >= d.y && d.x >= d.z) ? 0 : (d.y >= d.z ? 1 : 2);
 		const uint32_t mid = begin + (end - begin) / 2;
 		std::nth_element(prims.begin() + begin,
@@ -377,6 +380,8 @@ LightTree BuildLightTree(std::span<const GpuLight> lights, const LightTreeBuildS
 	std::vector<LeafCluster> leaves;
 	prims.reserve(lights.size());
 	leaves.reserve(lights.size());
+	tree.lights.reserve(lights.size());
+	tree.sourceIndex.reserve(lights.size());
 
 	for (uint32_t i = 0; i < static_cast<uint32_t>(lights.size()); ++i)
 	{
