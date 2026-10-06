@@ -28,6 +28,8 @@ struct LightSettings
 	bool enabled = true;
 	float intensityScale = 1.0f; // multiplies every light, so the tree does not need rebuilding
 	LightSamplingMode sampling = LIGHT_SAMPLING_TREE;
+	bool animate = true; // moves the test lights, the tree is rebuilt every frame either way
+	float animationSpeed = 1.0f;
 };
 
 // Everything the UI can tweak; passes read it every frame.

@@ -3,6 +3,7 @@
 #include "Camera.h"
 #include "RenderContext.h"
 #include "RenderSettings.h"
+#include "Scene/RenderGPUScene.h"
 
 #include "imgui.h"
 
@@ -86,9 +87,8 @@ namespace
 ImGuiPass::ImGuiPass(RenderSettings &settings,
 					 const Camera &camera,
 					 bool rayReconstructionSupported,
-					 uint32_t lightCount) :
-	settings_(settings), camera_(camera), rayReconstructionSupported_(rayReconstructionSupported),
-	lightCount_(lightCount)
+					 const RenderGPUScene &scene) :
+	settings_(settings), camera_(camera), rayReconstructionSupported_(rayReconstructionSupported), scene_(scene)
 {
 }
 
@@ -172,11 +172,23 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	if (ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		LightSettings &lights = settings_.lights;
-		ImGui::Text("%u point/area light(s)", lightCount_);
-		ImGui::BeginDisabled(lightCount_ == 0);
+		const uint32_t lightCount = scene_.GetLightCount();
+		ImGui::Text("%u point/area light(s), tree built in %.3f ms", lightCount, scene_.GetLightTreeBuildMs());
+		ImGui::BeginDisabled(lightCount == 0);
 		ImGui::Checkbox("Enabled", &lights.enabled);
 		EnumCombo("Sampling", kLightSamplingModes, lights.sampling);
-		ImGui::DragFloat("Light intensity", &lights.intensityScale, 0.01f, 0.0f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+		ImGui::DragFloat("Light intensity",
+						 &lights.intensityScale,
+						 0.01f,
+						 0.0f,
+						 1000.0f,
+						 "%.2f",
+						 ImGuiSliderFlags_Logarithmic);
+		ImGui::Checkbox("Animate", &lights.animate);
+		ImGui::SameLine();
+		ImGui::BeginDisabled(!lights.animate);
+		ImGui::DragFloat("Speed", &lights.animationSpeed, 0.01f, 0.0f, 10.0f, "%.2f");
+		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 	}
 

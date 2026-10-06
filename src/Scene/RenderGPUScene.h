@@ -31,10 +31,10 @@ public:
 
 	void BuildAccelerationStructures();
 
-	// Builds the SG light tree over point and area lights and uploads it with the light buffer.
-	// Built once at start up like the acceleration structures. Calling it again replaces both,
-	// which needs the GPU to be idle.
-	void BuildLights(std::span<const GpuLight> lights);
+	// Rebuilds the SG light tree over point and area lights and writes it with the light buffer
+	// into the current frame's slot. Call once per frame after BeginFrame, whose fence wait frees
+	// that slot; the buffer getters then return this frame's copies.
+	void UpdateLights(std::span<const GpuLight> lights);
 
 	bool HasGeometry() const
 	{
@@ -73,21 +73,28 @@ public:
 		return primitiveBuffer_;
 	}
 
-	// The lights the light tree indexes (GpuLight) and its nodes (GpuLightTreeNode). Both always
-	// hold at least one element so they can stay bound, GetLightCount is 0 without lights.
+	// The lights the light tree indexes (GpuLight) and its nodes (GpuLightTreeNode), as written by
+	// the last UpdateLights. Both always hold at least one element so they can stay bound,
+	// GetLightCount is 0 without lights.
 	ResourceHandle GetLightBuffer() const
 	{
-		return lightBuffer_;
+		return lightFrames_.empty() ? InvalidResourceHandle : lightFrames_[lightFrame_].lights;
 	}
 
 	ResourceHandle GetLightTreeNodeBuffer() const
 	{
-		return lightTreeNodeBuffer_;
+		return lightFrames_.empty() ? InvalidResourceHandle : lightFrames_[lightFrame_].nodes;
 	}
 
 	uint32_t GetLightCount() const
 	{
 		return lightCount_;
+	}
+
+	// CPU time of the last light tree build.
+	float GetLightTreeBuildMs() const
+	{
+		return lightTreeBuildMs_;
 	}
 
 	// World-space bounds over every instanced primitive, for framing the camera.
@@ -133,9 +140,20 @@ private:
 	uint32_t primitiveBufferIndex_ = InvalidResourceDescriptorIndex;
 	uint32_t materialBufferIndex_ = InvalidResourceDescriptorIndex;
 
-	ResourceHandle lightBuffer_ = InvalidResourceHandle;
-	ResourceHandle lightTreeNodeBuffer_ = InvalidResourceHandle;
+	// One set per frame in flight. GPU upload heap buffers, so the CPU writes them in place and the
+	// GPU reads them from video memory.
+	struct LightFrameBuffers
+	{
+		ResourceHandle lights = InvalidResourceHandle;
+		ResourceHandle nodes = InvalidResourceHandle;
+		size_t lightCapacity = 0;
+		size_t nodeCapacity = 0;
+	};
+
+	std::vector<LightFrameBuffers> lightFrames_;
+	uint32_t lightFrame_ = 0;
 	uint32_t lightCount_ = 0;
+	float lightTreeBuildMs_ = 0.0f;
 
 	std::vector<ResourceHandle> textures_;
 	std::vector<bool> materialIsOpaque_; // per GpuMaterial row; decides each BLAS's opaque flag

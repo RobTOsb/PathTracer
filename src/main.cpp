@@ -22,6 +22,7 @@
 #include <math.h>
 #include <memory>
 #include <random>
+#include <span>
 #include <stdio.h>
 #include <vector>
 
@@ -33,7 +34,10 @@ constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\intel_sponza\\in
 
 constexpr uint kFramesInFlight = 2;
 constexpr float kMouseSensitivity = 0.15f; // degrees per pixel
-constexpr uint32_t kTestLightCount = 8;
+constexpr uint32_t kTestLightCount = 8192;
+constexpr float kTestLightMinRadius = 0.005f; // fraction of the scene radius, the largest is 10x this
+constexpr float kTestLightMinPeriod = 10.0f; // seconds per swing along one axis
+constexpr float kTestLightMaxPeriod = 30.0f;
 
 void UpdateCamera(Window &window, Camera &camera, RenderSettings &settings, float deltaSeconds)
 {
@@ -86,10 +90,26 @@ void FrameScene(const RenderGPUScene &gpuScene, Camera &camera, RenderSettings &
 	settings.cameraSpeed = std::max(radius * 0.25f, 0.01f);
 }
 
-// Light tree test: point lights scattered through the scene bounds with random colours and
-// intensities. The intensities span two decades so the tree has something to sort out, and are
-// scaled so their mean gives roughly unit irradiance from all of them at half the scene radius.
-std::vector<GpuLight> CreateTestLights(const RenderGPUScene &gpuScene, uint32_t count)
+// A test light moving on a Lissajous path: each axis swings sinusoidally around the centre with its
+// own amplitude, angular frequency and phase.
+struct TestLight
+{
+	float3 intensity;
+	float radius;
+	float3 centre;
+	float3 amplitude;
+	float3 frequency; // radians per second
+	float3 phase;
+
+	float3 GetPosition(float time) const
+	{
+		return { centre.x + amplitude.x * sinf(frequency.x * time + phase.x),
+				 centre.y + amplitude.y * sinf(frequency.y * time + phase.y),
+				 centre.z + amplitude.z * sinf(frequency.z * time + phase.z) };
+	}
+};
+
+std::vector<TestLight> CreateTestLights(const RenderGPUScene &gpuScene, uint32_t count)
 {
 	const float3 lo = gpuScene.GetBoundsMin();
 	const float3 hi = gpuScene.GetBoundsMax();
@@ -102,13 +122,25 @@ std::vector<GpuLight> CreateTestLights(const RenderGPUScene &gpuScene, uint32_t 
 	std::mt19937 rng(1234u);
 	std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
 
-	std::vector<GpuLight> lights;
+	auto axisMotion = [&](float &centre, float &amplitude, float &frequency, float &phase)
+	{
+		amplitude = 0.1f + 0.15f * uniform(rng);
+		centre = 0.05f + amplitude + (0.9f - 2.0f * amplitude) * uniform(rng);
+		frequency = 2.0f * Pi / (kTestLightMinPeriod + (kTestLightMaxPeriod - kTestLightMinPeriod) * uniform(rng));
+		phase = 2.0f * Pi * uniform(rng);
+	};
+
+	std::vector<TestLight> lights;
 	lights.reserve(count);
 	for (uint32_t i = 0; i < count; ++i)
 	{
-		// Keep clear of the outer walls, where a light would only light the outside.
-		const float3 t = { 0.05f + 0.9f * uniform(rng), 0.05f + 0.9f * uniform(rng), 0.05f + 0.9f * uniform(rng) };
-		const float3 position = lo + extent * t;
+		TestLight light;
+		float3 t, a;
+		axisMotion(t.x, a.x, light.frequency.x, light.phase.x);
+		axisMotion(t.y, a.y, light.frequency.y, light.phase.y);
+		axisMotion(t.z, a.z, light.frequency.z, light.phase.z);
+		light.centre = lo + extent * t;
+		light.amplitude = extent * a;
 
 		// Fully bright HSV colour with a random hue and saturation.
 		const float hue = 6.0f * uniform(rng);
@@ -118,10 +150,20 @@ std::vector<GpuLight> CreateTestLights(const RenderGPUScene &gpuScene, uint32_t 
 								   std::clamp(2.0f - fabsf(hue - 4.0f), 0.0f, 1.0f) };
 		const float3 colour = float3(1.0f, 1.0f, 1.0f) * (1.0f - saturation) + hueColour * saturation;
 
-		const float intensity = baseIntensity * powf(10.0f, 2.0f * uniform(rng) - 1.0f);
-		lights.push_back(MakePointLight(colour * intensity, position, 0.0f));
+		light.intensity = colour * (baseIntensity * powf(10.0f, 2.0f * uniform(rng) - 1.0f));
+		light.radius = radius * kTestLightMinRadius * powf(10.0f, uniform(rng));
+		lights.push_back(light);
 	}
 	return lights;
+}
+
+void PlaceTestLights(std::span<const TestLight> testLights, float time, std::vector<GpuLight> &lights)
+{
+	lights.clear();
+	for (const TestLight &light: testLights)
+	{
+		lights.push_back(MakePointLight(light.intensity, light.GetPosition(time), 0.0f, light.radius));
+	}
 }
 
 void BuildPasses(RenderContext *renderContext,
@@ -175,7 +217,7 @@ void BuildPasses(RenderContext *renderContext,
 		passes.push_back(std::move(pathTracer));
 	}
 	passes.push_back(std::make_unique<TonemapPass>(renderContext, radiance, settings));
-	passes.push_back(std::make_unique<ImGuiPass>(settings, camera, ngx.IsRayReconstructionSupported(), gpuScene.GetLightCount()));
+	passes.push_back(std::make_unique<ImGuiPass>(settings, camera, ngx.IsRayReconstructionSupported(), gpuScene));
 }
 
 int Run(const char *scenePath)
@@ -216,9 +258,9 @@ int Run(const char *scenePath)
 		return 1;
 	}
 
-	// The scene has no lights of its own yet, so the light tree gets the test lights, also built
-	// once at start up.
-	gpuScene.BuildLights(CreateTestLights(gpuScene, kTestLightCount));
+	const std::vector<TestLight> testLights = CreateTestLights(gpuScene, kTestLightCount);
+	std::vector<GpuLight> lights;
+	float lightTime = 0.0f;
 
 	RenderSettings settings;
 	Camera camera(90.0f, window.GetAspectRatio(), 0.01f, 1000.0f, false, true);
@@ -255,7 +297,17 @@ int Run(const char *scenePath)
 		camera.UpdatePreviousMatrices();
 		UpdateCamera(window, camera, settings, deltaSeconds);
 
+		if (settings.lights.animate)
+		{
+			lightTime += deltaSeconds * settings.lights.animationSpeed;
+		}
+
 		renderContext->BeginFrame();
+
+		// After BeginFrame, which frees this frame's light buffers.
+		PlaceTestLights(testLights, lightTime, lights);
+		gpuScene.UpdateLights(lights);
+
 		renderContext->BeginGraphicsCommandList();
 		renderContext->SetDescriptorHeaps();
 

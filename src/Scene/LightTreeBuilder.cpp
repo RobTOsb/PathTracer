@@ -23,7 +23,7 @@ namespace
 
 	float Component(const float3 &v, int axis)
 	{
-		return axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
+		return (&v.x)[axis];
 	}
 
 	float3 XYZ(const float4 &v)
@@ -92,7 +92,40 @@ namespace
 		uint32_t node;
 		uint32_t begin;
 		uint32_t end;
+		Bounds centroidBounds; // of [begin, end), only filled for ranges large enough to be binned
 	};
+
+	struct Bin
+	{
+		Bounds bounds;
+		Bounds centroidBounds;
+		float flux = 0.0f;
+		uint32_t count = 0;
+	};
+
+	constexpr uint32_t kMaxBins = 32;
+	// Ranges up to this size get an exact SAH sweep over every split instead of binning.
+	constexpr uint32_t kSweepMaxCount = 8;
+
+	uint32_t SplitImbalance(uint32_t leftCount, uint32_t count)
+	{
+		return leftCount * 2 > count ? leftCount * 2 - count : count - leftCount * 2;
+	}
+
+	uint32_t BinIndex(float c, float lo, float scale, uint32_t binCount)
+	{
+		return std::min(binCount - 1, static_cast<uint32_t>((c - lo) * scale));
+	}
+
+	Bounds CentroidBounds(const std::vector<Primitive> &prims, uint32_t begin, uint32_t end)
+	{
+		Bounds bounds;
+		for (uint32_t i = begin; i < end; ++i)
+		{
+			bounds.Grow(prims[i].centroid);
+		}
+		return bounds;
+	}
 
 	// Fills the leaf cluster and the build primitive of one light. Returns false for light types the
 	// tree does not handle and for lights that emit nothing.
@@ -101,14 +134,16 @@ namespace
 		const GpuLightType type = light.GetLightType();
 		if (type == kLight_Point)
 		{
-			// Isotropic: Phi = 4 pi I, and the vMF is flat (zero sharpness).
 			const float3 position = XYZ(light.v1);
+			const float radius = light.v2.x;
+			const float3 extent = { radius, radius, radius };
 			leaf.mean = position;
-			leaf.variance = 0.0f;
-			leaf.radius = 0.0f;
+			leaf.variance = radius * radius;
+			leaf.radius = radius;
 			leaf.flux = 4.0f * Pi * Luminance(XYZ(light.radiance));
 			leaf.averageDirection = { 0.0f, 0.0f, 0.0f };
-			primitive.bounds.Grow(position);
+			primitive.bounds.Grow(position - extent);
+			primitive.bounds.Grow(position + extent);
 		}
 		else if (type == kLight_Area)
 		{
@@ -143,55 +178,132 @@ namespace
 		return leaf.flux > 0.0f;
 	}
 
-	// Returns the split position in [begin, end), or begin if no useful split was found.
-	uint32_t BinnedSplit(std::vector<Primitive> &prims, uint32_t begin, uint32_t end, uint32_t binCount)
+	// Exact SAH for small ranges: sorts along each axis and evaluates every split, which is cheaper
+	// than binning at this size and never fails on coincident centroids. Leaves the range ordered
+	// along the best axis and returns the split position in (begin, end).
+	uint32_t SweepSplit(std::vector<Primitive> &prims, uint32_t begin, uint32_t end)
 	{
-		Bounds centroidBounds;
-		for (uint32_t i = begin; i < end; ++i)
+		const uint32_t count = end - begin;
+		Primitive local[kSweepMaxCount];
+		std::copy(prims.begin() + begin, prims.begin() + end, local);
+
+		uint8_t order[3][kSweepMaxCount];
+		float rightCost[kSweepMaxCount];
+		float bestCost = FLT_MAX;
+		uint32_t bestImbalance = UINT32_MAX;
+		int bestAxis = 0;
+		uint32_t bestLeftCount = count / 2;
+
+		for (int axis = 0; axis < 3; ++axis)
 		{
-			centroidBounds.Grow(prims[i].centroid);
+			uint8_t *o = order[axis];
+			for (uint32_t i = 0; i < count; ++i)
+			{
+				o[i] = static_cast<uint8_t>(i);
+			}
+			std::sort(o,
+					  o + count,
+					  [&](uint8_t a, uint8_t b)
+					  { return Component(local[a].centroid, axis) < Component(local[b].centroid, axis); });
+
+			Bounds accBounds;
+			float accFlux = 0.0f;
+			for (uint32_t i = count - 1; i > 0; --i)
+			{
+				accBounds.Grow(local[o[i]].bounds);
+				accFlux += local[o[i]].flux;
+				rightCost[i] = accFlux * accBounds.SurfaceArea();
+			}
+
+			accBounds = Bounds{};
+			accFlux = 0.0f;
+			for (uint32_t leftCount = 1; leftCount < count; ++leftCount)
+			{
+				accBounds.Grow(local[o[leftCount - 1]].bounds);
+				accFlux += local[o[leftCount - 1]].flux;
+
+				// Point lights with zero radius have zero-area bounds, so every split can cost zero.
+				// Prefer the most even one when costs tie.
+				const float cost = accFlux * accBounds.SurfaceArea() + rightCost[leftCount];
+				const uint32_t imbalance = SplitImbalance(leftCount, count);
+				if (cost < bestCost || (cost == bestCost && imbalance < bestImbalance))
+				{
+					bestCost = cost;
+					bestImbalance = imbalance;
+					bestAxis = axis;
+					bestLeftCount = leftCount;
+				}
+			}
 		}
 
-		struct Bin
+		for (uint32_t i = 0; i < count; ++i)
 		{
-			Bounds bounds;
-			float flux = 0.0f;
-			uint32_t count = 0;
-		};
+			prims[begin + i] = local[order[bestAxis][i]];
+		}
+		return begin + bestLeftCount;
+	}
 
-		const uint32_t count = end - begin;
+	struct BinnedSplitResult
+	{
+		uint32_t mid = 0;
+		Bounds leftCentroids;
+		Bounds rightCentroids;
+	};
+
+	// Flux weighted binned SAH. All three axes are binned in one pass over the range, and the bins
+	// also track centroid bounds so the children's come for free. bins is scratch space for
+	// 3 * binCount bins. Returns false if no axis separates the centroids.
+	bool BinnedSplit(std::vector<Primitive> &prims,
+					 const BuildTask &task,
+					 std::span<Bin> bins,
+					 uint32_t binCount,
+					 BinnedSplitResult &result)
+	{
+		const uint32_t count = task.end - task.begin;
+		float lo[3];
+		float scale[3];
+		for (int axis = 0; axis < 3; ++axis)
+		{
+			lo[axis] = Component(task.centroidBounds.lo, axis);
+			const float extent = Component(task.centroidBounds.hi, axis) - lo[axis];
+			// A flat axis puts everything in bin 0, which the sweep below rejects.
+			scale[axis] = extent > 0.0f ? static_cast<float>(binCount) / extent : 0.0f;
+		}
+
+		std::fill(bins.begin(), bins.end(), Bin{});
+		for (uint32_t i = task.begin; i < task.end; ++i)
+		{
+			const Primitive &p = prims[i];
+			for (int axis = 0; axis < 3; ++axis)
+			{
+				Bin &bin = bins[axis * binCount + BinIndex(Component(p.centroid, axis), lo[axis], scale[axis], binCount)];
+				bin.bounds.Grow(p.bounds);
+				bin.centroidBounds.Grow(p.centroid);
+				bin.flux += p.flux;
+				bin.count++;
+			}
+		}
+
 		float bestCost = FLT_MAX;
 		uint32_t bestImbalance = UINT32_MAX;
 		int bestAxis = -1;
 		uint32_t bestBin = 0;
-		std::vector<Bin> bins(binCount);
-		std::vector<float> rightCost(binCount);
+		float rightCost[kMaxBins];
 
 		for (int axis = 0; axis < 3; ++axis)
 		{
-			const float lo = Component(centroidBounds.lo, axis);
-			const float extent = Component(centroidBounds.hi, axis) - lo;
-			if (!(extent > 0.0f))
+			if (scale[axis] == 0.0f)
 			{
 				continue;
 			}
-
-			std::fill(bins.begin(), bins.end(), Bin{});
-			const float scale = static_cast<float>(binCount) / extent;
-			for (uint32_t i = begin; i < end; ++i)
-			{
-				const uint32_t b = std::min(binCount - 1, static_cast<uint32_t>((Component(prims[i].centroid, axis) - lo) * scale));
-				bins[b].bounds.Grow(prims[i].bounds);
-				bins[b].flux += prims[i].flux;
-				bins[b].count++;
-			}
+			const Bin *axisBins = &bins[axis * binCount];
 
 			Bounds accBounds;
 			float accFlux = 0.0f;
 			for (uint32_t b = binCount - 1; b > 0; --b)
 			{
-				accBounds.Grow(bins[b].bounds);
-				accFlux += bins[b].flux;
+				accBounds.Grow(axisBins[b].bounds);
+				accFlux += axisBins[b].flux;
 				rightCost[b] = accFlux * accBounds.SurfaceArea();
 			}
 
@@ -200,18 +312,16 @@ namespace
 			uint32_t leftCount = 0;
 			for (uint32_t b = 0; b + 1 < binCount; ++b)
 			{
-				accBounds.Grow(bins[b].bounds);
-				accFlux += bins[b].flux;
-				leftCount += bins[b].count;
+				accBounds.Grow(axisBins[b].bounds);
+				accFlux += axisBins[b].flux;
+				leftCount += axisBins[b].count;
 				if (leftCount == 0 || leftCount == count)
 				{
 					continue;
 				}
 
-				// Point lights have zero-area bounds, so a small cluster with one light per bin
-				// costs zero for every split. Prefer the most even one when costs tie.
 				const float cost = accFlux * accBounds.SurfaceArea() + rightCost[b + 1];
-				const uint32_t imbalance = leftCount * 2 > count ? leftCount * 2 - count : count - leftCount * 2;
+				const uint32_t imbalance = SplitImbalance(leftCount, count);
 				if (cost < bestCost || (cost == bestCost && imbalance < bestImbalance))
 				{
 					bestCost = cost;
@@ -224,30 +334,31 @@ namespace
 
 		if (bestAxis < 0)
 		{
-			return begin;
+			return false;
 		}
 
-		const float lo = Component(centroidBounds.lo, bestAxis);
-		const float scale = static_cast<float>(binCount) / (Component(centroidBounds.hi, bestAxis) - lo);
-		const auto it = std::partition(prims.begin() + begin,
-									   prims.begin() + end,
+		const Bin *axisBins = &bins[bestAxis * binCount];
+		result.leftCentroids = Bounds{};
+		result.rightCentroids = Bounds{};
+		for (uint32_t b = 0; b < binCount; ++b)
+		{
+			(b <= bestBin ? result.leftCentroids : result.rightCentroids).Grow(axisBins[b].centroidBounds);
+		}
+
+		const float axisLo = lo[bestAxis];
+		const float axisScale = scale[bestAxis];
+		const auto it = std::partition(prims.begin() + task.begin,
+									   prims.begin() + task.end,
 									   [&](const Primitive &p)
-									   {
-										   const uint32_t b = std::min(binCount - 1, static_cast<uint32_t>((Component(p.centroid, bestAxis) - lo) * scale));
-										   return b <= bestBin;
-									   });
-		return static_cast<uint32_t>(it - prims.begin());
+									   { return BinIndex(Component(p.centroid, bestAxis), axisLo, axisScale, binCount) <= bestBin; });
+		result.mid = static_cast<uint32_t>(it - prims.begin());
+		return result.mid != task.begin && result.mid != task.end;
 	}
 
 	// Fallback for coincident centroids: median split by count on the largest axis.
-	uint32_t MedianSplit(std::vector<Primitive> &prims, uint32_t begin, uint32_t end)
+	uint32_t MedianSplit(std::vector<Primitive> &prims, uint32_t begin, uint32_t end, const Bounds &centroidBounds)
 	{
-		Bounds bounds;
-		for (uint32_t i = begin; i < end; ++i)
-		{
-			bounds.Grow(prims[i].centroid);
-		}
-		const float3 d = bounds.hi - bounds.lo;
+		const float3 d = centroidBounds.hi - centroidBounds.lo;
 		const int axis = (d.x >= d.y && d.x >= d.z) ? 0 : (d.y >= d.z ? 1 : 2);
 		const uint32_t mid = begin + (end - begin) / 2;
 		std::nth_element(prims.begin() + begin,
@@ -297,15 +408,17 @@ LightTree BuildLightTree(std::span<const GpuLight> lights, const LightTreeBuildS
 	// Top down topology. Children are allocated as adjacent pairs, so a child always has a larger
 	// index than its parent, which lets the bottom-up pass below run in reverse index order.
 	std::vector<BuildTask> stack;
-	stack.push_back({ 0, 0, lightCount });
-	const uint32_t binCount = std::max(2u, settings.binCount);
+	stack.push_back({ 0, 0, lightCount, CentroidBounds(prims, 0, lightCount) });
+	const uint32_t binCount = std::clamp(settings.binCount, 2u, kMaxBins);
+	std::vector<Bin> bins(3 * binCount);
 
 	while (!stack.empty())
 	{
 		const BuildTask task = stack.back();
 		stack.pop_back();
 
-		if (task.end - task.begin == 1)
+		const uint32_t count = task.end - task.begin;
+		if (count == 1)
 		{
 			const uint32_t light = prims[task.begin].light;
 			tree.nodes[task.node].childOrLight = light | LIGHT_TREE_LEAF_BIT;
@@ -313,10 +426,30 @@ LightTree BuildLightTree(std::span<const GpuLight> lights, const LightTreeBuildS
 			continue;
 		}
 
-		uint32_t mid = BinnedSplit(prims, task.begin, task.end, binCount);
-		if (mid == task.begin || mid == task.end)
+		// Children of small ranges are never binned, so their centroid bounds stay empty.
+		uint32_t mid;
+		Bounds leftCentroids;
+		Bounds rightCentroids;
+		BinnedSplitResult split;
+		if (count == 2)
 		{
-			mid = MedianSplit(prims, task.begin, task.end);
+			mid = task.begin + 1;
+		}
+		else if (count <= kSweepMaxCount)
+		{
+			mid = SweepSplit(prims, task.begin, task.end);
+		}
+		else if (BinnedSplit(prims, task, bins, binCount, split))
+		{
+			mid = split.mid;
+			leftCentroids = split.leftCentroids;
+			rightCentroids = split.rightCentroids;
+		}
+		else
+		{
+			mid = MedianSplit(prims, task.begin, task.end, task.centroidBounds);
+			leftCentroids = CentroidBounds(prims, task.begin, mid);
+			rightCentroids = CentroidBounds(prims, mid, task.end);
 		}
 
 		const uint32_t left = static_cast<uint32_t>(tree.nodes.size());
@@ -326,8 +459,8 @@ LightTree BuildLightTree(std::span<const GpuLight> lights, const LightTreeBuildS
 		tree.nodes[left].parent = task.node;
 		tree.nodes[left + 1].parent = task.node;
 
-		stack.push_back({ left + 1, mid, task.end });
-		stack.push_back({ left, task.begin, mid });
+		stack.push_back({ left + 1, mid, task.end, rightCentroids });
+		stack.push_back({ left, task.begin, mid, leftCentroids });
 	}
 
 	// Bottom up cluster parameters (Eqs. 2 to 5).

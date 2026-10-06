@@ -21,7 +21,7 @@ struct LightTree
 
 struct LightTreeBuildSettings
 {
-	uint32_t binCount = 12;
+	uint32_t binCount = 12; // clamped to [2, 32]
 };
 
 // Builds a binary tree with one light per leaf over point lights (isotropic) and area lights

@@ -7,9 +7,11 @@
 #include "fmtlog.h"
 
 #include <algorithm>
+#include <bit>
 #include <cfloat>
 #include <chrono>
 #include <cstring>
+
 
 namespace
 {
@@ -31,6 +33,30 @@ namespace
 		return { x * m[0] + y * m[4] + z * m[8] + m[3],
 				 x * m[1] + y * m[5] + z * m[9] + m[7],
 				 x * m[2] + y * m[6] + z * m[10] + m[11] };
+	}
+
+	template<typename T>
+	void WriteLightBuffer(RenderContext *renderContext,
+						  ResourceHandle &buffer,
+						  size_t &capacity,
+						  const std::vector<T> &elements,
+						  const char *debugName)
+	{
+		if (elements.size() > capacity)
+		{
+			if (buffer != InvalidResourceHandle)
+			{
+				renderContext->DestroyResource(buffer);
+			}
+			capacity = std::bit_ceil(elements.size());
+
+			BufferDesc desc = {};
+			desc.sizeInBytes = capacity * sizeof(T);
+			desc.structureByteStride = sizeof(T);
+			desc.debugName = debugName;
+			buffer = renderContext->CreateUploadBuffer(desc, ResourceViewType::ShaderResource);
+		}
+		renderContext->UpdateUploadBuffer(buffer, elements.data(), 0, elements.size() * sizeof(T));
 	}
 } // namespace
 
@@ -76,32 +102,34 @@ RenderGPUScene::~RenderGPUScene()
 
 void RenderGPUScene::DestroyLights()
 {
-	for (ResourceHandle *buffer: { &lightBuffer_, &lightTreeNodeBuffer_ })
+	for (LightFrameBuffers &frame: lightFrames_)
 	{
-		if (*buffer != InvalidResourceHandle)
+		for (ResourceHandle buffer: { frame.lights, frame.nodes })
 		{
-			renderContext_->DestroyResource(*buffer);
-			*buffer = InvalidResourceHandle;
+			if (buffer != InvalidResourceHandle)
+			{
+				renderContext_->DestroyResource(buffer);
+			}
 		}
 	}
+	lightFrames_.clear();
 	lightCount_ = 0;
 }
 
-void RenderGPUScene::BuildLights(std::span<const GpuLight> lights)
+void RenderGPUScene::UpdateLights(std::span<const GpuLight> lights)
 {
-	DestroyLights();
-
 	const auto start = std::chrono::steady_clock::now();
 	LightTree tree = BuildLightTree(lights);
-	const float buildMs = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+	lightTreeBuildMs_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
 
-	if (tree.lights.size() < lights.size())
+	const uint32_t lightCount = static_cast<uint32_t>(tree.lights.size());
+	if (lightCount != lightCount_ && lightCount < lights.size())
 	{
 		logw("GPUScene: light tree skipped {} light(s) that are not point/area lights or emit nothing",
-			 lights.size() - tree.lights.size());
+			 lights.size() - lightCount);
 	}
+	lightCount_ = lightCount;
 
-	lightCount_ = static_cast<uint32_t>(tree.lights.size());
 	if (lightCount_ == 0)
 	{
 		// One unused element each, so the shader's bindings stay valid.
@@ -109,23 +137,12 @@ void RenderGPUScene::BuildLights(std::span<const GpuLight> lights)
 		tree.nodes.push_back(GpuLightTreeNode{});
 	}
 
-	UploadBatchHandle batch = renderContext_->BeginUpload();
-	lightBuffer_ = UploadStream(tree.lights.data(),
-								tree.lights.size() * sizeof(GpuLight),
-								sizeof(GpuLight),
-								"Scene_Lights",
-								batch);
-	lightTreeNodeBuffer_ = UploadStream(tree.nodes.data(),
-										tree.nodes.size() * sizeof(GpuLightTreeNode),
-										sizeof(GpuLightTreeNode),
-										"Scene_LightTreeNodes",
-										batch);
-	renderContext_->EndUpload(batch);
-
-	logi("GPUScene: light tree over {} light(s), {} node(s), built in {:.2f} ms",
-		 lightCount_,
-		 lightCount_ > 0 ? tree.nodes.size() : 0,
-		 buildMs);
+	// BeginFrame has waited for the frame that last read this slot, so it can be overwritten.
+	lightFrames_.resize(renderContext_->GetFramesInFlight());
+	lightFrame_ = renderContext_->GetCurrentFrameIndex();
+	LightFrameBuffers &frame = lightFrames_[lightFrame_];
+	WriteLightBuffer(renderContext_, frame.lights, frame.lightCapacity, tree.lights, "Scene_Lights");
+	WriteLightBuffer(renderContext_, frame.nodes, frame.nodeCapacity, tree.nodes, "Scene_LightTreeNodes");
 }
 
 void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)

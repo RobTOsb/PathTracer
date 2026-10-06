@@ -212,6 +212,7 @@ struct GpuLight
 	//{
 	//    float3 intensity; /**< The light luminous intensity (lm/sr) */
 	//    float4 position; /**< The light world space position in xyz with w=range */
+	//    float radius; /**< v2.x - sphere radius, 0 for a true point light */
 	//};
 	// struct SpotLight
 	//{
@@ -314,13 +315,15 @@ inline GpuLight MakeAreaLight(float3 const radiance,
  * @param intensity Colour and intensity of light.
  * @param position  Position of the light.
  * @param range     Maximum distance from the light where lighting has an effect.
+ * @param radius    Radius of a spherical emitter with the same intensity, 0 for a delta point light.
  * @return A light with the correctly set internal values.
  */
-inline GpuLight MakePointLight(float3 const intensity, float3 const position, float const range)
+inline GpuLight MakePointLight(float3 const intensity, float3 const position, float const range, float const radius = 0.0f)
 {
 	GpuLight light = {};
 	light.radiance = MakeFloat4(intensity, AsFloatBits(UINT_MAX));
 	light.v1 = MakeFloat4(position, range);
+	light.v2 = float4(radius, 0.0f, 0.0f, 0.0f);
 	light.v3 = float4(0.0f, 0.0f, 0.0f, AsFloatBits(static_cast<uint32_t>(kLight_Point)));
 	return light;
 }

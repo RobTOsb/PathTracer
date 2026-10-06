@@ -85,8 +85,10 @@ struct LightSample
     float3 direction; // world space, towards the light
     float distance;
     float3 radiance;
-    float pdf;    // solid angle PDF
-    bool isDelta; // point or directional light, cannot be hit by BSDF sampling
+    float pdf; // solid angle PDF
+    // Delta light, or one that is not in the scene geometry (sphere and area lights). BSDF sampling cannot
+    // hit either, so light sampling takes the full MIS weight.
+    bool lightSamplingOnly;
 };
 
 // Ray types. Each one indexes both the hit group (every TLAS instance contributes 0 and the
@@ -168,30 +170,28 @@ void BuildOrthonormalBasis(float3 n, out float3 t, out float3 b)
     b = float3(c, s + n.y * n.y * a, -n.y);
 }
 
+// Uniform direction in the cone of 1 - cos(half angle) = oneMinusCosMax around axis, whose solid
+// angle PDF is 1 / (2 pi oneMinusCosMax). An oneMinusCosMax of 2 covers the whole sphere.
+float3 SampleUniformCone(float3 axis, float oneMinusCosMax, float2 u)
+{
+    float oneMinusCos = u.x * oneMinusCosMax;
+    float cosTheta = 1.0 - oneMinusCos;
+    float sinTheta = sqrt(max(0.0, oneMinusCos * (2.0 - oneMinusCos)));
+    float phi = TWO_PI * u.y;
+
+    float3 t, b;
+    BuildOrthonormalBasis(axis, t, b);
+    return normalize(t * (sinTheta * cos(phi)) + b * (sinTheta * sin(phi)) + axis * cosTheta);
+}
+
 LightSample SampleSun(float2 u)
 {
     LightSample ls;
     ls.distance = FLT_MAX;
     ls.radiance = g_Frame.sunRadiance;
     ls.pdf = g_Frame.sunPdf;
-    ls.isDelta = SunIsDelta();
-
-    float3 sunDir = g_Frame.sunDirection;
-    if (ls.isDelta)
-    {
-        ls.direction = sunDir;
-        return ls;
-    }
-
-    // Uniform cone sampling around the sun direction.
-    float oneMinusCos = u.x * g_Frame.sunOneMinusCosMax;
-    float cosTheta = 1.0 - oneMinusCos;
-    float sinTheta = sqrt(max(0.0, oneMinusCos * (2.0 - oneMinusCos)));
-    float phi = TWO_PI * u.y;
-
-    float3 t, b;
-    BuildOrthonormalBasis(sunDir, t, b);
-    ls.direction = normalize(t * (sinTheta * cos(phi)) + b * (sinTheta * sin(phi)) + sunDir * cosTheta);
+    ls.lightSamplingOnly = SunIsDelta();
+    ls.direction = SunIsDelta() ? g_Frame.sunDirection : SampleUniformCone(g_Frame.sunDirection, g_Frame.sunOneMinusCosMax, u);
     return ls;
 }
 
@@ -202,14 +202,34 @@ LightSample SampleBufferLight(GpuLight light, float3 position, float2 u)
     LightSample ls;
     if (light.GetLightType() == kLight_Point)
     {
-        // Isotropic point light: radiance.xyz is the intensity, so it delivers intensity / d^2.
         float3 toLight = light.v1.xyz - position;
         float d2 = max(dot(toLight, toLight), 1.0e-8);
-        ls.distance = sqrt(d2);
-        ls.direction = toLight / ls.distance;
-        ls.radiance = light.radiance.xyz / d2;
-        ls.pdf = 1.0;
-        ls.isDelta = true;
+        float d = sqrt(d2);
+        float radius = light.v2.x;
+        if (radius <= 0.0)
+        {
+            // Isotropic point light: radiance.xyz is the intensity, so it delivers intensity / d^2.
+            ls.distance = d;
+            ls.direction = toLight / d;
+            ls.radiance = light.radiance.xyz / d2;
+            ls.pdf = 1.0;
+            ls.lightSamplingOnly = true;
+            return ls;
+        }
+
+        float r2 = radius * radius;
+        bool inside = d2 <= r2;
+        float sin2Max = r2 / d2;
+        float oneMinusCosMax = inside ? 2.0 : sin2Max / (1.0 + sqrt(1.0 - sin2Max));
+        ls.direction = SampleUniformCone(toLight / d, oneMinusCosMax, u);
+
+        // Distance to the near side of the sphere along the sample, or the far side from inside.
+        float b = dot(toLight, ls.direction);
+        float h = sqrt(max(r2 - (d2 - b * b), 0.0));
+        ls.distance = max(inside ? b + h : b - h, 0.0);
+        ls.radiance = light.radiance.xyz / (PI * r2);
+        ls.pdf = 1.0 / (TWO_PI * oneMinusCosMax);
+        ls.lightSamplingOnly = true;
         return ls;
     }
 
@@ -235,7 +255,9 @@ LightSample SampleBufferLight(GpuLight light, float3 position, float2 u)
     ls.pdf = cosLight > 0.0 ? 2.0 * d2 / (twiceArea * cosLight) : 0.0;
     // Stop short of the emitter so it does not shadow itself.
     ls.distance = d * 0.999;
-    ls.isDelta = false;
+    // Not in the scene geometry either, so BSDF sampling never finds its emission. Switch this
+    // back to MIS once emissive hits are weighted against NEE with LightTreePmf.
+    ls.lightSamplingOnly = true;
     return ls;
 }
 
@@ -276,8 +298,10 @@ LightSample SampleLight(float3 position, OpenPBRBaseParams mat, OpenPBRContext c
     }
 
     GpuLight light = g_Lights[lightIndex];
-    // Only area lights need a position on the light.
-    float2 uLight = light.GetLightType() == kLight_Area ? Rand3(rng).xy : float2(0.0, 0.0);
+    // Only area and sphere lights need a position on the light.
+    GpuLightType type = light.GetLightType();
+    bool hasArea = type == kLight_Area || (type == kLight_Point && light.v2.x > 0.0);
+    float2 uLight = hasArea ? Rand3(rng).xy : float2(0.0, 0.0);
     ls = SampleBufferLight(light, position, uLight);
     ls.radiance *= g_Frame.lightIntensityScale;
     ls.pdf *= pmf * (1.0 - pSun);
@@ -597,7 +621,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             float3 fCos = OpenPBREvalPdf(mat, ctx, ls.direction, bsdfPdf);
             if (any(fCos > 0.0))
             {
-                float w = ls.isDelta ? 1.0 : PowerHeuristic(ls.pdf, bsdfPdf);
+                float w = ls.lightSamplingOnly ? 1.0 : PowerHeuristic(ls.pdf, bsdfPdf);
                 float3 shadowTransmittance =
                     dot(ls.direction, hit.Ng) < 0.0 ? exp(-extinction * ls.distance) : float3(1.0, 1.0, 1.0);
                 neeContribution = throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf);
