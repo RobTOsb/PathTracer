@@ -29,8 +29,8 @@
 #undef min
 #undef max
 
-//constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\Sponza\\glTF\\Sponza.gltf";
- constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
+constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\Sponza\\glTF\\Sponza.gltf";
+//constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
 
 constexpr uint kFramesInFlight = 2;
 constexpr float kMouseSensitivity = 0.15f; // degrees per pixel

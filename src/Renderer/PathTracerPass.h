@@ -26,7 +26,8 @@ struct PathTracerGuides
 // Traces one path per pixel into an HDR radiance target (RGBA16F) using the DXR pipeline in
 // PathTracer.slang, at the render context's render resolution. With rayReconstruction set it
 // also writes PathTracerGuides and jitters the camera along the DLSS Halton sequence instead of
-// randomly. Leaves the output and the guides in the UnorderedAccess layout.
+// randomly. With RenderSettings::shaderExecutionReordering on a device with DXR 1.2 it traces with
+// the SER pipeline instead. Leaves the output and the guides in the UnorderedAccess layout.
 class PathTracerPass final : public RenderPass
 {
 public:
@@ -67,6 +68,15 @@ public:
 	}
 
 private:
+	struct Pipeline
+	{
+		PipelineHandle pipeline = InvalidPipelineHandle;
+		ShaderTableHandle shaderTable = InvalidShaderTableHandle;
+	};
+
+	const Pipeline *SelectPipeline();
+	const Pipeline *GetPipeline(bool shaderExecutionReordering);
+	Pipeline CreatePipeline(bool shaderExecutionReordering) const;
 	ResourceHandle CreateTarget(Format format, const char *debugName) const;
 
 	RenderContext *renderContext_ = nullptr;
@@ -75,8 +85,9 @@ private:
 	const RenderSettings &settings_;
 	const bool rayReconstruction_;
 
-	PipelineHandle pipeline_ = InvalidPipelineHandle;
-	ShaderTableHandle shaderTable_ = InvalidShaderTableHandle;
+	Pipeline pipelines_[2]; // indexed by shaderExecutionReordering
+	bool serSupported_ = false;
+	bool serFailed_ = false; // the SER pipeline did not compile, so stay on the plain one
 	ResourceHandle output_ = InvalidResourceHandle;
 	PathTracerGuides guides_;
 	std::vector<ResourceHandle> frameConstants_; // one per frame in flight, CPU-written each frame

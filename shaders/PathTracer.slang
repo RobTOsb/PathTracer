@@ -113,7 +113,11 @@ struct HitPayload
     float2 uv;
 };
 
-HitInfo TraceClosest(float3 origin, float3 dir, inout uint rng)
+// First bounce whose hits the SER pipeline reorders. Camera rays leave raygen in screen order, so
+// their hits are already about as coherent as reordering would make them.
+static const uint SER_START_BOUNCE = 1;
+
+HitInfo TraceClosest(float3 origin, float3 dir, bool reorder, inout uint rng)
 {
     RayDesc ray;
     ray.Origin = origin;
@@ -125,7 +129,22 @@ HitInfo TraceClosest(float3 origin, float3 dir, inout uint rng)
     payload.hitT = -1.0;
     payload.materialId = rng++;
     // Masked and blended geometry runs AnyHit; everything else is flagged opaque in its BLAS.
+#ifdef SER
+    // DXR 1.2 shader execution reordering: traverse without shading, regroup the threads by what
+    // they hit (the hit object sorts misses from hits, the hint sorts hits by material), then run
+    // the closest hit or miss shader. The threads stay in the new order for the shading in
+    // TracePath, which is where the material divergence is.
+    HitObject hitObject =
+        HitObject::TraceRay(g_Scene, RAY_FLAG_NONE, 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
+    if (reorder)
+    {
+        uint materialHint = hitObject.IsHit() ? LoadPrimitive(hitObject.GetInstanceID()).materialIndex : 0;
+        ReorderThread(hitObject, materialHint, g_Frame.serCoherenceHintBits);
+    }
+    HitObject::Invoke(hitObject, payload);
+#else
     TraceRay(g_Scene, RAY_FLAG_NONE, 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
+#endif
 
     HitInfo hit = (HitInfo)0;
     hit.hit = payload.hitT >= 0.0;
@@ -550,7 +569,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
 
     for (uint bounce = 0; bounce < maxSegments; ++bounce)
     {
-        HitInfo hit = TraceClosest(origin, dir, rng);
+        HitInfo hit = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, rng);
 
         if (bounce == 1 && primarySpecular)
             guides.specularHitDistance = hit.hit ? hit.t : SKY_HIT_DISTANCE;

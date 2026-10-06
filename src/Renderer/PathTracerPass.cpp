@@ -6,6 +6,8 @@
 
 #include "DLSSUtil.h"
 
+#include "fmtlog.h"
+
 #include <algorithm>
 #include <cfloat>
 #include <math.h>
@@ -31,32 +33,10 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 	renderContext_(renderContext), scene_(scene), camera_(camera), settings_(settings),
 	rayReconstruction_(rayReconstruction)
 {
-	RaytracingPipelineDesc desc = {};
-	desc.exports = { "RayGen", "Miss", "ClosestHit", "AnyHit", "ShadowMiss", "ShadowClosestHit", "ShadowAnyHit" };
-	desc.hitGroups = { RaytracingHitGroup{ "HitGroup", "ClosestHit", "AnyHit", "" },
-					   RaytracingHitGroup{ "ShadowHitGroup", "ShadowClosestHit", "ShadowAnyHit", "" } };
-	desc.maxPayloadSizeInBytes = kMaxPayloadSizeInBytes;
-	desc.maxAttributeSizeInBytes = 8; // triangle barycentrics
-	desc.maxTraceRecursionDepth = 1; // primary and shadow rays are both traced from raygen
-	if (rayReconstruction_)
-	{
-		desc.defines = { "DLSS_RR" };
-	}
+	serSupported_ = renderContext->GetShaderExecutionReorderingSupport().supported;
 
-	pipeline_ = renderContext->CreateRaytracingPipeline(PATHTRACER_SHADER_DIR "PathTracer.slang", desc);
-	if (pipeline_ == InvalidPipelineHandle)
-	{
-		throw std::runtime_error("Failed to create the path tracing pipeline (see the shader log above).");
-	}
-
-	shaderTable_ = renderContext->CreateShaderTable(pipeline_);
-	renderContext->AddRayGenShaderRecord(shaderTable_, "RayGen");
-	// Record order matches STANDARD_RAY_INDEX and SHADOW_RAY_INDEX in PathTracer.slang.
-	renderContext->AddMissShaderRecord(shaderTable_, "Miss");
-	renderContext->AddMissShaderRecord(shaderTable_, "ShadowMiss");
-	renderContext->AddHitGroupShaderRecord(shaderTable_, "HitGroup");
-	renderContext->AddHitGroupShaderRecord(shaderTable_, "ShadowHitGroup");
-	renderContext->BuildShaderTable(shaderTable_);
+	// Build the pipeline the settings start with now rather than on the first frame.
+	SelectPipeline();
 
 	width_ = renderContext->GetRenderWidth();
 	height_ = renderContext->GetRenderHeight();
@@ -99,6 +79,75 @@ PathTracerPass::~PathTracerPass()
 	{
 		renderContext_->DestroyResource(constants);
 	}
+}
+
+const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
+{
+	// A failed SER compile is logged once and the plain pipeline takes over.
+	if (settings_.shaderExecutionReordering && serSupported_ && !serFailed_)
+	{
+		if (const Pipeline *pipeline = GetPipeline(true))
+		{
+			return pipeline;
+		}
+		loge("Failed to create the shader execution reordering pipeline, falling back to TraceRay");
+		serFailed_ = true;
+	}
+
+	const Pipeline *pipeline = GetPipeline(false);
+	if (pipeline == nullptr)
+	{
+		throw std::runtime_error("Failed to create the path tracing pipeline (see the shader log above).");
+	}
+	return pipeline;
+}
+
+const PathTracerPass::Pipeline *PathTracerPass::GetPipeline(bool shaderExecutionReordering)
+{
+	Pipeline &pipeline = pipelines_[shaderExecutionReordering ? 1 : 0];
+	if (pipeline.pipeline == InvalidPipelineHandle)
+	{
+		pipeline = CreatePipeline(shaderExecutionReordering);
+	}
+	return pipeline.pipeline != InvalidPipelineHandle ? &pipeline : nullptr;
+}
+
+PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReordering) const
+{
+	RaytracingPipelineDesc desc = {};
+	desc.exports = { "RayGen", "Miss", "ClosestHit", "AnyHit", "ShadowMiss", "ShadowClosestHit", "ShadowAnyHit" };
+	desc.hitGroups = { RaytracingHitGroup{ "HitGroup", "ClosestHit", "AnyHit", "" },
+					   RaytracingHitGroup{ "ShadowHitGroup", "ShadowClosestHit", "ShadowAnyHit", "" } };
+	desc.maxPayloadSizeInBytes = kMaxPayloadSizeInBytes;
+	desc.maxAttributeSizeInBytes = 8; // triangle barycentrics
+	desc.maxTraceRecursionDepth = 1; // primary and shadow rays are both traced from raygen
+	if (rayReconstruction_)
+	{
+		desc.defines.push_back("DLSS_RR");
+	}
+	if (shaderExecutionReordering)
+	{
+		// HitObject and MaybeReorderThread are Shader Model 6.9.
+		desc.defines.push_back("SER");
+		desc.profile = "lib_6_9";
+	}
+
+	Pipeline result;
+	result.pipeline = renderContext_->CreateRaytracingPipeline(PATHTRACER_SHADER_DIR "PathTracer.slang", desc);
+	if (result.pipeline == InvalidPipelineHandle)
+	{
+		return result;
+	}
+
+	result.shaderTable = renderContext_->CreateShaderTable(result.pipeline);
+	renderContext_->AddRayGenShaderRecord(result.shaderTable, "RayGen");
+	// Record order matches STANDARD_RAY_INDEX and SHADOW_RAY_INDEX in PathTracer.slang.
+	renderContext_->AddMissShaderRecord(result.shaderTable, "Miss");
+	renderContext_->AddMissShaderRecord(result.shaderTable, "ShadowMiss");
+	renderContext_->AddHitGroupShaderRecord(result.shaderTable, "HitGroup");
+	renderContext_->AddHitGroupShaderRecord(result.shaderTable, "ShadowHitGroup");
+	renderContext_->BuildShaderTable(result.shaderTable);
+	return result;
 }
 
 ResourceHandle PathTracerPass::CreateTarget(Format format, const char *debugName) const
@@ -158,6 +207,14 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 											  ? lights.diffuseOnlyRoughness * lights.diffuseOnlyRoughness
 											  : FLT_MAX;
 
+	// Enough bits to tell every material row apart, up to the 16 that MaybeReorderThread honours.
+	uint hintBits = 0;
+	while (hintBits < 16 && (1u << hintBits) < scene_.GetMaterialCount())
+	{
+		++hintBits;
+	}
+	constants.serCoherenceHintBits = hintBits;
+
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
 	constants.frameIndex = renderContext->GetCurrentFrame();
 	constants.maxBounces = static_cast<uint>(settings_.maxBounces);
@@ -166,6 +223,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	// already waited on that frame's fence.
 	const ResourceHandle constantBuffer = frameConstants_[renderContext->GetCurrentFrameIndex()];
 	renderContext->UpdateConstantBuffer(constantBuffer, &constants, sizeof(constants));
+
+	const Pipeline *pipeline = SelectPipeline();
 
 	renderContext->BeginEvent("PathTracer");
 	renderContext->BeginProfileScope("PathTracer");
@@ -187,7 +246,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 										  ResourceAccess::UnorderedAccess);
 	}
 
-	renderContext->SetRaytracingPipeline(pipeline_);
+	renderContext->SetRaytracingPipeline(pipeline->pipeline);
 	renderContext->SetRaytracingConstantBuffer(0, constantBuffer);
 	renderContext->SetRaytracingSRV(0, scene_.GetTLASSRV());
 	// Scene buffers are root SRVs, registers must match PathTracer.slang.
@@ -204,7 +263,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	{
 		renderContext->SetRaytracingUAV(i, targets[i]);
 	}
-	renderContext->DispatchRays(shaderTable_, width_, height_, 1);
+	renderContext->DispatchRays(pipeline->shaderTable, width_, height_, 1);
 
 	renderContext->EndProfileScope();
 	renderContext->EndEvent();

@@ -209,6 +209,21 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		ImGui::SliderInt("Max bounces", &settings_.maxBounces, 0, 32);
+
+		const ShaderExecutionReorderingSupport ser = renderContext->GetShaderExecutionReorderingSupport();
+		ImGui::BeginDisabled(!ser.supported);
+		ImGui::Checkbox("Shader execution reordering", &settings_.shaderExecutionReordering);
+		ImGui::EndDisabled();
+		ImGui::SetItemTooltip("DXR 1.2 SER pipeline: reorders bounce hits by material before shading them");
+		if (!ser.supported)
+		{
+			ImGui::TextDisabled("Needs shader model 6.9 and raytracing tier 1.2");
+		}
+		else if (!ser.actuallyReorders)
+		{
+			ImGui::TextDisabled("The driver does not actually reorder");
+		}
+
 		ImGui::SliderFloat("Exposure", &settings_.exposureEV, -10.0f, 10.0f, "%.2f EV");
 
 		int current = 0;

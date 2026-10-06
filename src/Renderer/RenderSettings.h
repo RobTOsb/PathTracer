@@ -45,6 +45,9 @@ struct RenderSettings
 	float skyIntensity = 1.0f;
 
 	int maxBounces = 8;
+	// DXR 1.2 shader execution reordering: switches to the path tracing pipeline that reorders
+	// threads by material before shading each hit. Ignored where the device has no SER.
+	bool shaderExecutionReordering = true;
 
 	float exposureEV = 0.0f;
 	ToneMappingOperator toneMapOperator = TONEMAP_ACES_FITTED;

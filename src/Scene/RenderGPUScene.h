@@ -68,6 +68,12 @@ public:
 		return materialBuffer_;
 	}
 
+	// Rows in the material buffer, including the default material at the end.
+	uint32_t GetMaterialCount() const
+	{
+		return static_cast<uint32_t>(materialAlphaModes_.size());
+	}
+
 	ResourceHandle GetPrimitiveBuffer() const
 	{
 		return primitiveBuffer_;

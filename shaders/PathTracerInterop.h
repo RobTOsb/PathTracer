@@ -34,7 +34,9 @@ struct FrameConstants
 	float sunSelectProbability;
 
 	float lightTreeDiffuseOnlyAlpha;
-	uint framePad0;
+	// Shader execution reordering (SER pipeline only): bits of the material index used as the
+	// coherence hint, enough for every material row and at most 16.
+	uint serCoherenceHintBits;
 	uint framePad1;
 	uint framePad2;
 };
