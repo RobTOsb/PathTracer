@@ -87,6 +87,23 @@ float3 LinearToPQ(float3 nits)
     return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
 }
 
+// Compresses only the luminance above the knee, asymptotically towards maxNits. Everything below
+// the knee passes through untouched, so diffuse white and mid-tones keep their absolute level.
+// Scaling RGB by the luminance ratio preserves hue.
+float3 HDRHighlightRolloff(float3 nits, float maxNits, float kneeFraction)
+{
+    float L = dot(nits, float3(0.2126, 0.7152, 0.0722));
+    float knee = kneeFraction * maxNits;
+    if (L > knee)
+    {
+        float range = maxNits - knee;
+        float t = (L - knee) / range;
+        float Lout = knee + range * (t / (1.0 + t));
+        nits *= Lout / L;
+    }
+    return nits;
+}
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -95,6 +112,16 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
 
     float3 colour = max(g_Input[id.xy].rgb, 0.0) * g_PushConstants.exposure;
+
+    if (g_PushConstants.hdr10 != 0)
+    {
+        // No SDR curve: scene 1.0 is paper white, the display's headroom carries the highlights.
+        float3 nits = colour * g_PushConstants.paperWhiteNits;
+        nits = HDRHighlightRolloff(nits, g_PushConstants.peakNits, g_PushConstants.rolloffKnee);
+        nits = max(Rec709ToRec2020(nits), 0.0);
+        g_Output[id.xy] = float4(LinearToPQ(nits), 1.0);
+        return;
+    }
 
     switch ((ToneMappingOperator)g_PushConstants.toneMapOperator)
     {
@@ -110,13 +137,6 @@ void main(uint3 id : SV_DispatchThreadID)
         default:
             colour = ACESFitted(colour);
             break;
-    }
-
-    if (g_PushConstants.hdr10 != 0)
-    {
-        float3 nits = Rec709ToRec2020(max(colour, 0.0)) * g_PushConstants.paperWhiteNits;
-        g_Output[id.xy] = float4(LinearToPQ(nits), 1.0);
-        return;
     }
 
     g_Output[id.xy] = float4(LinearToSRGB(colour), 1.0);

@@ -86,12 +86,14 @@ struct TonemapConstants
 	uint height;
 	uint hdr10; // 1: output Rec.2020 PQ (HDR10) instead of sRGB
 	float paperWhiteNits; // luminance of diffuse white (1.0) when hdr10 is set
+	float peakNits; // display peak luminance, highlights roll off towards it when hdr10 is set
+	float rolloffKnee; // fraction of peakNits where the highlight roll-off starts
 };
 
 #ifdef __cplusplus
 static_assert(sizeof(FrameConstants) == 352,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuMaterial) == 64, "GpuMaterial must match the structured buffer stride");
-static_assert(sizeof(TonemapConstants) == 24, "TonemapConstants must fit the root constants");
+static_assert(sizeof(TonemapConstants) == 32, "TonemapConstants must fit the root constants");
 #endif
 
 #endif // PATH_TRACER_INTEROP_H

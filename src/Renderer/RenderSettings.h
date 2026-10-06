@@ -50,7 +50,13 @@ struct RenderSettings
 	bool shaderExecutionReordering = true;
 
 	float exposureEV = 0.0f;
-	ToneMappingOperator toneMapOperator = TONEMAP_ACES_FITTED;
+	ToneMappingOperator toneMapOperator = TONEMAP_ACES_FITTED; // SDR output only
+
+	// HDR10 output: no SDR curve, scene 1.0 = paperWhiteNits and only highlights above the knee
+	// are compressed towards peakNits.
+	float paperWhiteNits = 203.0f; // BT.2408 reference white
+	float peakNits = 1000.0f; // overwritten with the display's reported peak at startup
+	float rolloffKnee = 0.6f; // fraction of peakNits
 
 	DLSSMode dlssMode = DLSSMode::MaxQuality;
 	DLSSRayReconstructionPreset rrPreset = DLSSRayReconstructionPreset::PresetF;

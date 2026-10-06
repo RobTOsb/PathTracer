@@ -26,15 +26,51 @@
 #include <stdio.h>
 #include <vector>
 
+#include <Windows.h>
+#include <dxgi1_6.h>
+#include <wrl/client.h>
+
+#pragma comment(lib, "dxgi.lib")
+
 #undef min
 #undef max
 
-constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\Sponza\\glTF\\Sponza.gltf";
+// Peak luminance in nits that the monitor showing the window reports, or 0 if it can't be found.
+static float QueryDisplayPeakNits(void *hwnd)
+{
+	using Microsoft::WRL::ComPtr;
+
+	const HMONITOR monitor = MonitorFromWindow(static_cast<HWND>(hwnd), MONITOR_DEFAULTTONEAREST);
+	ComPtr<IDXGIFactory1> factory;
+	if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
+	{
+		return 0.0f;
+	}
+
+	ComPtr<IDXGIAdapter1> adapter;
+	for (UINT a = 0; factory->EnumAdapters1(a, &adapter) != DXGI_ERROR_NOT_FOUND; ++a)
+	{
+		ComPtr<IDXGIOutput> output;
+		for (UINT o = 0; adapter->EnumOutputs(o, &output) != DXGI_ERROR_NOT_FOUND; ++o)
+		{
+			ComPtr<IDXGIOutput6> output6;
+			DXGI_OUTPUT_DESC1 desc = {};
+			if (SUCCEEDED(output.As(&output6)) && SUCCEEDED(output6->GetDesc1(&desc)) && desc.Monitor == monitor)
+			{
+				return desc.MaxLuminance;
+			}
+		}
+	}
+	return 0.0f;
+}
+
+constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
+//constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\Sponza\\glTF\\Sponza.gltf";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
 
 constexpr uint kFramesInFlight = 2;
 constexpr float kMouseSensitivity = 0.15f; // degrees per pixel
-constexpr uint32_t kTestLightCount = 16;
+constexpr uint32_t kTestLightCount = 1024;
 constexpr float kTestLightMinRadius = 0.005f; // fraction of the scene radius, the largest is 10x this
 constexpr float kTestLightMinPeriod = 10.0f; // seconds per swing along one axis
 constexpr float kTestLightMaxPeriod = 30.0f;
@@ -263,6 +299,15 @@ int Run(const char *scenePath)
 	float lightTime = 0.0f;
 
 	RenderSettings settings;
+	if (renderContext->GetUseHDR())
+	{
+		const float peakNits = QueryDisplayPeakNits(window.GetNativeWindow());
+		if (peakNits > 0.0f)
+		{
+			settings.peakNits = peakNits;
+		}
+		logi("HDR10 output, display peak {} nits", settings.peakNits);
+	}
 	Camera camera(90.0f, window.GetAspectRatio(), 0.01f, 1000.0f, false, true);
 	FrameScene(gpuScene, camera, settings);
 

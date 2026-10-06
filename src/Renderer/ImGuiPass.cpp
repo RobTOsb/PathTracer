@@ -226,6 +226,14 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 
 		ImGui::SliderFloat("Exposure", &settings_.exposureEV, -10.0f, 10.0f, "%.2f EV");
 
+		if (renderContext->GetUseHDR())
+		{
+			ImGui::SliderFloat("Paper white", &settings_.paperWhiteNits, 80.0f, 400.0f, "%.0f nits");
+			ImGui::SliderFloat("Peak luminance", &settings_.peakNits, 400.0f, 4000.0f, "%.0f nits");
+			ImGui::SliderFloat("Roll-off knee", &settings_.rolloffKnee, 0.2f, 0.95f, "%.2f");
+			ImGui::TextDisabled("HDR10 output: the tone mapper only applies to SDR");
+		}
+
 		int current = 0;
 		for (int i = 0; i < IM_ARRAYSIZE(kToneMappers); ++i)
 		{
