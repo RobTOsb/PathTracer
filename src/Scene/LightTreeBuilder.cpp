@@ -36,6 +36,14 @@ namespace
 		return 2.0f * Pi * (1.0f - expf(-2.0f * kappa)) / kappa;
 	}
 
+	// vMF sharpness from the length of a cluster's average direction (Eq. 3). The length is capped so
+	// that the sharpness stays below about 1e4.
+	float VmfSharpness(float averageDirectionLength)
+	{
+		const float len = std::min(averageDirectionLength, 0.9999f);
+		return (3.0f * len - len * len * len) / (1.0f - len * len);
+	}
+
 	// Kept in full 16 byte vectors: binning grows the same bin for consecutive primitives, and
 	// 12 byte float3 stores followed by wider loads stall on store forwarding.
 	struct Bounds
@@ -80,10 +88,32 @@ namespace
 	struct Primitive
 	{
 		Bounds bounds;
+		// Flux times the average emission direction (nu bar) in xyz, flux in w. Summed over a range it
+		// gives the range's flux, and its average direction after dividing by that.
+		SIMDVector fluxDirection;
 		float3 centroid;
-		float flux;
 		uint32_t light;
 	};
+
+	// Split cost of one side: flux times the surface area of its bounds and, with orientation, times
+	// the spherical integral of the normalised vMF fitted to its normals, which is what the node will
+	// store. That runs from about pi for triangles that all face one way (|nu bar| = 0.5 each) to
+	// 4 pi when their normals cancel, the same range as the cone measure M_Omega of SAOH [Conty and
+	// Kulla 2018], but it only needs the summed fluxDirection rather than a cone union per bin.
+	float SideCost(const Bounds &bounds, SIMDVector fluxDirection, bool orientation)
+	{
+		const float flux = XMVectorGetW(fluxDirection);
+		if (!(flux > 0.0f))
+		{
+			return 0.0f;
+		}
+		float cost = flux * bounds.SurfaceArea();
+		if (orientation)
+		{
+			cost *= SGIntegral(VmfSharpness(XMVectorGetX(XMVector3Length(fluxDirection)) / flux));
+		}
+		return cost;
+	}
 
 	// Cluster parameters (Eqs. 2 to 5) in full precision, of a single light or of a node while
 	// building. Packed into GpuLightTreeNode at the end, so the bottom-up pass reads unrounded values.
@@ -170,7 +200,7 @@ namespace
 	{
 		Bounds bounds;
 		Bounds centroidBounds;
-		float flux = 0.0f;
+		SIMDVector fluxDirection = XMVectorZero(); // sum of Primitive::fluxDirection
 		uint32_t count = 0;
 	};
 
@@ -199,61 +229,44 @@ namespace
 	}
 
 	// Fills the leaf cluster and the build primitive of one light, with its flux multiplied by
-	// fluxScale. Returns false for light types the tree does not handle and for lights that emit nothing.
+	// fluxScale. Returns false for anything but area lights and for lights that emit nothing.
 	bool MakeLeaf(GpuLight light, float fluxScale, Cluster &leaf, Primitive &primitive)
 	{
-		const GpuLightType type = light.GetLightType();
-		if (type == kLight_Point)
-		{
-			const float3 position = XYZ(light.v1);
-			const float radius = light.v2.x;
-			const float3 extent = { radius, radius, radius };
-			leaf.mean = position;
-			leaf.variance = radius * radius;
-			leaf.radius = radius;
-			leaf.flux = 4.0f * Pi * Luminance(XYZ(light.radiance));
-			leaf.averageDirection = { 0.0f, 0.0f, 0.0f };
-			primitive.bounds.Grow(position - extent);
-			primitive.bounds.Grow(position + extent);
-		}
-		else if (type == kLight_Area)
-		{
-			// One-sided Lambertian triangle, Phi = pi L A. A radiance map is not accounted for here,
-			// the caller passes its average over the triangle as fluxScale.
-			const float3 p0 = XYZ(light.v1);
-			const float3 p1 = XYZ(light.v2);
-			const float3 p2 = XYZ(light.v3);
-			const float3 e1 = p1 - p0;
-			const float3 e2 = p2 - p0;
-			const float3 crossE = Cross(e1, e2);
-			const float twiceArea = Length(crossE);
-			const float3 centroid = (p0 + p1 + p2) * (1.0f / 3.0f);
-
-			leaf.mean = centroid;
-			leaf.variance = (Dot(e1, e1) + Dot(e2, e2) - Dot(e1, e2)) / 18.0f;
-			leaf.radius = std::max({ Length(p0 - centroid), Length(p1 - centroid), Length(p2 - centroid) });
-			leaf.flux = Pi * Luminance(XYZ(light.radiance)) * 0.5f * twiceArea;
-			// Rough vMF fit to Lambert's cosine around the front face normal.
-			leaf.averageDirection = twiceArea > 0.0f ? crossE * (0.5f / twiceArea) : float3(0.0f, 0.0f, 0.0f);
-			primitive.bounds.Grow(p0);
-			primitive.bounds.Grow(p1);
-			primitive.bounds.Grow(p2);
-		}
-		else
+		if (light.GetLightType() != kLight_Area)
 		{
 			return false;
 		}
 
-		leaf.flux *= fluxScale;
-		primitive.centroid = leaf.mean;
-		primitive.flux = leaf.flux;
+		// One-sided Lambertian triangle, Phi = pi L A. A radiance map is not accounted for here, the
+		// caller passes its average over the triangle as fluxScale.
+		const float3 p0 = XYZ(light.v1);
+		const float3 p1 = XYZ(light.v2);
+		const float3 p2 = XYZ(light.v3);
+		const float3 e1 = p1 - p0;
+		const float3 e2 = p2 - p0;
+		const float3 crossE = Cross(e1, e2);
+		const float twiceArea = Length(crossE);
+		const float3 centroid = (p0 + p1 + p2) * (1.0f / 3.0f);
+
+		leaf.mean = centroid;
+		leaf.variance = (Dot(e1, e1) + Dot(e2, e2) - Dot(e1, e2)) / 18.0f;
+		leaf.radius = std::max({ Length(p0 - centroid), Length(p1 - centroid), Length(p2 - centroid) });
+		leaf.flux = Pi * Luminance(XYZ(light.radiance)) * 0.5f * twiceArea * fluxScale;
+		// Rough vMF fit to Lambert's cosine around the front face normal.
+		leaf.averageDirection = twiceArea > 0.0f ? crossE * (0.5f / twiceArea) : float3(0.0f, 0.0f, 0.0f);
+
+		primitive.bounds.Grow(p0);
+		primitive.bounds.Grow(p1);
+		primitive.bounds.Grow(p2);
+		primitive.centroid = centroid;
+		primitive.fluxDirection = XMVectorSetW(XMVectorScale(LoadFloat3(leaf.averageDirection), leaf.flux), leaf.flux);
 		return leaf.flux > 0.0f;
 	}
 
 	// Exact SAH for small ranges: sorts along each axis and evaluates every split, which is cheaper
 	// than binning at this size and never fails on coincident centroids. Leaves the range ordered
 	// along the best axis and returns the split position in (begin, end).
-	uint32_t SweepSplit(std::vector<Primitive> &prims, uint32_t begin, uint32_t end)
+	uint32_t SweepSplit(std::vector<Primitive> &prims, uint32_t begin, uint32_t end, bool orientation)
 	{
 		const uint32_t count = end - begin;
 		Primitive local[kSweepMaxCount];
@@ -279,24 +292,23 @@ namespace
 					  { return Component(local[a].centroid, axis) < Component(local[b].centroid, axis); });
 
 			Bounds accBounds;
-			float accFlux = 0.0f;
+			SIMDVector accFluxDirection = XMVectorZero();
 			for (uint32_t i = count - 1; i > 0; --i)
 			{
 				accBounds.Grow(local[o[i]].bounds);
-				accFlux += local[o[i]].flux;
-				rightCost[i] = accFlux * accBounds.SurfaceArea();
+				accFluxDirection = XMVectorAdd(accFluxDirection, local[o[i]].fluxDirection);
+				rightCost[i] = SideCost(accBounds, accFluxDirection, orientation);
 			}
 
 			accBounds = Bounds{};
-			accFlux = 0.0f;
+			accFluxDirection = XMVectorZero();
 			for (uint32_t leftCount = 1; leftCount < count; ++leftCount)
 			{
 				accBounds.Grow(local[o[leftCount - 1]].bounds);
-				accFlux += local[o[leftCount - 1]].flux;
+				accFluxDirection = XMVectorAdd(accFluxDirection, local[o[leftCount - 1]].fluxDirection);
 
-				// Point lights with zero radius have zero-area bounds, so every split can cost zero.
-				// Prefer the most even one when costs tie.
-				const float cost = accFlux * accBounds.SurfaceArea() + rightCost[leftCount];
+				// Prefer the most even split when costs tie.
+				const float cost = SideCost(accBounds, accFluxDirection, orientation) + rightCost[leftCount];
 				const uint32_t imbalance = SplitImbalance(leftCount, count);
 				if (cost < bestCost || (cost == bestCost && imbalance < bestImbalance))
 				{
@@ -322,13 +334,14 @@ namespace
 		Bounds rightCentroids;
 	};
 
-	// Flux weighted binned SAH. All three axes are binned in one pass over the range, and the bins
+	// Binned split by SideCost. All three axes are binned in one pass over the range, and the bins
 	// also track centroid bounds so the children's come for free. bins is scratch space for
 	// 3 * binCount bins. Returns false if no axis separates the centroids.
 	bool BinnedSplit(std::vector<Primitive> &prims,
 					 const BuildTask &task,
 					 std::span<Bin> bins,
 					 uint32_t binCount,
+					 bool orientation,
 					 BinnedSplitResult &result)
 	{
 		const uint32_t count = task.end - task.begin;
@@ -355,7 +368,7 @@ namespace
 				Bin &bin = bins[axis * binCount + BinIndex(Component(p.centroid, axis), lo[axis], scale[axis], binCount)];
 				bin.bounds.Grow(p.bounds);
 				bin.centroidBounds.Grow(p.centroid);
-				bin.flux += p.flux;
+				bin.fluxDirection = XMVectorAdd(bin.fluxDirection, p.fluxDirection);
 				bin.count++;
 			}
 		}
@@ -375,28 +388,28 @@ namespace
 			const Bin *axisBins = &bins[axis * binCount];
 
 			Bounds accBounds;
-			float accFlux = 0.0f;
+			SIMDVector accFluxDirection = XMVectorZero();
 			for (uint32_t b = binCount - 1; b > 0; --b)
 			{
 				accBounds.Grow(axisBins[b].bounds);
-				accFlux += axisBins[b].flux;
-				rightCost[b] = accFlux * accBounds.SurfaceArea();
+				accFluxDirection = XMVectorAdd(accFluxDirection, axisBins[b].fluxDirection);
+				rightCost[b] = SideCost(accBounds, accFluxDirection, orientation);
 			}
 
 			accBounds = Bounds{};
-			accFlux = 0.0f;
+			accFluxDirection = XMVectorZero();
 			uint32_t leftCount = 0;
 			for (uint32_t b = 0; b + 1 < binCount; ++b)
 			{
 				accBounds.Grow(axisBins[b].bounds);
-				accFlux += axisBins[b].flux;
+				accFluxDirection = XMVectorAdd(accFluxDirection, axisBins[b].fluxDirection);
 				leftCount += axisBins[b].count;
 				if (leftCount == 0 || leftCount == count)
 				{
 					continue;
 				}
 
-				const float cost = accFlux * accBounds.SurfaceArea() + rightCost[b + 1];
+				const float cost = SideCost(accBounds, accFluxDirection, orientation) + rightCost[b + 1];
 				const uint32_t imbalance = SplitImbalance(leftCount, count);
 				if (cost < bestCost || (cost == bestCost && imbalance < bestImbalance))
 				{
@@ -528,9 +541,9 @@ LightTree BuildLightTree(std::span<const GpuLight> lights,
 		}
 		else if (count <= kSweepMaxCount)
 		{
-			mid = SweepSplit(prims, task.begin, task.end);
+			mid = SweepSplit(prims, task.begin, task.end, settings.orientationSplits);
 		}
-		else if (BinnedSplit(prims, task, bins, binCount, split))
+		else if (BinnedSplit(prims, task, bins, binCount, settings.orientationSplits, split))
 		{
 			mid = split.mid;
 			leftCentroids = split.leftCentroids;
@@ -686,10 +699,9 @@ LightTree BuildLightTree(std::span<const GpuLight> lights,
 
 		const Cluster &node = clusters[index];
 		const float3 v = node.averageDirection;
-		float len = Length(v);
+		const float len = Length(v);
 		const float3 axis = len > 0.0f ? v * (1.0f / len) : float3(0.0f, 0.0f, 1.0f);
-		len = std::min(len, 0.9999f);
-		const float sharpness = (3.0f * len - len * len * len) / (1.0f - len * len);
+		const float sharpness = VmfSharpness(len);
 
 		packed.mean = node.mean;
 		packed.amplitude = node.flux / (2.0f * Pi * SGIntegral(sharpness));

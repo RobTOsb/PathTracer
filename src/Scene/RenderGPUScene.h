@@ -3,6 +3,7 @@
 #include "GPUScene.h"
 #include "RenderContext.h"
 
+#include "LightTreeBuilder.h"
 #include "Maths.h"
 #include "PathTracerInterop.h"
 #include "ShaderInterop.h"
@@ -32,7 +33,10 @@ public:
 
 	void BuildAccelerationStructures();
 
-	void UpdateLights(std::span<const GpuLight> lights, uint32_t maxLeafLights);
+	// Builds the light tree over the emissive triangles on the first call and again whenever the
+	// settings change; otherwise it does nothing. Call after BeginFrame, as a build writes the
+	// current frame's light buffers.
+	void UpdateLights(const LightTreeBuildSettings &settings);
 
 	bool HasGeometry() const
 	{
@@ -110,12 +114,6 @@ public:
 	ResourceHandle GetEmitterBuffer() const
 	{
 		return emitterBuffer_;
-	}
-
-	// Emissive triangles at the front of the light buffer.
-	uint32_t GetEmissiveTriangleCount() const
-	{
-		return static_cast<uint32_t>(emissiveLights_.size());
 	}
 
 	uint32_t GetLightCount() const
@@ -198,8 +196,9 @@ private:
 	uint32_t primitiveBufferIndex_ = InvalidResourceDescriptorIndex;
 	uint32_t materialBufferIndex_ = InvalidResourceDescriptorIndex;
 
-	// One set per frame in flight. GPU upload heap buffers, so the CPU writes them in place and the
-	// GPU reads them from video memory.
+	// One set per frame in flight, so a rebuild can write the current frame's set while the GPU may
+	// still read the last one. GPU upload heap buffers, so the CPU writes them in place and the GPU
+	// reads them from video memory.
 	struct LightFrameBuffers
 	{
 		ResourceHandle lights = InvalidResourceHandle;
@@ -214,12 +213,12 @@ private:
 		size_t leafLightCapacity = 0;
 	};
 
-	// The light tree input: the static emissive triangles (one-sided area lights, with the average
-	// of their emissive texture as the flux scale) followed by the lights passed to UpdateLights.
+	// The light tree input: the emissive triangles (one-sided area lights, with the average of their
+	// emissive texture as the flux scale).
 	std::vector<GpuLight> emissiveLights_;
 	std::vector<float> emissiveFluxScales_;
-	std::vector<GpuLight> lightInput_;
-	std::vector<float> lightFluxScales_;
+	LightTreeBuildSettings lightTreeSettings_; // of the last build
+	bool lightTreeBuilt_ = false;
 
 	std::vector<LightFrameBuffers> lightFrames_;
 	uint32_t lightFrame_ = 0;
@@ -231,6 +230,7 @@ private:
 	std::vector<ResourceHandle> textures_;
 	std::vector<uint32_t> materialAlphaModes_; // GpuAlphaMode per GpuMaterial row; decides each BLAS's geometry flags
 	uint64_t pendingUploadBytes_ = 0;
+	double mipBuildMs_ = 0.0; // CPU time spent filtering texture mips during the last BuildGPUScene
 
 	std::vector<AccelerationStructureHandle> blases_; // one per primitive desc, invalid for skipped primitives
 	AccelerationStructureHandle tlas_ = InvalidAccelerationStructureHandle;

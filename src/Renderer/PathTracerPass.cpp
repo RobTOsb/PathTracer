@@ -18,7 +18,7 @@
 
 namespace
 {
-	constexpr uint32_t kMaxPayloadSizeInBytes = 60;
+	constexpr uint32_t kMaxPayloadSizeInBytes = 76;
 
 	// Halton phases before the jitter repeats. The DLSS guide asks for 8 * (output / render)^2, so
 	// 72 at Ultra Performance, and the RR guide for at least 32 with no reason to limit it.
@@ -198,11 +198,9 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	// otherwise give it all to whichever does.
 	const LightSettings &lights = settings_.lights;
 	const bool sunActive = std::max({ irradiance.x, irradiance.y, irradiance.z }) > 0.0f;
-	// The intensity scale only applies to point lights, so it does not switch off the emitters.
 	const bool lightsActive = lights.enabled && scene_.GetLightCount() > 0;
 	constants.lightCount = lightsActive ? scene_.GetLightCount() : 0u;
 	constants.lightSampling = static_cast<uint>(lights.sampling);
-	constants.lightIntensityScale = lights.intensityScale;
 	constants.sunSelectProbability = sunActive ? (lightsActive ? 0.5f : 1.0f) : 0.0f;
 	constants.lightTreeGlossyBounces = static_cast<uint>(std::max(lights.glossyImportanceBounces, 0));
 	constants.lightTreeFarFieldSharpness = lights.farFieldImportance ? lights.farFieldSharpness : FLT_MAX;
@@ -217,6 +215,14 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		++hintBits;
 	}
 	constants.serCoherenceHintBits = hintBits;
+
+	// One pixel's angle at the render resolution. DLSS reconstructs at the output resolution, so the
+	// texture footprint shrinks by render / output width, the usual upscaler mip bias.
+	constants.rayConePixelSpread = atanf(2.0f * tanf(0.5f * camera_.GetFovY()) / static_cast<float>(height_));
+	constants.rayConeBsdfSpread = settings_.rayConeBsdfSpread;
+	const float upscalerBias = log2f(static_cast<float>(width_) / static_cast<float>(renderContext->GetWindowWidth()));
+	constants.textureLodScale =
+			settings_.rayConeTextureLod ? exp2f(settings_.textureLodBias + upscalerBias) : 0.0f;
 
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
 	constants.frameIndex = renderContext->GetCurrentFrame();

@@ -11,7 +11,7 @@
 #define LIGHT_TREE_LEAF_BIT 0x80000000u
 #define LIGHT_TREE_LEAF_COUNT_SHIFT 29u
 #define LIGHT_TREE_LEAF_FIRST_MASK 0x1FFFFFFFu
-#define LIGHT_TREE_MAX_LEAF_LIGHTS 4u
+#define LIGHT_TREE_MAX_LEAF_LIGHTS 8u
 
 // One node of the SG light tree from "Hierarchical Light Sampling with Accurate Spherical Gaussian
 // Lighting" (Tokuyoshi, Ikeda, Kulkarni and Harada 2024): the paper's cluster (Section 3.1) and the

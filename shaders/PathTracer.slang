@@ -10,6 +10,7 @@ ConstantBuffer<FrameConstants> g_Frame : register(b0);
 RaytracingAccelerationStructure g_Scene : register(t0);
 RWTexture2D<float4> g_Output : register(u0);
 SamplerState g_LinearWrap : register(s3);
+SamplerState g_AnisotropicWrap : register(s5);
 
 // DLSS Ray Reconstruction guide buffers, all at render resolution. PathTracerPass compiles this
 // permutation (and binds these) only while DLSS-RR is enabled.
@@ -61,9 +62,30 @@ GpuMaterial LoadGpuMaterial(uint index)
 
 float4 SampleTexture(uint textureIndex, float2 uv)
 {
-    // No ray differentials yet, so always the top mip.
     Texture2D<float4> texture = ResourceDescriptorHeap[NonUniformResourceIndex(textureIndex)];
     return texture.SampleLevel(g_LinearWrap, uv, 0.0);
+}
+
+// Filtered over a ray cone's footprint, whose ellipse axes span ddx and ddy in uv.
+float4 SampleTextureGrad(uint textureIndex, float2 uv, float2 ddx, float2 ddy)
+{
+    Texture2D<float4> texture = ResourceDescriptorHeap[NonUniformResourceIndex(textureIndex)];
+    return texture.SampleGrad(g_AnisotropicWrap, uv, ddx, ddy);
+}
+
+// A ray's cone: its width where it last met a surface (0 at a pinhole camera) and its full apex
+// angle in radians, which grows the width by spread per unit of distance.
+struct RayCone
+{
+    float width;
+    float spread;
+};
+
+// Apex angle of a narrow cone (solid angle about pi (angle / 2)^2) covering the 1 / pdf of solid
+// angle that a BSDF sample stands for.
+float SampledConeSpread(float pdf)
+{
+    return 2.0 * rsqrt(PI * pdf);
 }
 
 // Scene interface
@@ -79,6 +101,7 @@ struct HitInfo
     float3 N;  // interpolated vertex normal
     float3 Ns; // shading normal from the normal map in world space, equal to N without a map
     float2 uv;
+    float4 uvGradients; // uv across the two ellipse axes of a ray cone of unit width, see RayConeUvGradients
     float3 emission; // emitted radiance (both faces), set by LoadMaterial
     uint materialId;
     uint emitter; // entry of the hit triangle in g_Emitters, INVALID_LIGHT_INDEX if its instance does not emit
@@ -116,6 +139,7 @@ struct HitPayload
     float3 T;
     float2 uv;
     uint emitter;
+    float4 uvGradients;
 };
 
 // First bounce whose hits the SER pipeline reorders. Camera rays leave raygen in screen order, so
@@ -163,6 +187,7 @@ HitInfo TraceClosest(float3 origin, float3 dir, bool reorder, inout uint rng)
     hit.T = normalize(payload.T - hit.N * dot(hit.N, payload.T));
     hit.B = cross(hit.N, hit.T) * payload.tangentSign;
     hit.uv = payload.uv;
+    hit.uvGradients = payload.uvGradients;
     hit.materialId = payload.materialId;
     hit.emitter = payload.emitter;
     hit.emission = float3(0.0, 0.0, 0.0);
@@ -222,46 +247,12 @@ LightSample SampleSun(float2 u)
     return ls;
 }
 
-// Samples one light from the light buffer as seen from position. The PDF excludes the selection
-// probability. The radiance map of a textured area light is not applied.
+// Samples one emissive triangle from the light buffer as seen from position, by uniform area sampling
+// of the triangle, emitting from the front face (counter-clockwise v1, v2, v3), converted to a solid
+// angle PDF. The PDF excludes the selection probability.
 LightSample SampleBufferLight(GpuLight light, float3 position, float2 u)
 {
     LightSample ls;
-    if (light.GetLightType() == kLight_Point)
-    {
-        float3 toLight = light.v1.xyz - position;
-        float d2 = max(dot(toLight, toLight), 1.0e-8);
-        float d = sqrt(d2);
-        float radius = light.v2.x;
-        if (radius <= 0.0)
-        {
-            // Isotropic point light: radiance.xyz is the intensity, so it delivers intensity / d^2.
-            ls.distance = d;
-            ls.direction = toLight / d;
-            ls.radiance = light.radiance.xyz / d2;
-            ls.pdf = 1.0;
-            ls.lightSamplingOnly = true;
-            return ls;
-        }
-
-        float r2 = radius * radius;
-        bool inside = d2 <= r2;
-        float sin2Max = r2 / d2;
-        float oneMinusCosMax = inside ? 2.0 : sin2Max / (1.0 + sqrt(1.0 - sin2Max));
-        ls.direction = SampleUniformCone(toLight / d, oneMinusCosMax, u);
-
-        // Distance to the near side of the sphere along the sample, or the far side from inside.
-        float b = dot(toLight, ls.direction);
-        float h = sqrt(max(r2 - (d2 - b * b), 0.0));
-        ls.distance = max(inside ? b + h : b - h, 0.0);
-        ls.radiance = light.radiance.xyz / (PI * r2);
-        ls.pdf = 1.0 / (TWO_PI * oneMinusCosMax);
-        ls.lightSamplingOnly = true;
-        return ls;
-    }
-
-    // Area light: uniform area sampling of the triangle, emitting from the front face (counter-
-    // clockwise v1, v2, v3), converted to a solid angle PDF.
     float3 p0 = light.v1.xyz;
     float3 p1 = light.v2.xyz;
     float3 p2 = light.v3.xyz;
@@ -402,15 +393,7 @@ LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
         pmf = 1.0 / g_Frame.lightCount;
     }
 
-    GpuLight light = g_Lights[lightIndex];
-    // Only area and sphere lights need a position on the light.
-    GpuLightType type = light.GetLightType();
-    bool hasArea = type == kLight_Area || (type == kLight_Point && light.v2.x > 0.0);
-    float2 uLight = hasArea ? Rand3(rng).xy : float2(0.0, 0.0);
-    ls = SampleBufferLight(light, v.position, uLight);
-    // Emissive triangles stay unscaled, as BSDF sampling sees them.
-    if (type == kLight_Point)
-        ls.radiance *= g_Frame.lightIntensityScale;
+    ls = SampleBufferLight(g_Lights[lightIndex], v.position, Rand3(rng).xy);
     ls.pdf *= pmf * (1.0 - pSun);
     return ls;
 }
@@ -451,28 +434,31 @@ float3 CastShadowRay(float3 hitPosition, float3 surfaceNormal, float3 directionT
 }
 
 // Reads the material row once, samples all of its textures and applies the normal map to hit.Ns.
-OpenPBRBaseParams LoadMaterial(inout HitInfo hit)
+// The textures are filtered over the footprint of a ray cone coneWidth wide where it meets the surface.
+OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth)
 {
     GpuMaterial material = LoadGpuMaterial(hit.materialId);
     float2 uv = hit.uv;
+    float2 ddx = hit.uvGradients.xy * coneWidth;
+    float2 ddy = hit.uvGradients.zw * coneWidth;
 
     // Tangent-space normal map: +X along the tangent, +Y along the bitangent, +Z along N.
     if (material.normalTexture != INVALIDDESCRIPTORHANDLE)
     {
-        float3 tn = SampleTexture(material.normalTexture, uv).xyz * 2.0 - 1.0;
+        float3 tn = SampleTextureGrad(material.normalTexture, uv, ddx, ddy).xyz * 2.0 - 1.0;
         tn.xy *= material.normalScale;
         hit.Ns = normalize(hit.T * tn.x + hit.B * tn.y + hit.N * tn.z);
     }
 
     float3 baseColour = material.baseColour.rgb;
     if (material.albedoTexture != INVALIDDESCRIPTORHANDLE)
-        baseColour *= SampleTexture(material.albedoTexture, uv).rgb;
+        baseColour *= SampleTextureGrad(material.albedoTexture, uv, ddx, ddy).rgb;
 
     float roughness = material.roughness;
     float metallic = material.metallic;
     if (material.roughMetalTexture != INVALIDDESCRIPTORHANDLE)
     {
-        float4 roughMetal = SampleTexture(material.roughMetalTexture, uv);
+        float4 roughMetal = SampleTextureGrad(material.roughMetalTexture, uv, ddx, ddy);
         roughness *= roughMetal.g;
         metallic *= roughMetal.b;
     }
@@ -481,7 +467,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit)
     {
         hit.emission = material.emissive;
         if (material.emissiveTexture != INVALIDDESCRIPTORHANDLE)
-            hit.emission *= SampleTexture(material.emissiveTexture, uv).rgb;
+            hit.emission *= SampleTextureGrad(material.emissiveTexture, uv, ddx, ddy).rgb;
     }
 
     OpenPBRBaseParams p = OpenPBRDefaults();
@@ -657,6 +643,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
     float3 segmentExtinction = float3(0.0, 0.0, 0.0);
     float prevBsdfPdf = 0.0;
     LightSelectVertex prevVertex = (LightSelectVertex)0; // where the current segment started, from bounce 1
+    RayCone cone = { 0.0, g_Frame.rayConePixelSpread };
 
     // maxBounces counts indirect bounces, so the primary segment comes on top.
     const uint maxSegments = g_Frame.maxBounces + 1;
@@ -691,8 +678,9 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             break;
         }
 
-        // Material and shading basis for this hit.
-        OpenPBRBaseParams mat = LoadMaterial(hit);
+        // Material and shading basis for this hit, its textures filtered over the cone's footprint.
+        cone.width += cone.spread * hit.t;
+        OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale);
         float3 wo = -dir;
 
         // Emission found by BSDF sampling, from front faces only like the area lights NEE samples.
@@ -770,6 +758,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
                 throughput *= bs.weight;
                 prevBsdfPdf = bs.pdf;
                 prevVertex = vertex;
+                // Surface curvature is ignored. The cap stops a tiny pdf from making the width infinite.
+                cone.spread = min(cone.spread + g_Frame.rayConeBsdfSpread * SampledConeSpread(bs.pdf), PI);
 
                 // Heading into the object means travelling through its medium until the next hit.
                 segmentExtinction = dot(bs.wi, hit.Ng) < 0.0 ? extinction : float3(0.0, 0.0, 0.0);
@@ -867,6 +857,32 @@ float2 InterpolateTexCoord(uint3 tri, float3 bary)
     return g_TexCoords[tri.x] * bary.x + g_TexCoords[tri.y] * bary.y + g_TexCoords[tri.z] * bary.z;
 }
 
+// uv across the ellipse where a ray cone of unit width meets the triangle's plane, as SampleGrad's
+// ddx (.xy) and ddy (.zw), from "Improved Shader and Texture Level of Detail Using Ray Cones"
+// (Akenine-Moller et al. 2021). The axis along the ray's projection onto the plane is stretched by
+// 1 / cos, the one across it is not. Both scale linearly with the cone width, which raygen knows.
+// e1, e2 are the world-space edges from the first corner and n = cross(e1, e2).
+float4 RayConeUvGradients(float3 e1, float3 e2, float3 n, float2 uv0, float2 uv1, float2 uv2, float3 dir)
+{
+    float invN2 = 1.0 / max(dot(n, n), 1.0e-30);
+    float3 nHat = n * sqrt(invN2);
+    float cosTheta = dot(nHat, dir);
+    float3 major = dir - nHat * cosTheta;
+    float sin2 = dot(major, major);
+    // Head on, the footprint is a circle and any axis in the plane will do.
+    major = sin2 > 1.0e-8 ? major * rsqrt(sin2) : normalize(e1);
+    float3 minor = cross(nHat, major);
+    major /= max(abs(cosTheta), 1.0e-3);
+
+    // Barycentric gradients in the plane: an offset a = b1 e1 + b2 e2 has b1 = dot(a, cross(e2, n)) / |n|^2
+    // and b2 = dot(a, cross(n, e1)) / |n|^2.
+    float3 db1 = cross(e2, n) * invN2;
+    float3 db2 = cross(n, e1) * invN2;
+    float2 duv1 = uv1 - uv0;
+    float2 duv2 = uv2 - uv0;
+    return float4(duv1 * dot(major, db1) + duv2 * dot(major, db2), duv1 * dot(minor, db1) + duv2 * dot(minor, db2));
+}
+
 [shader("closesthit")]
 void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
@@ -887,7 +903,11 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     float det = dot(linearToWorld[0], cofactor[0]);
     float handedness = det < 0.0 ? -1.0 : 1.0;
 
-    float3 Ng = normalize(mul(cofactor, cross(p1 - p0, p2 - p0)) * handedness);
+    // cross(M a, M b) = cofactor(M) cross(a, b), so this is the transformed object-space face normal.
+    float3 e1 = mul(linearToWorld, p1 - p0);
+    float3 e2 = mul(linearToWorld, p2 - p0);
+    float3 faceCross = cross(e1, e2);
+    float3 Ng = normalize(faceCross * handedness);
 
     payload.hitT = RayTCurrent();
     payload.Ng = Ng;
@@ -896,7 +916,11 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     payload.T = normalize(mul(linearToWorld, objectTangent.xyz));
     // A mirroring transform flips cross(N, T), so fold its handedness into the bitangent sign.
     payload.tangentSign = (objectTangent.w < 0.0 ? -1.0 : 1.0) * handedness;
-    payload.uv = InterpolateTexCoord(tri, bary);
+    float2 uv0 = g_TexCoords[tri.x];
+    float2 uv1 = g_TexCoords[tri.y];
+    float2 uv2 = g_TexCoords[tri.z];
+    payload.uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
+    payload.uvGradients = RayConeUvGradients(e1, e2, faceCross, uv0, uv1, uv2, WorldRayDirection());
 
     uint emitterTable = g_Emitters[InstanceIndex()];
     payload.emitter = emitterTable != INVALID_LIGHT_INDEX ? emitterTable + PrimitiveIndex() : INVALID_LIGHT_INDEX;

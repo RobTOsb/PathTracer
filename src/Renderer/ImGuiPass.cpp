@@ -174,10 +174,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	{
 		LightSettings &lights = settings_.lights;
 		const uint32_t lightCount = scene_.GetLightCount();
-		ImGui::Text("%u light(s) (%u emissive triangles), tree built in %.3f ms",
-					lightCount,
-					scene_.GetEmissiveTriangleCount(),
-					scene_.GetLightTreeBuildMs());
+		ImGui::Text("%u emissive triangle(s), tree built in %.3f ms", lightCount, scene_.GetLightTreeBuildMs());
 		ImGui::Text("Tree depth: %u max, %.1f average (4-wide)",
 					scene_.GetLightTreeMaxDepth(),
 					scene_.GetLightTreeAverageDepth());
@@ -196,6 +193,9 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 							  "later ones use the diffuse one only");
 		ImGui::SliderInt("Lights per leaf", &lights.maxLeafLights, 1, static_cast<int>(LIGHT_TREE_MAX_LEAF_LIGHTS));
 		ImGui::SetItemTooltip("Light tree leaf size; a leaf's lights are picked in proportion to their flux");
+		ImGui::Checkbox("Orientation splits", &lights.orientationSplits);
+		ImGui::SetItemTooltip("Light tree build: keep emitters that face the same way together, by also weighing "
+							  "the spread of each side's normals in the split cost");
 		ImGui::Checkbox("Far-field importance", &lights.farFieldImportance);
 		ImGui::SetItemTooltip("Treat small, distant light clusters wholly above the horizon as point lights");
 		ImGui::SameLine();
@@ -207,18 +207,6 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 						   "%.0f",
 						   ImGuiSliderFlags_Logarithmic);
 		ImGui::EndDisabled();
-		ImGui::EndDisabled();
-		ImGui::DragFloat("Point light intensity",
-						 &lights.intensityScale,
-						 0.01f,
-						 0.0f,
-						 1000.0f,
-						 "%.2f",
-						 ImGuiSliderFlags_Logarithmic);
-		ImGui::Checkbox("Animate", &lights.animate);
-		ImGui::SameLine();
-		ImGui::BeginDisabled(!lights.animate);
-		ImGui::DragFloat("Speed", &lights.animationSpeed, 0.01f, 0.0f, 10.0f, "%.2f");
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 	}
@@ -246,6 +234,16 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		{
 			ImGui::TextDisabled("The driver does not actually reorder");
 		}
+
+		ImGui::Checkbox("Ray cone texture LOD", &settings_.rayConeTextureLod);
+		ImGui::SetItemTooltip("Filters textures over each ray's cone footprint instead of always sampling the top mip");
+		ImGui::BeginDisabled(!settings_.rayConeTextureLod);
+		ImGui::SliderFloat("Texture LOD bias", &settings_.textureLodBias, -4.0f, 4.0f, "%.2f mips");
+		ImGui::SetItemTooltip("On top of the DLSS bias, log2(render / output width)");
+		ImGui::SliderFloat("Bounce cone spread", &settings_.rayConeBsdfSpread, 0.0f, 2.0f, "%.2f");
+		ImGui::SetItemTooltip("How much each BSDF sample widens the cone, 1 = the solid angle the sample stands for, "
+							  "0 = only the camera's pixel spread");
+		ImGui::EndDisabled();
 
 		ImGui::SliderFloat("Exposure", &settings_.exposureEV, -10.0f, 10.0f, "%.2f EV");
 

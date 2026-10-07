@@ -21,8 +21,6 @@
 #include <exception>
 #include <math.h>
 #include <memory>
-#include <random>
-#include <span>
 #include <stdio.h>
 #include <vector>
 
@@ -71,10 +69,6 @@ constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gl
 
 constexpr uint kFramesInFlight = 2;
 constexpr float kMouseSensitivity = 0.15f; // degrees per pixel
-constexpr uint32_t kTestLightCount = 0;
-constexpr float kTestLightMinRadius = 0.005f; // fraction of the scene radius, the largest is 10x this
-constexpr float kTestLightMinPeriod = 10.0f; // seconds per swing along one axis
-constexpr float kTestLightMaxPeriod = 30.0f;
 
 void UpdateCamera(Window &window, Camera &camera, RenderSettings &settings, float deltaSeconds)
 {
@@ -125,82 +119,6 @@ void FrameScene(const RenderGPUScene &gpuScene, Camera &camera, RenderSettings &
 	const float distance = radius / tanf(0.5f * camera.GetFovY());
 	camera.SetPosition(float3(centre.x, centre.y, centre.z + distance));
 	settings.cameraSpeed = std::max(radius * 0.25f, 0.01f);
-}
-
-// A test light moving on a Lissajous path: each axis swings sinusoidally around the centre with its
-// own amplitude, angular frequency and phase.
-struct TestLight
-{
-	float3 intensity;
-	float radius;
-	float3 centre;
-	float3 amplitude;
-	float3 frequency; // radians per second
-	float3 phase;
-
-	float3 GetPosition(float time) const
-	{
-		return { centre.x + amplitude.x * sinf(frequency.x * time + phase.x),
-				 centre.y + amplitude.y * sinf(frequency.y * time + phase.y),
-				 centre.z + amplitude.z * sinf(frequency.z * time + phase.z) };
-	}
-};
-
-std::vector<TestLight> CreateTestLights(const RenderGPUScene &gpuScene, uint32_t count)
-{
-	const float3 lo = gpuScene.GetBoundsMin();
-	const float3 hi = gpuScene.GetBoundsMax();
-	const float3 extent = hi - lo;
-	const float radius = std::max(0.5f * sqrtf(Dot(extent, extent)), 0.01f);
-	// Mean of a log-uniform distribution over [0.1, 10] is 9.9 / ln(100).
-	const float meanIntensity = 0.25f * radius * radius / static_cast<float>(count);
-	const float baseIntensity = meanIntensity * logf(100.0f) / 9.9f;
-
-	std::mt19937 rng(1234u);
-	std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
-
-	auto axisMotion = [&](float &centre, float &amplitude, float &frequency, float &phase)
-	{
-		amplitude = 0.1f + 0.15f * uniform(rng);
-		centre = 0.05f + amplitude + (0.9f - 2.0f * amplitude) * uniform(rng);
-		frequency = 2.0f * Pi / (kTestLightMinPeriod + (kTestLightMaxPeriod - kTestLightMinPeriod) * uniform(rng));
-		phase = 2.0f * Pi * uniform(rng);
-	};
-
-	std::vector<TestLight> lights;
-	lights.reserve(count);
-	for (uint32_t i = 0; i < count; ++i)
-	{
-		TestLight light;
-		float3 t, a;
-		axisMotion(t.x, a.x, light.frequency.x, light.phase.x);
-		axisMotion(t.y, a.y, light.frequency.y, light.phase.y);
-		axisMotion(t.z, a.z, light.frequency.z, light.phase.z);
-		light.centre = lo + extent * t;
-		light.amplitude = extent * a;
-
-		// Fully bright HSV colour with a random hue and saturation.
-		const float hue = 6.0f * uniform(rng);
-		const float saturation = 0.3f + 0.7f * uniform(rng);
-		const float3 hueColour = { std::clamp(fabsf(hue - 3.0f) - 1.0f, 0.0f, 1.0f),
-								   std::clamp(2.0f - fabsf(hue - 2.0f), 0.0f, 1.0f),
-								   std::clamp(2.0f - fabsf(hue - 4.0f), 0.0f, 1.0f) };
-		const float3 colour = float3(1.0f, 1.0f, 1.0f) * (1.0f - saturation) + hueColour * saturation;
-
-		light.intensity = colour * (baseIntensity * powf(10.0f, 2.0f * uniform(rng) - 1.0f));
-		light.radius = radius * kTestLightMinRadius * powf(10.0f, uniform(rng));
-		lights.push_back(light);
-	}
-	return lights;
-}
-
-void PlaceTestLights(std::span<const TestLight> testLights, float time, std::vector<GpuLight> &lights)
-{
-	lights.clear();
-	for (const TestLight &light: testLights)
-	{
-		lights.push_back(MakePointLight(light.intensity, light.GetPosition(time), 0.0f, light.radius));
-	}
 }
 
 void BuildPasses(RenderContext *renderContext,
@@ -274,7 +192,6 @@ int Run(const char *scenePath)
 		loge("Failed to load scene '{}'", scenePath);
 		return 1;
 	}
-	scene.Print();
 
 	RenderGPUScene gpuScene(renderContext.get());
 	gpuScene.BuildGPUScene(scene);
@@ -294,10 +211,6 @@ int Run(const char *scenePath)
 		loge("Scene '{}' has no renderable triangle geometry", scenePath);
 		return 1;
 	}
-
-	const std::vector<TestLight> testLights = CreateTestLights(gpuScene, kTestLightCount);
-	std::vector<GpuLight> lights;
-	float lightTime = 0.0f;
 
 	RenderSettings settings;
 	if (renderContext->GetUseHDR())
@@ -343,16 +256,14 @@ int Run(const char *scenePath)
 		camera.UpdatePreviousMatrices();
 		UpdateCamera(window, camera, settings, deltaSeconds);
 
-		if (settings.lights.animate)
-		{
-			lightTime += deltaSeconds * settings.lights.animationSpeed;
-		}
-
 		renderContext->BeginFrame();
 
-		// After BeginFrame, which frees this frame's light buffers.
-		PlaceTestLights(testLights, lightTime, lights);
-		gpuScene.UpdateLights(lights, static_cast<uint32_t>(settings.lights.maxLeafLights));
+		// After BeginFrame, which frees this frame's light buffers. Rebuilds the tree only when
+		// its settings change.
+		LightTreeBuildSettings lightTreeSettings;
+		lightTreeSettings.maxLeafLights = static_cast<uint32_t>(settings.lights.maxLeafLights);
+		lightTreeSettings.orientationSplits = settings.lights.orientationSplits;
+		gpuScene.UpdateLights(lightTreeSettings);
 
 		renderContext->BeginGraphicsCommandList();
 		renderContext->SetDescriptorHeaps();

@@ -30,7 +30,7 @@ struct FrameConstants
 	// lightCount lights in the light buffer. lightCount is 0 while the lights are switched off.
 	uint lightCount;
 	uint lightSampling; // LightSamplingMode
-	float lightIntensityScale; // multiplies every light's radiance or intensity
+	uint pad1;
 	float sunSelectProbability;
 
 	float lightTreeDiffuseOnlyAlpha;
@@ -39,6 +39,14 @@ struct FrameConstants
 	uint serCoherenceHintBits;
 	uint lightTreeGlossyBounces; // path vertices from this bounce on use the diffuse light tree importance only
 	float lightTreeFarFieldSharpness; // SG sharpness from which tree nodes count as point lights, FLT_MAX = off
+
+	// Ray cone texture filtering (Akenine-Moller et al. 2021). Camera rays start as cones of
+	// rayConePixelSpread radians, and each BSDF sample widens the cone by rayConeBsdfSpread times
+	// the angle of a cone covering the solid angle (1 / pdf) the sample stands for.
+	float rayConePixelSpread;
+	float rayConeBsdfSpread;
+	float textureLodScale; // multiplies the cone footprint (2^mip bias), 0 samples the top mip everywhere
+	uint pad0;
 };
 
 // How next event estimation picks one light from the light buffer.
@@ -93,7 +101,7 @@ struct TonemapConstants
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(FrameConstants) == 352,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 368,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuMaterial) == 80, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 32, "TonemapConstants must fit the root constants");
 #endif

@@ -12,6 +12,8 @@
 #include <cfloat>
 #include <chrono>
 #include <cstring>
+#include <execution>
+#include <numeric>
 
 
 namespace
@@ -60,6 +62,88 @@ namespace
 			return t;
 		}();
 		return table[value];
+	}
+
+	// Linear values quantised to 16 bits, fine enough to tell the darkest sRGB codes apart.
+	uint8_t LinearToSrgb(float value)
+	{
+		static const std::vector<uint8_t> table = []
+		{
+			std::vector<uint8_t> t(65536);
+			for (size_t i = 0; i < t.size(); ++i)
+			{
+				const float c = static_cast<float>(i) / 65535.0f;
+				const float s = c <= 0.0031308f ? c * 12.92f : 1.055f * powf(c, 1.0f / 2.4f) - 0.055f;
+				t[i] = static_cast<uint8_t>(s * 255.0f + 0.5f);
+			}
+			return t;
+		}();
+		return table[static_cast<uint32_t>(std::clamp(value, 0.0f, 1.0f) * 65535.0f + 0.5f)];
+	}
+
+	// One RGBA8 mip from the level above with a 2x2 box filter, the colour of sRGB textures averaged
+	// in linear space. An odd size drops its last row or column, as D3D rounds mip sizes down.
+	void DownsampleRgba8(const uint8_t *src,
+						 uint32_t srcWidth,
+						 uint32_t srcHeight,
+						 uint8_t *dst,
+						 uint32_t width,
+						 uint32_t height,
+						 bool srgb)
+	{
+		std::vector<uint32_t> rows(height);
+		std::iota(rows.begin(), rows.end(), 0u);
+		std::for_each(std::execution::par,
+					  rows.begin(),
+					  rows.end(),
+					  [&](uint32_t y)
+					  {
+						  const size_t srcPitch = static_cast<size_t>(srcWidth) * 4;
+						  const uint8_t *row0 = src + std::min(2 * y, srcHeight - 1) * srcPitch;
+						  const uint8_t *row1 = src + std::min(2 * y + 1, srcHeight - 1) * srcPitch;
+						  uint8_t *out = dst + static_cast<size_t>(y) * width * 4;
+						  for (uint32_t x = 0; x < width; ++x, out += 4)
+						  {
+							  const uint32_t x0 = std::min(2 * x, srcWidth - 1) * 4;
+							  const uint32_t x1 = std::min(2 * x + 1, srcWidth - 1) * 4;
+							  const uint8_t *t[4] = { row0 + x0, row0 + x1, row1 + x0, row1 + x1 };
+							  for (int c = 0; c < 4; ++c)
+							  {
+								  if (srgb && c < 3)
+								  {
+									  const float sum = SrgbToLinear(t[0][c]) + SrgbToLinear(t[1][c]) +
+														SrgbToLinear(t[2][c]) + SrgbToLinear(t[3][c]);
+									  out[c] = LinearToSrgb(0.25f * sum);
+								  }
+								  else
+								  {
+									  out[c] = static_cast<uint8_t>((t[0][c] + t[1][c] + t[2][c] + t[3][c] + 2) / 4);
+								  }
+							  }
+						  }
+					  });
+	}
+
+	// The levels below the texture's own pixels, down to 1x1, each filtered from the one above.
+	std::vector<std::vector<uint8_t>> BuildMipChain(const Scene::Texture &texture, bool srgb)
+	{
+		uint32_t width = static_cast<uint32_t>(texture.GetWidth());
+		uint32_t height = static_cast<uint32_t>(texture.GetHeight());
+		std::vector<std::vector<uint8_t>> levels;
+		// Reserved up front so the source pointer into the previous level stays valid.
+		levels.reserve(std::bit_width(std::max(width, height)) - 1);
+		const uint8_t *src = texture.GetPixels();
+		while (width > 1 || height > 1)
+		{
+			const uint32_t mipWidth = std::max(width / 2, 1u);
+			const uint32_t mipHeight = std::max(height / 2, 1u);
+			std::vector<uint8_t> &level = levels.emplace_back(static_cast<size_t>(mipWidth) * mipHeight * 4);
+			DownsampleRgba8(src, width, height, level.data(), mipWidth, mipHeight, srgb);
+			src = level.data();
+			width = mipWidth;
+			height = mipHeight;
+		}
+		return levels;
 	}
 
 	// Nearest texel of an sRGB texture with wrapping, decoded to linear RGB.
@@ -180,43 +264,32 @@ void RenderGPUScene::DestroyLights()
 	}
 	lightFrames_.clear();
 	lightCount_ = 0;
+	lightTreeBuilt_ = false;
 }
 
-void RenderGPUScene::UpdateLights(std::span<const GpuLight> lights, uint32_t maxLeafLights)
+void RenderGPUScene::UpdateLights(const LightTreeBuildSettings &settings)
 {
-	// The emissive triangles stay at the front of the input, so only the lights after them change.
-	const size_t emissiveCount = emissiveLights_.size();
-	lightInput_.resize(emissiveCount + lights.size());
-	std::copy(lights.begin(), lights.end(), lightInput_.begin() + emissiveCount);
-	lightFluxScales_.resize(lightInput_.size(), 1.0f);
+	// The emissive triangles are static, so the tree only changes with its settings.
+	if (lightTreeBuilt_ && settings == lightTreeSettings_)
+	{
+		return;
+	}
+	lightTreeBuilt_ = true;
+	lightTreeSettings_ = settings;
 
 	const auto start = std::chrono::steady_clock::now();
-	LightTreeBuildSettings buildSettings;
-	buildSettings.maxLeafLights = maxLeafLights;
-	LightTree tree = BuildLightTree(lightInput_, lightFluxScales_, buildSettings);
+	LightTree tree = BuildLightTree(emissiveLights_, emissiveFluxScales_, settings);
 	lightTreeBuildMs_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
 	lightTreeMaxDepth_ = tree.maxDepth;
 	lightTreeAverageDepth_ = tree.averageDepth;
+	lightCount_ = static_cast<uint32_t>(tree.lights.size());
 
-	const uint32_t lightCount = static_cast<uint32_t>(tree.lights.size());
-	if (lightCount != lightCount_ && lightCount < lightInput_.size())
-	{
-		logw("GPUScene: light tree skipped {} light(s) that are not point/area lights or emit nothing",
-			 lightInput_.size() - lightCount);
-	}
-	lightCount_ = lightCount;
-
-	// The emitter buffer holds input indices of the emissive triangles. CollectEmitters only keeps
+	// The emitter buffer holds the indices of the emissive triangles. CollectEmitters only keeps
 	// triangles the tree accepts, so they are also the tree's light indices.
-	if (emissiveCount > 0 &&
-		(tree.sourceIndex.size() < emissiveCount || tree.sourceIndex[emissiveCount - 1] != emissiveCount - 1))
+	if (lightCount_ != emissiveLights_.size())
 	{
-		static bool reported = false;
-		if (!reported)
-		{
-			loge("GPUScene: the light tree skipped an emissive triangle, emitter MIS weights will be wrong");
-			reported = true;
-		}
+		loge("GPUScene: the light tree skipped {} emissive triangle(s), emitter MIS weights will be wrong",
+			 emissiveLights_.size() - lightCount_);
 	}
 
 	if (lightCount_ == 0)
@@ -327,6 +400,7 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
 
 	UploadBatchHandle batch = renderContext_->BeginUpload();
 	pendingUploadBytes_ = 0;
+	mipBuildMs_ = 0.0;
 
 	UploadStreams(batch);
 	std::vector<GpuMaterial> materials;
@@ -342,6 +416,7 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
 		 positions_.size() / 3,
 		 indices_.size() / 3,
 		 textures_.size());
+	logi("GPUScene: built the texture mip chains in {:.0f} ms", mipBuildMs_);
 
 	// The GPU has its own copies now.
 	for (std::vector<float> *stream: { &positions_, &texCoords_, &normals_, &tangents_ })
@@ -500,8 +575,28 @@ uint32_t RenderGPUScene::UploadTexture(const Scene::Texture &texture,
 		return INVALIDDESCRIPTORHANDLE;
 	}
 
-	const uint32_t rowPitch = static_cast<uint32_t>(texture.GetWidth()) * 4;
-	const uint64_t sizeInBytes = static_cast<uint64_t>(rowPitch) * texture.GetHeight();
+	TextureDesc desc = {};
+	desc.width = static_cast<uint>(texture.GetWidth());
+	desc.height = static_cast<uint>(texture.GetHeight());
+	desc.format = format;
+	desc.debugName = debugName;
+
+	// The full chain, for the ray cone filtering in PathTracer.slang.
+	const auto mipStart = std::chrono::steady_clock::now();
+	const std::vector<std::vector<uint8_t>> levels = BuildMipChain(texture, format == Format::R8G8B8A8_UNORM_SRGB);
+	mipBuildMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - mipStart).count();
+
+	std::vector<TextureMipData> mips(levels.size() + 1);
+	uint64_t sizeInBytes = 0;
+	for (uint32_t m = 0; m < mips.size(); ++m)
+	{
+		mips[m].pixels = m == 0 ? texture.GetPixels() : levels[m - 1].data();
+		mips[m].rowPitch = std::max(desc.width >> m, 1u) * 4;
+		mips[m].rowCount = std::max(desc.height >> m, 1u);
+		sizeInBytes += static_cast<uint64_t>(mips[m].rowPitch) * mips[m].rowCount;
+	}
+	desc.mipLevels = static_cast<uint>(mips.size());
+
 	if (pendingUploadBytes_ > 0 && pendingUploadBytes_ + sizeInBytes > kMaxPendingUploadBytes)
 	{
 		renderContext_->EndUpload(batch);
@@ -509,20 +604,10 @@ uint32_t RenderGPUScene::UploadTexture(const Scene::Texture &texture,
 		pendingUploadBytes_ = 0;
 	}
 
-	TextureDesc desc = {};
-	desc.width = static_cast<uint>(texture.GetWidth());
-	desc.height = static_cast<uint>(texture.GetHeight());
-	desc.format = format;
-	desc.debugName = debugName;
-
-	TextureMipData mip = {};
-	mip.pixels = texture.GetPixels();
-	mip.rowPitch = rowPitch;
-	mip.rowCount = desc.height;
-
+	// The pixels go into a staging buffer here, so the levels can go out of scope after.
 	const ResourceHandle gpuTexture = renderContext_->CreateTexture(desc,
 																	ResourceViewType::ShaderResource,
-																	std::span<const TextureMipData>(&mip, 1),
+																	std::span<const TextureMipData>(mips),
 																	batch);
 	pendingUploadBytes_ += sizeInBytes;
 	textures_.push_back(gpuTexture);
@@ -718,8 +803,7 @@ void RenderGPUScene::CollectEmitters(const Scene::GLTFScene &scene,
 								  "Scene_Emitters",
 								  batch);
 
-	lightInput_ = emissiveLights_;
-	lightFluxScales_ = emissiveFluxScales_;
+	lightTreeBuilt_ = false;
 	if (emissiveInstances > 0)
 	{
 		logi("GPUScene: {} emissive triangle light(s) over {} TLAS instance(s)",

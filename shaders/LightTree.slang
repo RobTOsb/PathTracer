@@ -96,23 +96,10 @@ SGLight MakeSGLight(GpuLightTreeNode node, float3 toLight, float3 n)
     float s = d2 * invSigma2;
 
     // The node amplitude already holds Phi / (2 pi int g(w; -nu, lambda) dw).
-    float amplitude = node.meanAmplitude.w;
-    float sharpness = sharpnessStdDev.x;
     SGLight sg;
-    if (sharpness > 0.0)
-    {
-        float logScale;
-        SGProduct(-LightTreeAxis(node), sharpness, dir, s, sg.axis, sg.sharpness, logScale);
-        sg.amplitude = amplitude * exp(logScale) * invSigma2;
-    }
-    else
-    {
-        // Isotropic cluster (point lights only): the emission SG is constant, so the product is
-        // the distance SG itself with a unit scale.
-        sg.axis = dir;
-        sg.sharpness = s;
-        sg.amplitude = amplitude * invSigma2;
-    }
+    float logScale;
+    SGProduct(-LightTreeAxis(node), sharpnessStdDev.x, dir, s, sg.axis, sg.sharpness, logScale);
+    sg.amplitude = node.meanAmplitude.w * exp(logScale) * invSigma2;
     return sg;
 }
 

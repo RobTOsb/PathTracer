@@ -28,14 +28,19 @@ struct LightTreeBuildSettings
 {
 	uint32_t binCount = 12; // clamped to [2, 32]
 	uint32_t maxLeafLights = 4; // clamped to [1, LIGHT_TREE_MAX_LEAF_LIGHTS]
+	// Split cost also weighs how far each side's normals spread (the orientation measure of SAOH,
+	// fitted to the vMF the nodes store). Off: flux times surface area only.
+	bool orientationSplits = true;
+
+	bool operator==(const LightTreeBuildSettings &) const = default;
 };
 
-// Builds a 4-wide tree over point lights (isotropic) and area lights (one-sided Lambertian
-// triangles); other light types are skipped. A binary tree is built top down first, with a flux
-// weighted binned SAH split (replace with SAOH [Conty and Kulla 2018] for best quality) that stops at
-// maxLeafLights lights, and is then collapsed into groups of four. Cluster parameters follow Eqs. 2
-// to 5. fluxScales, if not empty, holds a factor per light that its flux is multiplied by, such as the
-// average of a textured area light's radiance map.
+// Builds a 4-wide tree over area lights (one-sided Lambertian triangles); other light types are
+// skipped. A binary tree is built top down first, with a binned split costing flux times surface area
+// (and the orientation measure with orientationSplits) that stops at maxLeafLights lights, and is
+// then collapsed into groups of four. Cluster parameters follow Eqs. 2 to 5. fluxScales, if not
+// empty, holds a factor per light that its flux is multiplied by, such as the average of a textured
+// area light's radiance map.
 LightTree BuildLightTree(std::span<const GpuLight> lights,
 						 std::span<const float> fluxScales = {},
 						 const LightTreeBuildSettings &settings = {});

@@ -22,13 +22,12 @@ struct SunSettings
 	}
 };
 
-// The point lights and emissive triangles in the scene's light buffer.
+// The emissive triangles in the scene's light buffer.
 struct LightSettings
 {
-	// Next event estimation of the light buffer. Without it the point lights go dark and emissive
-	// surfaces are only found by BSDF sampling.
+	// Next event estimation of the light buffer. Without it emissive surfaces are only found by
+	// BSDF sampling.
 	bool enabled = true;
-	float intensityScale = 1.0f; // multiplies the point lights, so the tree does not need rebuilding
 	LightSamplingMode sampling = LIGHT_SAMPLING_TREE;
 	// Light tree: skip the glossy importance for lobes at least this rough (perceptual roughness).
 	bool diffuseOnlyRoughLobes = true;
@@ -42,8 +41,8 @@ struct LightSettings
 	// Light tree: lights per leaf, picked by flux within it, 1 to LIGHT_TREE_MAX_LEAF_LIGHTS. More
 	// makes the tree shallower at the cost of ignoring where the leaf's lights are relative to each other.
 	int maxLeafLights = 4;
-	bool animate = true; // moves the test lights, the tree is rebuilt every frame either way
-	float animationSpeed = 1.0f;
+	// Light tree build: the split cost also weighs how far each side's emitter normals spread.
+	bool orientationSplits = true;
 };
 
 // Everything the UI can tweak; passes read it every frame.
@@ -59,6 +58,10 @@ struct RenderSettings
 	// DXR 1.2 shader execution reordering: switches to the path tracing pipeline that reorders
 	// threads by material before shading each hit. Ignored where the device has no SER.
 	bool shaderExecutionReordering = true;
+	
+	bool rayConeTextureLod = true;
+	float textureLodBias = 0.0f;
+	float rayConeBsdfSpread = 1.0f;
 
 	float exposureEV = 0.0f;
 	ToneMappingOperator toneMapOperator = TONEMAP_ACES_FITTED; // SDR output only
