@@ -55,7 +55,7 @@ struct RenderSettings
 	float3 skyColour = { 0.45f, 0.65f, 1.0f };
 	float skyIntensity = 1.0f;
 
-	int maxBounces = 8;
+	int maxBounces = 2;
 	// DXR 1.2 shader execution reordering: switches to the path tracing pipeline that reorders
 	// threads by material before shading each hit. Ignored where the device has no SER.
 	bool shaderExecutionReordering = true;
@@ -67,7 +67,7 @@ struct RenderSettings
 	// are compressed towards peakNits.
 	float paperWhiteNits = 203.0f; // BT.2408 reference white
 	float peakNits = 1000.0f; // overwritten with the display's reported peak at startup
-	float rolloffKnee = 0.6f; // fraction of peakNits
+	float rolloffKnee = 0.8f; // fraction of peakNits
 
 	DLSSMode dlssMode = DLSSMode::MaxQuality;
 	DLSSRayReconstructionPreset rrPreset = DLSSRayReconstructionPreset::PresetF;

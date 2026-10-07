@@ -154,7 +154,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	{
 		SunSettings &sun = settings_.sun;
 		ImGui::SliderFloat("Azimuth", &sun.azimuthDegrees, -180.0f, 180.0f, "%.1f deg");
-		ImGui::SliderFloat("Elevation", &sun.elevationDegrees, 0.0f, 90.0f, "%.1f deg");
+		ImGui::SliderFloat("Elevation", &sun.elevationDegrees, 0.0f, 180.0f, "%.1f deg");
 		ImGui::SliderFloat("Angular radius",
 						   &sun.angularRadiusDegrees,
 						   0.0f,
