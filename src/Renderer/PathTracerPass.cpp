@@ -3,6 +3,7 @@
 #include "Camera.h"
 #include "RenderSettings.h"
 #include "Scene/RenderGPUScene.h"
+#include "SkyAtmospherePass.h"
 
 #include "DLSSUtil.h"
 
@@ -29,8 +30,9 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 							   const RenderGPUScene &scene,
 							   const Camera &camera,
 							   const RenderSettings &settings,
+							   const SkyAtmospherePass &atmosphere,
 							   bool rayReconstruction) :
-	renderContext_(renderContext), scene_(scene), camera_(camera), settings_(settings),
+	renderContext_(renderContext), scene_(scene), camera_(camera), settings_(settings), atmosphere_(atmosphere),
 	rayReconstruction_(rayReconstruction)
 {
 	serSupported_ = renderContext->GetShaderExecutionReorderingSupport().supported;
@@ -83,10 +85,12 @@ PathTracerPass::~PathTracerPass()
 
 const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 {
+	const bool atmosphere = atmosphere_.IsEnabled();
+
 	// A failed SER compile is logged once and the plain pipeline takes over.
 	if (settings_.shaderExecutionReordering && serSupported_ && !serFailed_)
 	{
-		if (const Pipeline *pipeline = GetPipeline(true))
+		if (const Pipeline *pipeline = GetPipeline(true, atmosphere))
 		{
 			return pipeline;
 		}
@@ -94,7 +98,7 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 		serFailed_ = true;
 	}
 
-	const Pipeline *pipeline = GetPipeline(false);
+	const Pipeline *pipeline = GetPipeline(false, atmosphere);
 	if (pipeline == nullptr)
 	{
 		throw std::runtime_error("Failed to create the path tracing pipeline (see the shader log above).");
@@ -102,17 +106,17 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 	return pipeline;
 }
 
-const PathTracerPass::Pipeline *PathTracerPass::GetPipeline(bool shaderExecutionReordering)
+const PathTracerPass::Pipeline *PathTracerPass::GetPipeline(bool shaderExecutionReordering, bool atmosphere)
 {
-	Pipeline &pipeline = pipelines_[shaderExecutionReordering ? 1 : 0];
+	Pipeline &pipeline = pipelines_[shaderExecutionReordering ? 1 : 0][atmosphere ? 1 : 0];
 	if (pipeline.pipeline == InvalidPipelineHandle)
 	{
-		pipeline = CreatePipeline(shaderExecutionReordering);
+		pipeline = CreatePipeline(shaderExecutionReordering, atmosphere);
 	}
 	return pipeline.pipeline != InvalidPipelineHandle ? &pipeline : nullptr;
 }
 
-PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReordering) const
+PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReordering, bool atmosphere) const
 {
 	RaytracingPipelineDesc desc = {};
 	desc.exports = { "RayGen", "Miss", "ClosestHit", "AnyHit", "ShadowMiss", "ShadowClosestHit", "ShadowAnyHit" };
@@ -124,6 +128,10 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 	if (rayReconstruction_)
 	{
 		desc.defines.push_back("DLSS_RR");
+	}
+	if (atmosphere)
+	{
+		desc.defines.push_back("ATMOSPHERE");
 	}
 	if (shaderExecutionReordering)
 	{
@@ -197,7 +205,9 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	// Split next event estimation evenly between the sun and the light buffer when both emit,
 	// otherwise give it all to whichever does.
 	const LightSettings &lights = settings_.lights;
-	const bool sunActive = std::max({ irradiance.x, irradiance.y, irradiance.z }) > 0.0f;
+	const bool atmosphere = atmosphere_.IsEnabled();
+	const bool sunActive = std::max({ irradiance.x, irradiance.y, irradiance.z }) > 0.0f &&
+						   (!atmosphere || atmosphere_.IsSunAboveHorizon());
 	const bool lightsActive = lights.enabled && scene_.GetLightCount() > 0;
 	constants.lightCount = lightsActive ? scene_.GetLightCount() : 0u;
 	constants.lightSampling = static_cast<uint>(lights.sampling);
@@ -225,6 +235,23 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 			settings_.rayConeTextureLod ? exp2f(settings_.textureLodBias + upscalerBias) : 0.0f;
 
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
+
+	if (atmosphere)
+	{
+		const SkyAtmospherePass::SceneAir air = atmosphere_.GetSceneAir();
+		const AtmosphereSettings &atmosphereSettings = settings_.atmosphere;
+		constants.atmosphereRayleighScattering = air.rayleighScattering;
+		constants.atmosphereMieScattering = air.mieScattering;
+		constants.atmosphereExtinction = air.extinction;
+		constants.atmosphereMiePhaseG = atmosphereSettings.miePhaseG;
+		constants.atmosphereViewHeight = atmosphere_.GetViewHeight();
+		constants.atmosphereBottomRadius = atmosphere_.GetParameters().bottomRadius;
+		// Rays that leave the scene cross about its diameter of air before reaching the sky.
+		const float3 extent = scene_.GetBoundsMax() - scene_.GetBoundsMin();
+		constants.atmosphereMissDistance = std::max(sqrtf(Dot(extent, extent)), 1.0e-3f);
+		constants.atmosphereInScatterSegments = static_cast<uint>(std::max(atmosphereSettings.inScatterSegments, 0));
+		constants.atmosphereVolumetricShadows = atmosphereSettings.volumetricShadows ? 1u : 0u;
+	}
 	constants.frameIndex = renderContext->GetCurrentFrame();
 	constants.maxBounces = static_cast<uint>(settings_.maxBounces);
 
@@ -272,6 +299,11 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	renderContext->SetRaytracingSRV(11, scene_.GetEmitterBuffer());
 	renderContext->SetRaytracingSRV(12, scene_.GetLightTreeParentBuffer());
 	renderContext->SetRaytracingSRV(13, scene_.GetLightTreeLeafLightBuffer());
+	if (atmosphere)
+	{
+		renderContext->SetRaytracingSRV(14, atmosphere_.GetSkyViewLUT());
+		renderContext->SetRaytracingSRV(15, atmosphere_.GetSceneLighting());
+	}
 	for (uint32_t i = 0; i < targetCount; ++i)
 	{
 		renderContext->SetRaytracingUAV(i, targets[i]);

@@ -3,6 +3,7 @@
 
 import OpenPBRBaseSubstrate;
 import LightTree;
+import SkyAtmosphere;
 
 // Resources
 
@@ -49,6 +50,12 @@ StructuredBuffer<GpuLightTreeLeafEntry> g_LightLeaves : register(t10);
 StructuredBuffer<uint> g_Emitters : register(t11);
 StructuredBuffer<uint> g_LightTreeParents : register(t12);
 StructuredBuffer<GpuLightTreeLeafEntry> g_LightTreeLeafLights : register(t13);
+
+#ifdef ATMOSPHERE
+Texture2D<float4> g_SkyViewLUT : register(t14);
+StructuredBuffer<float4> g_AtmosphereLighting : register(t15);
+SamplerState g_LinearClamp : register(s2);
+#endif
 
 PrimitiveDesc LoadPrimitive(uint index)
 {
@@ -206,10 +213,27 @@ bool InSunDisc(float3 dir)
     return 1.0 - dot(dir, g_Frame.sunDirection) <= g_Frame.sunOneMinusCosMax;
 }
 
+// Of the sunlight through the atmosphere down to the scene, zero once the planet hides the sun.
+float3 SunTransmittance()
+{
+#ifdef ATMOSPHERE
+    return g_AtmosphereLighting[kAtmosphereLightingSunTransmittance].rgb;
+#else
+    return float3(1.0, 1.0, 1.0);
+#endif
+}
+
+// Irradiance of the sun at the top of the atmosphere: sunRadiance is the disc's radiance over its
+// 1 / sunPdf of solid angle, or the irradiance itself with a pdf of 1 for a delta sun.
+float3 SunIlluminance()
+{
+    return g_Frame.sunRadiance / g_Frame.sunPdf;
+}
+
 // Radiance of the sun disc seen along dir, zero outside it.
 float3 SunRadiance(float3 dir)
 {
-    return !SunIsDelta() && InSunDisc(dir) ? g_Frame.sunRadiance : float3(0.0, 0.0, 0.0);
+    return !SunIsDelta() && InSunDisc(dir) ? g_Frame.sunRadiance * SunTransmittance() : float3(0.0, 0.0, 0.0);
 }
 
 void BuildOrthonormalBasis(float3 n, out float3 t, out float3 b)
@@ -240,7 +264,7 @@ LightSample SampleSun(float2 u)
 {
     LightSample ls;
     ls.distance = FLT_MAX;
-    ls.radiance = g_Frame.sunRadiance;
+    ls.radiance = g_Frame.sunRadiance * SunTransmittance();
     ls.pdf = g_Frame.sunPdf;
     ls.lightSamplingOnly = SunIsDelta();
     ls.direction = SunIsDelta() ? g_Frame.sunDirection : SampleUniformCone(g_Frame.sunDirection, g_Frame.sunOneMinusCosMax, u);
@@ -406,20 +430,24 @@ float LightPdf(float3 origin, float3 dir, HitInfo hit)
     return InSunDisc(dir) ? g_Frame.sunPdf * g_Frame.sunSelectProbability : 0.0;
 }
 
-// Constant sky; the sun disc is handled separately so it can be MIS weighted.
+// The sky without the sun disc, which is handled separately so it can be MIS weighted: a constant
+// colour, or the atmosphere lit by the sun.
 float3 EnvironmentRadiance(float3 dir)
 {
+#ifdef ATMOSPHERE
+    float2 uv = SkyViewLutUvFromDirection(g_Frame.atmosphereBottomRadius, g_Frame.atmosphereViewHeight, dir, g_Frame.sunDirection);
+    return SunIlluminance() * g_SkyViewLUT.SampleLevel(g_LinearClamp, uv, 0.0).rgb;
+#else
     return g_Frame.skyRadiance;
+#endif
 }
 
-// Casts a shadow ray and returns the visibility of the light, from 0 (fully occluded) to 1 (unoccluded) per channel
+// Traces a shadow ray and returns the visibility of the light, from 0 (fully occluded) to 1 (unoccluded) per channel
 // Note that we use dedicated hit group with simpler shaders for shadow rays
-// The caller skips back-facing light directions on opaque surfaces before it gets here, so the
-// offset goes to whichever side the light is on, which is below the surface for transmission.
-float3 CastShadowRay(float3 hitPosition, float3 surfaceNormal, float3 directionToLight, float tracingDistance)
+float3 TraceShadowRay(float3 origin, float3 directionToLight, float tracingDistance)
 {
     RayDesc ray;
-    ray.Origin = OffsetRay(hitPosition, surfaceNormal, directionToLight);
+    ray.Origin = origin;
     ray.Direction = directionToLight;
     ray.TMin = 0.0f;
     ray.TMax = tracingDistance;
@@ -432,6 +460,76 @@ float3 CastShadowRay(float3 hitPosition, float3 surfaceNormal, float3 directionT
 
     return payload.visibility;
 }
+
+// Shadow ray from a surface. The caller skips back-facing light directions on opaque surfaces before
+// it gets here, so the offset goes to whichever side the light is on, which is below the surface for
+// transmission.
+float3 CastShadowRay(float3 hitPosition, float3 surfaceNormal, float3 directionToLight, float tracingDistance)
+{
+    return TraceShadowRay(OffsetRay(hitPosition, surfaceNormal, directionToLight), directionToLight, tracingDistance);
+}
+
+// Transmittance of the scene's air over distance (capped at the distance to the sky), 1 without the
+// atmosphere.
+float3 AtmosphereTransmittance(float distance)
+{
+#ifdef ATMOSPHERE
+    return exp(-g_Frame.atmosphereExtinction * min(distance, g_Frame.atmosphereMissDistance));
+#else
+    return float3(1.0, 1.0, 1.0);
+#endif
+}
+
+#ifdef ATMOSPHERE
+// Sunlight that the scene's air scatters towards origin along the segment of segmentLength towards
+// dir, estimated at one distance along it. The single scattering traces a shadow ray towards the sun,
+// which gives the volumetric shadows; the multiple scattering from the LUT is not shadowed.
+float3 AtmosphereInScattering(float3 origin, float3 dir, float segmentLength, inout uint rng)
+{
+    float3 sigmaT = g_Frame.atmosphereExtinction;
+    float sigmaMean = (sigmaT.x + sigmaT.y + sigmaT.z) * (1.0 / 3.0);
+    float tauMean = sigmaMean * segmentLength;
+    if (!(tauMean > 0.0))
+        return float3(0.0, 0.0, 0.0);
+
+    // Distance s with pdf sigmaMean exp(-sigmaMean s) / (1 - exp(-tauMean)), the mean transmittance
+    // normalised over the segment, or uniform where the segment is too thin for that to be accurate in
+    // float. weight is the transmittance to s over its pdf.
+    float3 u = Rand3(rng);
+    float s;
+    float3 weight;
+    if (tauMean < 1.0e-3)
+    {
+        s = u.x * segmentLength;
+        weight = exp(-sigmaT * s) * segmentLength;
+    }
+    else
+    {
+        float norm = 1.0 - exp(-tauMean);
+        s = -log(1.0 - u.x * norm) / sigmaMean;
+        weight = exp((sigmaMean - sigmaT) * s) * (norm / sigmaMean);
+    }
+
+    float3 scattering = g_Frame.atmosphereRayleighScattering + g_Frame.atmosphereMieScattering;
+    float3 inScattered = g_AtmosphereLighting[kAtmosphereLightingMultiScattering].rgb * scattering;
+    float3 sunTransmittance = SunTransmittance();
+    if (any(sunTransmittance > 0.0))
+    {
+        float cosTheta = dot(dir, g_Frame.sunDirection);
+        float3 phaseScattering = g_Frame.atmosphereRayleighScattering * RayleighPhase(cosTheta) +
+                                 g_Frame.atmosphereMieScattering * CornetteShanksMiePhase(g_Frame.atmosphereMiePhaseG, cosTheta);
+        float3 visibility = float3(1.0, 1.0, 1.0);
+        if (g_Frame.atmosphereVolumetricShadows != 0)
+        {
+            // Towards a point on the disc, so the light shafts get the sun's penumbrae.
+            float3 sunDir = SunIsDelta() ? g_Frame.sunDirection : SampleUniformCone(g_Frame.sunDirection, g_Frame.sunOneMinusCosMax, u.yz);
+            visibility = TraceShadowRay(origin + dir * s, sunDir, FLT_MAX);
+        }
+        inScattered += sunTransmittance * visibility * phaseScattering;
+    }
+    return SunIlluminance() * inScattered * weight;
+}
+#endif
 
 // Reads the material row once, samples all of its textures and applies the normal map to hit.Ns.
 // The textures are filtered over the footprint of a ray cone coneWidth wide where it meets the surface.
@@ -662,6 +760,17 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
                 break;
             throughput *= exp(-segmentExtinction * hit.t);
         }
+#ifdef ATMOSPHERE
+        else
+        {
+            // Otherwise it crossed the scene's air, which scatters sunlight into the path and dims
+            // whatever lies beyond. Rays that leave the scene cross atmosphereMissDistance of it.
+            float segmentLength = hit.hit ? hit.t : g_Frame.atmosphereMissDistance;
+            if (bounce < g_Frame.atmosphereInScatterSegments)
+                radiance += throughput * AtmosphereInScattering(origin, dir, segmentLength, rng);
+            throughput *= AtmosphereTransmittance(segmentLength);
+        }
+#endif
 
         if (!hit.hit)
         {
@@ -740,7 +849,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
                 // The last segment takes no BSDF sample, which leaves NEE as the only strategy there.
                 float w = ls.lightSamplingOnly || lastSegment ? 1.0 : PowerHeuristic(ls.pdf, bsdfPdf);
                 float3 shadowTransmittance =
-                    dot(ls.direction, hit.Ng) < 0.0 ? exp(-extinction * ls.distance) : float3(1.0, 1.0, 1.0);
+                    dot(ls.direction, hit.Ng) < 0.0 ? exp(-extinction * ls.distance) : AtmosphereTransmittance(ls.distance);
                 neeContribution = throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf);
                 traceShadowRay = true;
             }

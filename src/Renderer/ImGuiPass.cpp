@@ -131,6 +131,10 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 				renderContext->GetRenderHeight(),
 				renderContext->GetWindowWidth(),
 				renderContext->GetWindowHeight());
+	if (settings_.atmosphere.enabled)
+	{
+		ProfileRow(renderContext, "SkyAtmosphere");
+	}
 	ProfileRow(renderContext, "PathTracer");
 	if (settings_.dlssMode != DLSSMode::Off)
 	{
@@ -154,7 +158,9 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	{
 		SunSettings &sun = settings_.sun;
 		ImGui::SliderFloat("Azimuth", &sun.azimuthDegrees, -180.0f, 180.0f, "%.1f deg");
-		ImGui::SliderFloat("Elevation", &sun.elevationDegrees, 0.0f, 180.0f, "%.1f deg");
+		// Below the horizon the atmosphere's planet hides the sun, leaving the twilight sky.
+		const float minElevation = settings_.atmosphere.enabled ? -20.0f : 0.0f;
+		ImGui::SliderFloat("Elevation", &sun.elevationDegrees, minElevation, 180.0f, "%.1f deg");
 		ImGui::SliderFloat("Angular radius",
 						   &sun.angularRadiusDegrees,
 						   0.0f,
@@ -168,6 +174,10 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		}
 		ImGui::ColorEdit3("Colour", &sun.colour.x);
 		ImGui::DragFloat("Intensity", &sun.intensity, 0.05f, 0.0f, 1000.0f, "%.2f");
+		if (settings_.atmosphere.enabled)
+		{
+			ImGui::TextDisabled("At the top of the atmosphere, which tints and dims it");
+		}
 	}
 
 	if (ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))
@@ -213,8 +223,41 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 
 	if (ImGui::CollapsingHeader("Sky", ImGuiTreeNodeFlags_DefaultOpen))
 	{
-		ImGui::ColorEdit3("Sky colour", &settings_.skyColour.x);
-		ImGui::DragFloat("Sky intensity", &settings_.skyIntensity, 0.01f, 0.0f, 100.0f, "%.2f");
+		AtmosphereSettings &atmosphere = settings_.atmosphere;
+		ImGui::Checkbox("Atmosphere", &atmosphere.enabled);
+		ImGui::SetItemTooltip("Physically based sky and aerial perspective (Hillaire 2020) lit by the sun, "
+							  "instead of a constant sky colour");
+		if (atmosphere.enabled)
+		{
+			ImGui::SliderFloat("Altitude", &atmosphere.altitudeKm, 0.0f, 50.0f, "%.2f km");
+			ImGui::SetItemTooltip("Of the scene's origin above the ground");
+			ImGui::SliderFloat("Aerial perspective scale",
+							   &atmosphere.aerialPerspectiveScale,
+							   1.0f,
+							   10000.0f,
+							   "%.0f",
+							   ImGuiSliderFlags_Logarithmic);
+			ImGui::SetItemTooltip("How many times denser than real air the scene's air is, so that haze and light "
+								  "shafts show at the scale of a building; 1 = physical");
+			ImGui::SliderInt("In-scattering segments", &atmosphere.inScatterSegments, 0, 8);
+			ImGui::SetItemTooltip("Path segments (1 = camera rays only) that gather the sunlight scattered "
+								  "in the scene's air, at one shadow ray each; later ones are only dimmed");
+			ImGui::Checkbox("Volumetric shadows", &atmosphere.volumetricShadows);
+			ImGui::SetItemTooltip("Shadow rays from the in-scattering points towards the sun, so geometry casts "
+								  "light shafts");
+			ImGui::SliderFloat("Rayleigh scale", &atmosphere.rayleighScale, 0.0f, 10.0f, "%.2f");
+			ImGui::SliderFloat("Mie scale", &atmosphere.mieScale, 0.0f, 50.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+			ImGui::SetItemTooltip("Aerosols: haze, and the glow around the sun");
+			ImGui::SliderFloat("Mie anisotropy", &atmosphere.miePhaseG, -0.99f, 0.99f, "%.2f");
+			ImGui::SliderFloat("Ozone scale", &atmosphere.ozoneScale, 0.0f, 10.0f, "%.2f");
+			ImGui::ColorEdit3("Ground albedo", &atmosphere.groundAlbedo.x);
+			ImGui::SliderFloat("Multiple scattering", &atmosphere.multipleScatteringFactor, 0.0f, 2.0f, "%.2f");
+		}
+		else
+		{
+			ImGui::ColorEdit3("Sky colour", &settings_.skyColour.x);
+			ImGui::DragFloat("Sky intensity", &settings_.skyIntensity, 0.01f, 0.0f, 100.0f, "%.2f");
+		}
 	}
 
 	if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen))

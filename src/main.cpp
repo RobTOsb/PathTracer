@@ -10,6 +10,7 @@
 #include "Renderer/PathTracerPass.h"
 #include "Renderer/RenderPass.h"
 #include "Renderer/RenderSettings.h"
+#include "Renderer/SkyAtmospherePass.h"
 #include "Renderer/TonemapPass.h"
 #include "Scene/RenderGPUScene.h"
 
@@ -67,7 +68,7 @@ constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gl
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\Sponza\\glTF\\Sponza.gltf";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
 
-constexpr uint kFramesInFlight = 2;
+constexpr uint kFramesInFlight = 3;
 constexpr float kMouseSensitivity = 0.15f; // degrees per pixel
 
 void UpdateCamera(Window &window, Camera &camera, RenderSettings &settings, float deltaSeconds)
@@ -153,8 +154,11 @@ void BuildPasses(RenderContext *renderContext,
 		 renderContext->GetWindowHeight(),
 		 rayReconstruction ? "on" : "off");
 
-	auto pathTracer = std::make_unique<PathTracerPass>(renderContext, gpuScene, camera, settings, rayReconstruction);
+	auto atmosphere = std::make_unique<SkyAtmospherePass>(renderContext, camera, settings);
+	auto pathTracer =
+			std::make_unique<PathTracerPass>(renderContext, gpuScene, camera, settings, *atmosphere, rayReconstruction);
 	ResourceHandle radiance = pathTracer->GetOutput();
+	passes.push_back(std::move(atmosphere));
 	if (rayReconstruction)
 	{
 		auto dlss = std::make_unique<DLSSPass>(renderContext,

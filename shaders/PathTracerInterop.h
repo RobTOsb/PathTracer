@@ -47,6 +47,20 @@ struct FrameConstants
 	float rayConeBsdfSpread;
 	float textureLodScale; // multiplies the cone footprint (2^mip bias), 0 samples the top mip everywhere
 	uint pad0;
+
+	// Sky atmosphere (ATMOSPHERE permutation only, see SkyAtmospherePass). The scene sits at one
+	// altitude of the atmosphere, whose air fills it homogeneously. Coefficients are per scene unit,
+	// scaled up by the aerial perspective scale; the sun and the sky-view LUT are not.
+	float3 atmosphereRayleighScattering;
+	float atmosphereViewHeight; // km from the planet centre, where the sky-view LUT was rendered
+	float3 atmosphereMieScattering;
+	float atmosphereBottomRadius; // km
+	float3 atmosphereExtinction;
+	float atmosphereMiePhaseG;
+	float atmosphereMissDistance; // air in front of the sky along rays that leave the scene, scene units
+	uint atmosphereInScatterSegments; // path segments (0 = camera ray) that gather in-scattered sunlight
+	uint atmosphereVolumetricShadows; // in-scattering traces a shadow ray towards the sun
+	uint pad2;
 };
 
 // How next event estimation picks one light from the light buffer.
@@ -101,7 +115,7 @@ struct TonemapConstants
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(FrameConstants) == 368,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 432,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuMaterial) == 80, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 32, "TonemapConstants must fit the root constants");
 #endif

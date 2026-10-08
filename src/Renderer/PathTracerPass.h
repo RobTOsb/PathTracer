@@ -10,6 +10,7 @@
 
 class Camera;
 class RenderGPUScene;
+class SkyAtmospherePass;
 struct RenderSettings;
 
 // Render-resolution guide buffers written alongside the radiance for DLSS Ray Reconstruction.
@@ -27,7 +28,9 @@ struct PathTracerGuides
 // PathTracer.slang, at the render context's render resolution. With rayReconstruction set it
 // also writes PathTracerGuides and jitters the camera along the DLSS Halton sequence instead of
 // randomly. With RenderSettings::shaderExecutionReordering on a device with DXR 1.2 it traces with
-// the SER pipeline instead. Leaves the output and the guides in the UnorderedAccess layout.
+// the SER pipeline instead. While the sky atmosphere is on, it traces with the ATMOSPHERE permutation,
+// which takes its sky and sunlight from the atmosphere's LUTs and scatters sunlight in the scene's air.
+// Leaves the output and the guides in the UnorderedAccess layout.
 class PathTracerPass final : public RenderPass
 {
 public:
@@ -35,6 +38,7 @@ public:
 				   const RenderGPUScene &scene,
 				   const Camera &camera,
 				   const RenderSettings &settings,
+				   const SkyAtmospherePass &atmosphere,
 				   bool rayReconstruction);
 	~PathTracerPass() override;
 
@@ -75,17 +79,18 @@ private:
 	};
 
 	const Pipeline *SelectPipeline();
-	const Pipeline *GetPipeline(bool shaderExecutionReordering);
-	Pipeline CreatePipeline(bool shaderExecutionReordering) const;
+	const Pipeline *GetPipeline(bool shaderExecutionReordering, bool atmosphere);
+	Pipeline CreatePipeline(bool shaderExecutionReordering, bool atmosphere) const;
 	ResourceHandle CreateTarget(Format format, const char *debugName) const;
 
 	RenderContext *renderContext_ = nullptr;
 	const RenderGPUScene &scene_;
 	const Camera &camera_;
 	const RenderSettings &settings_;
+	const SkyAtmospherePass &atmosphere_;
 	const bool rayReconstruction_;
 
-	Pipeline pipelines_[2]; // indexed by shaderExecutionReordering
+	Pipeline pipelines_[2][2]; // indexed by shaderExecutionReordering, then atmosphere
 	bool serSupported_ = false;
 	bool serFailed_ = false; // the SER pipeline did not compile, so stay on the plain one
 	ResourceHandle output_ = InvalidResourceHandle;
