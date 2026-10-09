@@ -59,10 +59,15 @@ public:
 		return primitiveBufferIndex_;
 	}
 
-	// Resource handles of the same buffers, for binding them directly (e.g. as root SRVs).
 	ResourceHandle GetStreamBuffer(GPUStream stream) const
 	{
 		return streamBuffers_[(uint32_t) stream];
+	}
+
+	// Every primitive's vertices as GpuVertex rows, indexed by PrimitiveGPUDesc::vertexOffset.
+	ResourceHandle GetVertexBuffer() const
+	{
+		return vertexBuffer_;
 	}
 
 	ResourceHandle GetMaterialBuffer() const
@@ -179,16 +184,14 @@ private:
 	RenderContext *renderContext_ = nullptr;
 
 	// CPU-side staging for the shared streams, released once BuildGPUScene has uploaded them.
-	std::vector<float> positions_;
-	std::vector<float> texCoords_;
-	std::vector<float> normals_;
-	std::vector<float> tangents_;
+	std::vector<GpuVertex> vertices_;
 	std::vector<uint32_t> indices_;
 	std::vector<uint32_t> meshletData_; // Scene::Meshlet rows, raw
 	std::vector<uint32_t> meshletVertices_;
 	std::vector<uint32_t> meshletTriangles_;
 
 	ResourceHandle streamBuffers_[(uint32_t) GPUStream::Count] = {};
+	ResourceHandle vertexBuffer_ = InvalidResourceHandle;
 	ResourceHandle primitiveBuffer_ = InvalidResourceHandle;
 	ResourceHandle materialBuffer_ = InvalidResourceHandle;
 	ResourceHandle instanceBuffer_ = InvalidResourceHandle;

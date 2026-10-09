@@ -101,6 +101,14 @@ struct GpuMaterial
 	uint emissiveTexture; // sRGB, multiplies emissive
 };
 
+struct GpuVertex
+{
+	float3 position;
+	float3 normal;
+	float2 texCoord; // TEXCOORD_0
+	float4 tangent; // .w = bitangent sign
+};
+
 // Root constants for the tonemap compute pass (bound as g_PushConstants).
 struct TonemapConstants
 {
@@ -117,6 +125,8 @@ struct TonemapConstants
 #ifdef __cplusplus
 static_assert(sizeof(FrameConstants) == 432,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuMaterial) == 80, "GpuMaterial must match the structured buffer stride");
+static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
+			  "GpuVertex must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 32, "TonemapConstants must fit the root constants");
 #endif
 

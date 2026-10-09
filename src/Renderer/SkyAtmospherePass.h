@@ -33,13 +33,13 @@ public:
 		return viewHeight_;
 	}
 
-	// SRV of the sky-view LUT (t14 of the path tracer's ATMOSPHERE permutation).
+	// SRV of the sky-view LUT.
 	ResourceHandle GetSkyViewLUT() const
 	{
 		return skyViewSRV_;
 	}
 
-	// ATMOSPHERE_LIGHTING_ROWS float4s (t15 of the path tracer's ATMOSPHERE permutation).
+	// ATMOSPHERE_LIGHTING_ROWS float4s.
 	ResourceHandle GetSceneLighting() const
 	{
 		return sceneLighting_;

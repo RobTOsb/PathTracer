@@ -288,22 +288,21 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	// Scene buffers are root SRVs, registers must match PathTracer.slang.
 	renderContext->SetRaytracingSRV(1, scene_.GetPrimitiveBuffer());
 	renderContext->SetRaytracingSRV(2, scene_.GetStreamBuffer(GPUStream::Index));
-	renderContext->SetRaytracingSRV(3, scene_.GetStreamBuffer(GPUStream::Position));
-	renderContext->SetRaytracingSRV(4, scene_.GetStreamBuffer(GPUStream::Normal));
-	renderContext->SetRaytracingSRV(5, scene_.GetStreamBuffer(GPUStream::TexCoord0));
-	renderContext->SetRaytracingSRV(6, scene_.GetStreamBuffer(GPUStream::Tangent));
-	renderContext->SetRaytracingSRV(7, scene_.GetMaterialBuffer());
-	renderContext->SetRaytracingSRV(8, scene_.GetLightBuffer());
-	renderContext->SetRaytracingSRV(9, scene_.GetLightTreeNodeBuffer());
-	renderContext->SetRaytracingSRV(10, scene_.GetLightLeafBuffer());
-	renderContext->SetRaytracingSRV(11, scene_.GetEmitterBuffer());
-	renderContext->SetRaytracingSRV(12, scene_.GetLightTreeParentBuffer());
-	renderContext->SetRaytracingSRV(13, scene_.GetLightTreeLeafLightBuffer());
+	renderContext->SetRaytracingSRV(3, scene_.GetVertexBuffer());
+	renderContext->SetRaytracingSRV(4, scene_.GetMaterialBuffer());
+	renderContext->SetRaytracingSRV(5, scene_.GetLightBuffer());
+	renderContext->SetRaytracingSRV(6, scene_.GetLightTreeNodeBuffer());
+	renderContext->SetRaytracingSRV(7, scene_.GetLightLeafBuffer());
+	renderContext->SetRaytracingSRV(8, scene_.GetEmitterBuffer());
+	renderContext->SetRaytracingSRV(9, scene_.GetLightTreeParentBuffer());
+	renderContext->SetRaytracingSRV(10, scene_.GetLightTreeLeafLightBuffer());
+	
 	if (atmosphere)
 	{
-		renderContext->SetRaytracingSRV(14, atmosphere_.GetSkyViewLUT());
-		renderContext->SetRaytracingSRV(15, atmosphere_.GetSceneLighting());
+		renderContext->SetRaytracingSRV(11, atmosphere_.GetSkyViewLUT());
+		renderContext->SetRaytracingSRV(12, atmosphere_.GetSceneLighting());
 	}
+
 	for (uint32_t i = 0; i < targetCount; ++i)
 	{
 		renderContext->SetRaytracingUAV(i, targets[i]);

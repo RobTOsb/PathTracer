@@ -22,8 +22,6 @@ namespace
 	// large texture sets from needing all of their staging buffers alive at once.
 	constexpr uint64_t kMaxPendingUploadBytes = 256ull * 1024 * 1024;
 
-	constexpr uint32_t kPositionStride = 3 * sizeof(float);
-
 	bool IsUsablePrimitive(const Scene::Primitive &primitive)
 	{
 		return primitive.IsValid() && primitive.HasIndices() && primitive.GetIndexCount() >= 3;
@@ -240,7 +238,7 @@ RenderGPUScene::~RenderGPUScene()
 			renderContext_->DestroyResource(buffer);
 		}
 	}
-	for (ResourceHandle buffer: { primitiveBuffer_, materialBuffer_, instanceBuffer_, emitterBuffer_ })
+	for (ResourceHandle buffer: { vertexBuffer_, primitiveBuffer_, materialBuffer_, instanceBuffer_, emitterBuffer_ })
 	{
 		if (buffer != InvalidResourceHandle)
 		{
@@ -317,10 +315,7 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
 {
 	meshDescs.clear();
 	primitiveDescs.clear();
-	positions_.clear();
-	texCoords_.clear();
-	normals_.clear();
-	tangents_.clear();
+	vertices_.clear();
 	indices_.clear();
 	meshletData_.clear();
 	meshletVertices_.clear();
@@ -356,15 +351,24 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
 				continue;
 			}
 
-			desc.vertexOffset = static_cast<uint32_t>(positions_.size() / 3);
+			desc.vertexOffset = static_cast<uint32_t>(vertices_.size());
 			desc.vertexCount = static_cast<uint32_t>(primitive.GetVertexCount());
 			desc.indexOffset = static_cast<uint32_t>(indices_.size());
 			desc.indexCount = static_cast<uint32_t>(primitive.GetIndexCount());
 
-			positions_.insert(positions_.end(), primitive.GetPositions().begin(), primitive.GetPositions().end());
-			texCoords_.insert(texCoords_.end(), primitive.GetTexCoord0().begin(), primitive.GetTexCoord0().end());
-			normals_.insert(normals_.end(), primitive.GetNormals().begin(), primitive.GetNormals().end());
-			tangents_.insert(tangents_.end(), primitive.GetTangents().begin(), primitive.GetTangents().end());
+			// The attribute arrays come out of the same vertex remap, so they hold one entry per vertex.
+			const float *p = primitive.GetPositions().data();
+			const float *n = primitive.GetNormals().data();
+			const float *uv = primitive.GetTexCoord0().data();
+			const float *t = primitive.GetTangents().data();
+			for (size_t v = 0; v < desc.vertexCount; ++v)
+			{
+				GpuVertex &vertex = vertices_.emplace_back();
+				vertex.position = float3(p[3 * v], p[3 * v + 1], p[3 * v + 2]);
+				vertex.normal = float3(n[3 * v], n[3 * v + 1], n[3 * v + 2]);
+				vertex.texCoord = float2(uv[2 * v], uv[2 * v + 1]);
+				vertex.tangent = float4(t[4 * v], t[4 * v + 1], t[4 * v + 2], t[4 * v + 3]);
+			}
 			// Indices stay local to the primitive; vertexOffset rebases them.
 			indices_.insert(indices_.end(), primitive.GetIndices().begin(), primitive.GetIndices().end());
 
@@ -413,16 +417,13 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
 		 meshDescs.size(),
 		 primitiveDescs.size(),
 		 instances.size(),
-		 positions_.size() / 3,
+		 vertices_.size(),
 		 indices_.size() / 3,
 		 textures_.size());
 	logi("GPUScene: built the texture mip chains in {:.0f} ms", mipBuildMs_);
 
 	// The GPU has its own copies now.
-	for (std::vector<float> *stream: { &positions_, &texCoords_, &normals_, &tangents_ })
-	{
-		std::vector<float>().swap(*stream);
-	}
+	std::vector<GpuVertex>().swap(vertices_);
 	for (std::vector<uint32_t> *stream: { &indices_, &meshletData_, &meshletVertices_, &meshletTriangles_ })
 	{
 		std::vector<uint32_t>().swap(*stream);
@@ -503,18 +504,6 @@ void RenderGPUScene::UploadStreams(UploadBatchHandle batch)
 	};
 
 	const StreamSource sources[] = {
-		{ GPUStream::Position,
-		  positions_.data(),
-		  positions_.size() * sizeof(float),
-		  kPositionStride,
-		  "Scene_Positions" },
-		{ GPUStream::TexCoord0,
-		  texCoords_.data(),
-		  texCoords_.size() * sizeof(float),
-		  2 * sizeof(float),
-		  "Scene_TexCoord0" },
-		{ GPUStream::Normal, normals_.data(), normals_.size() * sizeof(float), 3 * sizeof(float), "Scene_Normals" },
-		{ GPUStream::Tangent, tangents_.data(), tangents_.size() * sizeof(float), 4 * sizeof(float), "Scene_Tangents" },
 		{ GPUStream::Index, indices_.data(), indices_.size() * sizeof(uint32_t), sizeof(uint32_t), "Scene_Indices" },
 		{ GPUStream::Meshlet,
 		  meshletData_.data(),
@@ -542,6 +531,15 @@ void RenderGPUScene::UploadStreams(UploadBatchHandle batch)
 		const ResourceHandle buffer = UploadStream(source.data, source.sizeInBytes, source.stride, source.name, batch);
 		streamBuffers_[(uint32_t) source.stream] = buffer;
 		streamBufferIndices[(uint32_t) source.stream] = renderContext_->GetResourceViewInfo(buffer).descriptorIndex;
+	}
+
+	if (!vertices_.empty())
+	{
+		vertexBuffer_ = UploadStream(vertices_.data(),
+									 vertices_.size() * sizeof(GpuVertex),
+									 sizeof(GpuVertex),
+									 "Scene_Vertices",
+									 batch);
 	}
 
 	if (!primitiveDescs.empty())
@@ -823,7 +821,6 @@ void RenderGPUScene::BuildAccelerationStructures()
 										   ResourceAccess::ShaderResource);
 	}
 
-	const ResourceHandle positionBuffer = streamBuffers_[(uint32_t) GPUStream::Position];
 	const ResourceHandle indexBuffer = streamBuffers_[(uint32_t) GPUStream::Index];
 
 	blases_.assign(primitiveDescs.size(), InvalidAccelerationStructureHandle);
@@ -836,10 +833,11 @@ void RenderGPUScene::BuildAccelerationStructures()
 		}
 
 		BLASGeometry geometry = {};
-		geometry.vertexBuffer = positionBuffer;
-		geometry.vertexBufferOffset = static_cast<uint64_t>(desc.vertexOffset) * kPositionStride;
+		// The position is the first member of each interleaved GpuVertex.
+		geometry.vertexBuffer = vertexBuffer_;
+		geometry.vertexBufferOffset = static_cast<uint64_t>(desc.vertexOffset) * sizeof(GpuVertex);
 		geometry.vertexCount = desc.vertexCount;
-		geometry.vertexStride = kPositionStride;
+		geometry.vertexStride = sizeof(GpuVertex);
 		geometry.indexBuffer = indexBuffer;
 		geometry.indexBufferOffset = static_cast<uint64_t>(desc.indexOffset) * sizeof(uint32_t);
 		geometry.indexCount = desc.indexCount;

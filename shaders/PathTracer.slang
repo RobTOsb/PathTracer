@@ -39,21 +39,18 @@ struct PrimitiveDesc
 
 StructuredBuffer<PrimitiveDesc> g_Primitives : register(t1);
 StructuredBuffer<uint> g_Indices : register(t2);
-StructuredBuffer<float3> g_Positions : register(t3);
-StructuredBuffer<float3> g_Normals : register(t4);
-StructuredBuffer<float2> g_TexCoords : register(t5);
-StructuredBuffer<float4> g_Tangents : register(t6);
-StructuredBuffer<GpuMaterial> g_Materials : register(t7);
-StructuredBuffer<GpuLight> g_Lights : register(t8);
-StructuredBuffer<GpuLightTreeNode> g_LightTreeNodes : register(t9);
-StructuredBuffer<GpuLightTreeLeafEntry> g_LightLeaves : register(t10);
-StructuredBuffer<uint> g_Emitters : register(t11);
-StructuredBuffer<uint> g_LightTreeParents : register(t12);
-StructuredBuffer<GpuLightTreeLeafEntry> g_LightTreeLeafLights : register(t13);
+StructuredBuffer<GpuVertex> g_Vertices : register(t3);
+StructuredBuffer<GpuMaterial> g_Materials : register(t4);
+StructuredBuffer<GpuLight> g_Lights : register(t5);
+StructuredBuffer<GpuLightTreeNode> g_LightTreeNodes : register(t6);
+StructuredBuffer<GpuLightTreeLeafEntry> g_LightLeaves : register(t7);
+StructuredBuffer<uint> g_Emitters : register(t8);
+StructuredBuffer<uint> g_LightTreeParents : register(t9);
+StructuredBuffer<GpuLightTreeLeafEntry> g_LightTreeLeafLights : register(t10);
 
 #ifdef ATMOSPHERE
-Texture2D<float4> g_SkyViewLUT : register(t14);
-StructuredBuffer<float4> g_AtmosphereLighting : register(t15);
+Texture2D<float4> g_SkyViewLUT : register(t11);
+StructuredBuffer<float4> g_AtmosphereLighting : register(t12);
 SamplerState g_LinearClamp : register(s2);
 #endif
 
@@ -949,7 +946,7 @@ void Miss(inout HitPayload payload)
     payload.hitT = -1.0;
 }
 
-// Vertex indices of the triangle being hit, already rebased into the shared streams.
+// Vertex indices of the triangle being hit, already rebased into the shared vertex buffer.
 uint3 LoadTriangle(PrimitiveDesc prim)
 {
     uint first = prim.indexOffset + PrimitiveIndex() * 3;
@@ -963,7 +960,7 @@ float3 Barycentrics(BuiltInTriangleIntersectionAttributes attr)
 
 float2 InterpolateTexCoord(uint3 tri, float3 bary)
 {
-    return g_TexCoords[tri.x] * bary.x + g_TexCoords[tri.y] * bary.y + g_TexCoords[tri.z] * bary.z;
+    return g_Vertices[tri.x].texCoord * bary.x + g_Vertices[tri.y].texCoord * bary.y + g_Vertices[tri.z].texCoord * bary.z;
 }
 
 // uv across the ellipse where a ray cone of unit width meets the triangle's plane, as SampleGrad's
@@ -999,11 +996,14 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     uint3 tri = LoadTriangle(prim);
     float3 bary = Barycentrics(attr);
 
-    float3 p0 = g_Positions[tri.x];
-    float3 p1 = g_Positions[tri.y];
-    float3 p2 = g_Positions[tri.z];
-    float3 objectNormal = g_Normals[tri.x] * bary.x + g_Normals[tri.y] * bary.y + g_Normals[tri.z] * bary.z;
-    float4 objectTangent = g_Tangents[tri.x] * bary.x + g_Tangents[tri.y] * bary.y + g_Tangents[tri.z] * bary.z;
+    GpuVertex v0 = g_Vertices[tri.x];
+    GpuVertex v1 = g_Vertices[tri.y];
+    GpuVertex v2 = g_Vertices[tri.z];
+    float3 p0 = v0.position;
+    float3 p1 = v1.position;
+    float3 p2 = v2.position;
+    float3 objectNormal = v0.normal * bary.x + v1.normal * bary.y + v2.normal * bary.z;
+    float4 objectTangent = v0.tangent * bary.x + v1.tangent * bary.y + v2.tangent * bary.z;
 
     float3x3 linearToWorld = (float3x3)ObjectToWorld3x4();
     float3x3 cofactor = float3x3(cross(linearToWorld[1], linearToWorld[2]),
@@ -1025,9 +1025,9 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     payload.T = normalize(mul(linearToWorld, objectTangent.xyz));
     // A mirroring transform flips cross(N, T), so fold its handedness into the bitangent sign.
     payload.tangentSign = (objectTangent.w < 0.0 ? -1.0 : 1.0) * handedness;
-    float2 uv0 = g_TexCoords[tri.x];
-    float2 uv1 = g_TexCoords[tri.y];
-    float2 uv2 = g_TexCoords[tri.z];
+    float2 uv0 = v0.texCoord;
+    float2 uv1 = v1.texCoord;
+    float2 uv2 = v2.texCoord;
     payload.uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
     payload.uvGradients = RayConeUvGradients(e1, e2, faceCross, uv0, uv1, uv2, WorldRayDirection());
 
