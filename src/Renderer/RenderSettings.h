@@ -99,6 +99,15 @@ struct RenderSettings
 
 	DLSSMode dlssMode = DLSSMode::MaxQuality;
 	DLSSRayReconstructionPreset rrPreset = DLSSRayReconstructionPreset::PresetF;
+	// Primary surface replacement: the guides of a mirror (at most this rough, and reflecting mostly
+	// through its specular lobe) describe the surface it reflects, so RR denoises that surface's
+	// texture detail as it would on screen instead of blurring it as the mirror's lighting.
+	bool primarySurfaceReplacement = true;
+	float psrMaxRoughness = 0.1f;
+	// Surfaces at most this rough keep last frame's specular hit distance in frames whose path took
+	// the diffuse lobe, so the guide does not flicker between a distance and none.
+	bool holdSpecularHitDistance = true;
+	float holdHitDistanceMaxRoughness = 0.25f;
 
 	float cameraSpeed = 5.0f; // world units per second
 };

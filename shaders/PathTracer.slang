@@ -109,6 +109,7 @@ struct HitInfo
     float3 emission; // emitted radiance (both faces), set by LoadMaterial
     uint materialId;
     uint emitter; // entry of the hit triangle in g_Emitters, INVALID_LIGHT_INDEX if its instance does not emit
+    float curvature; // radians the vertex normals turn per unit length, DLSS_RR permutation only
 };
 
 struct LightSample
@@ -144,6 +145,7 @@ struct HitPayload
     float2 uv;
     uint emitter;
     float4 uvGradients;
+    float curvature;
 };
 
 // First bounce whose hits the SER pipeline reorders. Camera rays leave raygen in screen order, so
@@ -194,6 +196,7 @@ HitInfo TraceClosest(float3 origin, float3 dir, bool reorder, inout uint rng)
     hit.uvGradients = payload.uvGradients;
     hit.materialId = payload.materialId;
     hit.emitter = payload.emitter;
+    hit.curvature = payload.curvature;
     hit.emission = float3(0.0, 0.0, 0.0);
     hit.Ns = hit.N; // LoadMaterial applies the normal map
     return hit;
@@ -541,6 +544,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth)
     if (material.normalTexture != INVALIDDESCRIPTORHANDLE)
     {
         float3 tn = SampleTextureGrad(material.normalTexture, uv, ddx, ddy).xyz * 2.0 - 1.0;
+        tn.y = -tn.y; // flip green channel (DirectX-style normal map convention)
         tn.xy *= material.normalScale;
         hit.Ns = normalize(hit.T * tn.x + hit.B * tn.y + hit.N * tn.z);
     }
@@ -728,10 +732,148 @@ void ReflectanceGuides(OpenPBRBaseParams p, float3 wo, inout PrimaryGuides g)
     g.diffuseAlbedo = (1.0 - M) * (1.0 - p.transmissionWeight) * lerp(baseColour, p.subsurfaceColour, p.subsurfaceWeight);
 }
 
+// The specular hit distance of a guide surface before its path has sampled a lobe: none (0), or
+// for smooth surfaces with the hold on, "keep last frame's" (negative).
+float InitialSpecularHitDistance(float roughness)
+{
+    return roughness <= g_Frame.specularHitDistanceHoldRoughness ? -1.0 : 0.0;
+}
+
+// Primary surface replacement (PSR), after "Rendering Perfect Reflections and Refractions in
+// Path-Traced Games" (NVIDIA 2020) and Bevy Solari's DLSS-RR guides. When the camera sees a mirror,
+// the guides describe the first non-mirror surface along the reflection, placed in the mirrors'
+// virtual space: along the camera ray at the full path length, with its normal reflected by every
+// mirror on the way. RR then denoises the reflected surface's texture detail as it would on screen,
+// instead of blurring it as the mirror's lighting. The scene is static, so a virtual point's motion
+// is the camera's alone and the usual motion vector and depth of guides.position are exact for flat
+// mirrors. Curved mirrors move their virtual image differently, so those are left alone.
+
+// Mirrors reflect at least this share of their reflectance through the specular reflection lobe.
+static const float PSR_MIN_SPECULAR_FRACTION = 0.9;
+
+// How far a mirror's virtual image may shift between neighbouring pixels, as a fraction of its
+// virtual distance, before the mirror counts as too curved to replace.
+static const float PSR_MAX_VIRTUAL_DEPTH_JITTER = 0.002;
+
+// Share of the base's reflectance that leaves through its specular reflection lobe. Taken head on,
+// so the decision does not change with the view angle across a surface.
+float SpecularReflectionFraction(OpenPBRBaseParams p)
+{
+    float M = p.baseMetalness;
+    float T = p.transmissionWeight;
+    float3 baseColour = p.baseWeight * p.baseColour;
+
+    float etaS = ModulatedIORRatio(p.specularIor, p.specularWeight);
+    float F0 = (1.0 - etaS) / (1.0 + etaS);
+    F0 *= F0;
+
+    // F82-tint reflects baseColour head on.
+    float specular = (1.0 - M) * F0 * Luminance(p.specularColour) + M * p.specularWeight * Luminance(baseColour);
+    float diffuse = (1.0 - T) * Luminance(lerp(baseColour, p.subsurfaceColour, p.subsurfaceWeight));
+    float transmission = T * Luminance(TransmissionTint(p));
+    float other = (1.0 - M) * (1.0 - F0) * (diffuse + transmission);
+    return specular / max(specular + other, 1.0e-4);
+}
+
+bool IsPsrMirror(OpenPBRBaseParams p)
+{
+    return p.specularRoughness <= g_Frame.psrMaxRoughness && SpecularReflectionFraction(p) >= PSR_MIN_SPECULAR_FRACTION;
+}
+
+// A chain of mirrors in front of the camera, primary first, while the path follows it.
+struct MirrorChain
+{
+    bool active;
+    // The chain's transform from real to virtual space, the product of one Householder reflection
+    // per mirror in chain order. A product of k reflections is a rotation when k is even and a
+    // rotation after the fixed z reflection when k is odd, so it is kept as that rotation's
+    // quaternion and the parity instead of a 3x3 matrix.
+    bool parityOdd;
+    float4 rotor;
+    float3 throughput; // the mirrors' directional specular reflectance, multiplied along the chain
+    float specularFraction; // the primary mirror's SpecularReflectionFraction
+    float primaryDistance; // camera to primary mirror
+    float length; // primary mirror to the latest hit, through the mirrors in between
+    float pixelCurvature; // largest angle a mirror's normal turns over one pixel's footprint
+};
+
+float4 QuaternionMultiply(float4 a, float4 b)
+{
+    return float4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz), a.w * b.w - dot(a.xyz, b.xyz));
+}
+
+// The rotation half of H(n) F at even parity, or of F H(n) at odd, where H(n) is the Householder
+// reflection about the plane with normal n and F the reflection about z = 0. Either is a rotation by
+// twice the angle between n and z, about their common perpendicular.
+float4 MirrorRotor(float3 n, bool parityOdd)
+{
+    return parityOdd ? float4(n.y, -n.x, 0.0, n.z) : float4(-n.y, n.x, 0.0, n.z);
+}
+
+void AddMirror(inout MirrorChain chain, OpenPBRBaseParams mirror, float3 wo, float pixelFootprint, float curvature)
+{
+    PrimaryGuides reflectance;
+    ReflectanceGuides(mirror, wo, reflectance);
+    chain.throughput *= reflectance.specularAlbedo;
+    chain.rotor = QuaternionMultiply(chain.rotor, MirrorRotor(mirror.geometryNormal, chain.parityOdd));
+    chain.parityOdd = !chain.parityOdd;
+    chain.pixelCurvature = max(chain.pixelCurvature, curvature * pixelFootprint);
+}
+
+MirrorChain StartMirrorChain(OpenPBRBaseParams mirror, float3 wo, float primaryDistance, float pixelFootprint, float curvature)
+{
+    MirrorChain chain;
+    chain.active = true;
+    chain.parityOdd = false;
+    chain.rotor = float4(0.0, 0.0, 0.0, 1.0);
+    chain.throughput = float3(1.0, 1.0, 1.0);
+    chain.specularFraction = SpecularReflectionFraction(mirror);
+    chain.primaryDistance = primaryDistance;
+    chain.length = 0.0;
+    chain.pixelCurvature = 0.0;
+    AddMirror(chain, mirror, wo, pixelFootprint, curvature);
+    return chain;
+}
+
+float3 ApplyMirrorChain(MirrorChain chain, float3 v)
+{
+    if (chain.parityOdd)
+        v.z = -v.z;
+    float3 t = 2.0 * cross(chain.rotor.xyz, v);
+    return v + chain.rotor.w * t + cross(chain.rotor.xyz, t);
+}
+
+// Swap the primary mirror's guides for the surface the chain ends on, unless a mirror on the way is
+// curved enough to smear the virtual image. Returns whether it did.
+bool ReplacePrimarySurface(MirrorChain chain, OpenPBRBaseParams surface, float3 wo, float3 cameraDir, inout PrimaryGuides guides)
+{
+    float pathLength = chain.primaryDistance + chain.length;
+    if (2.0 * chain.pixelCurvature * chain.length > PSR_MAX_VIRTUAL_DEPTH_JITTER * pathLength)
+        return false;
+
+    // Reflections preserve angles, so the reflectance seen in virtual space is the real one.
+    PrimaryGuides reflected;
+    ReflectanceGuides(surface, wo, reflected);
+
+    // What the mirror shows of the surface comes scaled by the chain's reflectance, on top of the
+    // mirror's own (small) diffuse part.
+    guides.position = float4(guides.position.xyz + cameraDir * chain.length, 1.0);
+    guides.normal = normalize(ApplyMirrorChain(chain, surface.geometryNormal));
+    guides.roughness = surface.specularRoughness;
+    guides.diffuseAlbedo += chain.throughput * reflected.diffuseAlbedo;
+    guides.specularAlbedo = lerp(guides.specularAlbedo, chain.throughput * reflected.specularAlbedo, chain.specularFraction);
+    guides.specularHitDistance = InitialSpecularHitDistance(surface.specularRoughness);
+    return true;
+}
+
 float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides guides)
 {
     guides = DefaultGuides(dir);
-    bool primarySpecular = false;
+    // The guides' surface continued the path with a specular reflection, so the next hit gives its
+    // specular hit distance.
+    bool hitDistancePending = false;
+    MirrorChain mirrors = (MirrorChain)0;
+    const float3 cameraDir = dir;
 
     float3 radiance = float3(0.0, 0.0, 0.0);
     float3 throughput = float3(1.0, 1.0, 1.0);
@@ -747,8 +889,13 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
     {
         HitInfo hit = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, rng);
 
-        if (bounce == 1 && primarySpecular)
+        if (hitDistancePending)
+        {
             guides.specularHitDistance = hit.hit ? hit.t : SKY_HIT_DISTANCE;
+            hitDistancePending = false;
+        }
+        if (mirrors.active)
+            mirrors.length += hit.t;
 
         // Absorption along the segment just travelled, if it was inside a medium.
         if (any(segmentExtinction > 0.0))
@@ -824,8 +971,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             guides.position = float4(hit.position, 1.0);
             guides.normal = mat.geometryNormal;
             guides.roughness = mat.specularRoughness;
-            // Stays 0 (no reflection data) unless the path continues with a specular reflection.
-            guides.specularHitDistance = 0.0;
+            // Until the path continues with a specular reflection: no reflection data, or last frame's.
+            guides.specularHitDistance = InitialSpecularHitDistance(mat.specularRoughness);
             ReflectanceGuides(mat, wo, guides);
         }
 
@@ -854,13 +1001,14 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
 
         // Continue the path by sampling the BSDF, unless this is the last segment.
         bool continuePath = false;
+        bool specularReflection = false;
         if (!lastSegment)
         {
             BSDFSample bs = OpenPBRSample(mat, ctx, Rand3(rng));
             continuePath = bs.lobe != LOBE_NONE;
             if (continuePath)
             {
-                primarySpecular = bounce == 0 && bs.lobe == LOBE_SPECULAR_REFLECTION;
+                specularReflection = bs.lobe == LOBE_SPECULAR_REFLECTION;
                 throughput *= bs.weight;
                 prevBsdfPdf = bs.pdf;
                 prevVertex = vertex;
@@ -870,6 +1018,28 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
                 // Heading into the object means travelling through its medium until the next hit.
                 segmentExtinction = dot(bs.wi, hit.Ng) < 0.0 ? extinction : float3(0.0, 0.0, 0.0);
                 dir = bs.wi;
+            }
+        }
+
+        // DLSS-RR guides: the primary surface, or the first surface past the mirrors in front of it.
+        // A mirror that takes another lobe, or ends the path, ends the chain on itself.
+        if (bounce == 0)
+        {
+            hitDistancePending = specularReflection;
+            if (specularReflection && IsPsrMirror(mat))
+                mirrors = StartMirrorChain(mat, wo, hit.t, cone.width, hit.curvature);
+        }
+        else if (mirrors.active)
+        {
+            if (specularReflection && IsPsrMirror(mat))
+            {
+                AddMirror(mirrors, mat, wo, cone.width, hit.curvature);
+            }
+            else
+            {
+                mirrors.active = false;
+                if (ReplacePrimarySurface(mirrors, mat, wo, cameraDir, guides))
+                    hitDistancePending = specularReflection;
             }
         }
 
@@ -936,7 +1106,9 @@ void RayGen()
     g_NormalRoughness[pixel] = float4(guides.normal, guides.roughness);
     g_MotionVectors[pixel] = motion;
     g_Depth[pixel] = depth;
-    g_SpecularHitDistance[pixel] = guides.specularHitDistance;
+    // Negative: keep last frame's.
+    if (guides.specularHitDistance >= 0.0)
+        g_SpecularHitDistance[pixel] = guides.specularHitDistance;
 #endif
 }
 
@@ -1030,6 +1202,22 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     float2 uv2 = v2.texCoord;
     payload.uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
     payload.uvGradients = RayConeUvGradients(e1, e2, faceCross, uv0, uv1, uv2, WorldRayDirection());
+
+#ifdef DLSS_RR
+    // Largest turn of the vertex normals per unit length along an edge, which tells a flat mirror from
+    // a curved one for primary surface replacement. The chord between unit normals stands in for
+    // the angle, and the normals are taken in object space against world-space edges.
+    float3 dn1 = v1.normal - v0.normal;
+    float3 dn2 = v2.normal - v0.normal;
+    float3 dn3 = dn2 - dn1;
+    float3 e3 = e2 - e1;
+    float k1 = dot(dn1, dn1) / max(dot(e1, e1), 1.0e-20);
+    float k2 = dot(dn2, dn2) / max(dot(e2, e2), 1.0e-20);
+    float k3 = dot(dn3, dn3) / max(dot(e3, e3), 1.0e-20);
+    payload.curvature = sqrt(max(k1, max(k2, k3)));
+#else
+    payload.curvature = 0.0;
+#endif
 
     uint emitterTable = g_Emitters[InstanceIndex()];
     payload.emitter = emitterTable != INVALID_LIGHT_INDEX ? emitterTable + PrimitiveIndex() : INVALID_LIGHT_INDEX;

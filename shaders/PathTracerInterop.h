@@ -61,6 +61,14 @@ struct FrameConstants
 	uint atmosphereInScatterSegments; // path segments (0 = camera ray) that gather in-scattered sunlight
 	uint atmosphereVolumetricShadows; // in-scattering traces a shadow ray towards the sun
 	uint pad2;
+
+	// DLSS-RR guides (DLSS_RR permutation only). Mirrors at most psrMaxRoughness (perceptual) rough
+	// are described by the surface they reflect, primary surface replacement; negative = off.
+	// Surfaces at most specularHitDistanceHoldRoughness rough keep last frame's specular hit
+	// distance when their path took another lobe, instead of reporting none; negative = off.
+	float psrMaxRoughness;
+	float specularHitDistanceHoldRoughness;
+	float2 pad3;
 };
 
 // How next event estimation picks one light from the light buffer.
@@ -123,7 +131,7 @@ struct TonemapConstants
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(FrameConstants) == 432,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 448,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuMaterial) == 80, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");

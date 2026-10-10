@@ -19,7 +19,7 @@
 
 namespace
 {
-	constexpr uint32_t kMaxPayloadSizeInBytes = 76;
+	constexpr uint32_t kMaxPayloadSizeInBytes = 80;
 
 	// Halton phases before the jitter repeats. The DLSS guide asks for 8 * (output / render)^2, so
 	// 72 at Ultra Performance, and the RR guide for at least 32 with no reason to limit it.
@@ -235,6 +235,10 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 			settings_.rayConeTextureLod ? exp2f(settings_.textureLodBias + upscalerBias) : 0.0f;
 
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
+
+	constants.psrMaxRoughness = settings_.primarySurfaceReplacement ? settings_.psrMaxRoughness : -1.0f;
+	constants.specularHitDistanceHoldRoughness =
+			settings_.holdSpecularHitDistance ? settings_.holdHitDistanceMaxRoughness : -1.0f;
 
 	if (atmosphere)
 	{

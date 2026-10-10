@@ -151,6 +151,14 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::BeginDisabled(!rayReconstructionSupported_);
 		EnumCombo("Mode", kDLSSModes, settings_.dlssMode);
 		EnumCombo("Preset", kRRPresets, settings_.rrPreset);
+		ImGui::Checkbox("Primary surface replacement", &settings_.primarySurfaceReplacement);
+		ImGui::BeginDisabled(!settings_.primarySurfaceReplacement);
+		ImGui::SliderFloat("Mirror roughness", &settings_.psrMaxRoughness, 0.0f, 0.3f, "%.3f");
+		ImGui::EndDisabled();
+		ImGui::Checkbox("Hold specular hit distance", &settings_.holdSpecularHitDistance);
+		ImGui::BeginDisabled(!settings_.holdSpecularHitDistance);
+		ImGui::SliderFloat("Hold max roughness", &settings_.holdHitDistanceMaxRoughness, 0.0f, 1.0f, "%.2f");
+		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 	}
 
