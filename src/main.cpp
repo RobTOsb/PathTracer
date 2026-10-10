@@ -63,12 +63,13 @@ static float QueryDisplayPeakNits(void *hwnd)
 	return 0.0f;
 }
 
-//constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
+// constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
 constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
-//constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\Sponza\\glTF\\Sponza.gltf";
-//constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
+// constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\Sponza\\glTF\\Sponza.gltf";
+// constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
 
-constexpr uint kFramesInFlight = 3;
+constexpr uint kFramesInFlight = 2;
+constexpr uint kSwapchainImageCount = 3;
 constexpr float kMouseSensitivity = 0.15f; // degrees per pixel
 
 void UpdateCamera(Window &window, Camera &camera, RenderSettings &settings, float deltaSeconds)
@@ -184,7 +185,7 @@ int Run(const char *scenePath)
 	Window window(WindowDesc{ "PathTracer", 1920, 1080, true });
 
 	std::unique_ptr<RenderContext> renderContext(
-			CreateRenderContext(&window, RenderAPI::D3D12, kFramesInFlight, false, true));
+			CreateRenderContext(&window, RenderAPI::D3D12, kFramesInFlight, kSwapchainImageCount, false, true));
 	renderContext->CreatePerFrameResources();
 	renderContext->InitialiseImgui(window.GetNativeWindow());
 
