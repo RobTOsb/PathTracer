@@ -330,12 +330,13 @@ struct LightSelectVertex
     bool tree; // the light tree picks the light, otherwise uniform selection
 };
 
-// The light tree only handles opaque surfaces (lights below the tangent plane get no importance),
-// so transmissive ones fall back to uniform selection. From bounce lightTreeGlossyBounces on, the
+// The light tree only handles surfaces that reflect (lights below the tangent plane get no importance),
+// so ones that NEE can light from behind fall back to uniform selection. A delta transmission lobe
+// does not count, NEE cannot sample it. From bounce lightTreeGlossyBounces on, the
 // specular weight is folded into the diffuse one, as for rough lobes in MakeLightTreeShadingContext:
 // the glossy importance is the expensive half of the traversal, and those vertices carry little
 // throughput.
-LightSelectVertex MakeLightSelectVertex(float3 position, OpenPBRBaseParams mat, OpenPBRContext ctx, float3 wo, bool opaque,
+LightSelectVertex MakeLightSelectVertex(float3 position, OpenPBRBaseParams mat, OpenPBRContext ctx, float3 wo, bool reflectOnly,
                                         uint bounce)
 {
     LightSelectVertex v;
@@ -351,7 +352,7 @@ LightSelectVertex MakeLightSelectVertex(float3 position, OpenPBRBaseParams mat, 
         v.specularWeight = 0.0;
     }
     v.alpha = ctx.alpha;
-    v.tree = g_Frame.lightSampling == LIGHT_SAMPLING_TREE && opaque;
+    v.tree = g_Frame.lightSampling == LIGHT_SAMPLING_TREE && reflectOnly;
     return v;
 }
 
@@ -531,6 +532,38 @@ float3 AtmosphereInScattering(float3 origin, float3 dir, float segmentLength, in
 }
 #endif
 
+// glTF transmission (KHR_materials_transmission, _ior and _volume) in OpenPBR terms. glTF tints what
+// crosses the surface by the base colour, which is transmissionColour at zero depth. A volume's
+// attenuation becomes the medium (colour at depth) instead, which drops the base colour tint; assets
+// rarely use both.
+void SetTransmission(inout OpenPBRBaseParams p, GpuMaterial material, float transmission, bool thinWalled)
+{
+    p.transmissionWeight = saturate(transmission);
+    p.specularIor = material.ior;
+    p.geometryThinWalled = thinWalled;
+    if (!thinWalled && material.attenuationDistance < FLT_MAX)
+    {
+        p.transmissionColour = material.attenuationColour;
+        p.transmissionDepth = material.attenuationDistance;
+    }
+    else
+    {
+        p.transmissionColour = p.baseColour;
+    }
+}
+
+// The Rendering panel's debug switches (MaterialOverrideFlags), applied to every material.
+void ApplyMaterialOverrides(inout OpenPBRBaseParams p)
+{
+    if ((g_Frame.materialOverrides & MATERIAL_OVERRIDE_NO_SPECULAR) != 0)
+    {
+        p.baseMetalness = 0.0;
+        p.specularColour = float3(0.0, 0.0, 0.0);
+    }
+    if ((g_Frame.materialOverrides & MATERIAL_OVERRIDE_NO_TRANSMISSION) != 0)
+        p.transmissionWeight = 0.0;
+}
+
 // Reads the material row once, samples all of its textures and applies the normal map to hit.Ns.
 // The textures are filtered over the footprint of a ray cone coneWidth wide where it meets the surface.
 OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth)
@@ -562,6 +595,13 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth)
         metallic *= roughMetal.b;
     }
 
+    float transmission = material.transmission;
+    if (transmission > 0.0 && material.transmissionTexture != INVALIDDESCRIPTORHANDLE)
+        transmission *= SampleTextureGrad(material.transmissionTexture, uv, ddx, ddy).r;
+    bool thinWalled = (material.transmissionFlags & TRANSMISSION_THIN_WALLED) != 0;
+    if (thinWalled && material.transmission > 0.0 && (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) == 0)
+        roughness = max(roughness, 1.0e-4);
+
     if (any(material.emissive > 0.0))
     {
         hit.emission = material.emissive;
@@ -573,6 +613,8 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth)
     p.baseColour = baseColour;
     p.baseMetalness = saturate(metallic);
     p.specularRoughness = saturate(roughness);
+    SetTransmission(p, material, transmission, thinWalled);
+    ApplyMaterialOverrides(p);
     return p;
 }
 
@@ -639,6 +681,7 @@ OpenPBRBaseParams OpenPBRDefaults()
     p.transmissionDepth = 0.0;
     p.subsurfaceWeight = 0.0;
     p.subsurfaceColour = float3(0.8, 0.8, 0.8);
+    p.geometryThinWalled = false;
     p.geometryTangent = float3(1.0, 0.0, 0.0);
     p.geometryBitangent = float3(0.0, 1.0, 0.0);
     p.geometryNormal = float3(0.0, 0.0, 1.0);
@@ -740,24 +783,29 @@ float InitialSpecularHitDistance(float roughness)
 }
 
 // Primary surface replacement (PSR), after "Rendering Perfect Reflections and Refractions in
-// Path-Traced Games" (NVIDIA 2020) and Bevy Solari's DLSS-RR guides. When the camera sees a mirror,
-// the guides describe the first non-mirror surface along the reflection, placed in the mirrors'
-// virtual space: along the camera ray at the full path length, with its normal reflected by every
-// mirror on the way. RR then denoises the reflected surface's texture detail as it would on screen,
-// instead of blurring it as the mirror's lighting. The scene is static, so a virtual point's motion
-// is the camera's alone and the usual motion vector and depth of guides.position are exact for flat
-// mirrors. Curved mirrors move their virtual image differently, so those are left alone.
+// Path-Traced Games" (NVIDIA 2020) and Bevy Solari's DLSS-RR guides. When the camera sees a mirror
+// or a pane of glass, the guides describe the first surface past the chain of smooth specular events
+// in front of it, placed in the chain's virtual space: along the camera ray at the full path length,
+// with its normal taken through every event on the way. RR then denoises the reflected or refracted
+// surface's texture detail as it would on screen, instead of blurring it as the mirror's or glass's
+// lighting. The scene is static, so a virtual point's motion is the camera's alone and the usual
+// motion vector and depth of guides.position are exact for flat mirrors. Refraction does not map the
+// scene rigidly (the apparent depth changes with the view angle), so behind glass they are close
+// rather than exact. Curved mirrors and glass move their virtual image differently, so those are left
+// alone.
 
-// Mirrors reflect at least this share of their reflectance through the specular reflection lobe.
+// Mirrors and glass send at least this share of their reflectance through the specular lobe the
+// path takes, reflection for mirrors and transmission for glass.
 static const float PSR_MIN_SPECULAR_FRACTION = 0.9;
 
-// How far a mirror's virtual image may shift between neighbouring pixels, as a fraction of its
-// virtual distance, before the mirror counts as too curved to replace.
+// How far a virtual image may shift between neighbouring pixels, as a fraction of its virtual
+// distance, before the chain counts as too curved to replace.
 static const float PSR_MAX_VIRTUAL_DEPTH_JITTER = 0.002;
 
-// Share of the base's reflectance that leaves through its specular reflection lobe. Taken head on,
-// so the decision does not change with the view angle across a surface.
-float SpecularReflectionFraction(OpenPBRBaseParams p)
+// Shares of the base's reflectance that leave through its specular reflection (x) and specular
+// transmission (y) lobes. Taken head on, so the decision does not change with the view angle across
+// a surface.
+float2 SpecularFractions(OpenPBRBaseParams p)
 {
     float M = p.baseMetalness;
     float T = p.transmissionWeight;
@@ -769,32 +817,60 @@ float SpecularReflectionFraction(OpenPBRBaseParams p)
 
     // F82-tint reflects baseColour head on.
     float specular = (1.0 - M) * F0 * Luminance(p.specularColour) + M * p.specularWeight * Luminance(baseColour);
-    float diffuse = (1.0 - T) * Luminance(lerp(baseColour, p.subsurfaceColour, p.subsurfaceWeight));
-    float transmission = T * Luminance(TransmissionTint(p));
-    float other = (1.0 - M) * (1.0 - F0) * (diffuse + transmission);
-    return specular / max(specular + other, 1.0e-4);
+    float diffuse = (1.0 - M) * (1.0 - F0) * (1.0 - T) * Luminance(lerp(baseColour, p.subsurfaceColour, p.subsurfaceWeight));
+    float transmission = (1.0 - M) * (1.0 - F0) * T * Luminance(TransmissionTint(p));
+    return float2(specular, transmission) / max(specular + transmission + diffuse, 1.0e-4);
 }
 
-bool IsPsrMirror(OpenPBRBaseParams p)
+// Whether the lobe a path took at a surface carries the chain on, and the share of the surface's
+// reflectance that lobe stands for. Seen from inside, the surface is a bare dielectric interface whose
+// two lobes are both specular, so either one does (total internal reflection included).
+bool IsPsrEvent(OpenPBRBaseParams p, OpenPBRContext ctx, uint lobe, out float fraction)
 {
-    return p.specularRoughness <= g_Frame.psrMaxRoughness && SpecularReflectionFraction(p) >= PSR_MIN_SPECULAR_FRACTION;
+    fraction = 1.0;
+    bool reflection = lobe == LOBE_SPECULAR_REFLECTION;
+    if (!(reflection || lobe == LOBE_SPECULAR_TRANSMISSION) || p.specularRoughness > g_Frame.psrMaxRoughness)
+        return false;
+    if (ctx.inside)
+        return true;
+    float2 fractions = SpecularFractions(p);
+    fraction = reflection ? fractions.x : fractions.y;
+    return fraction >= PSR_MIN_SPECULAR_FRACTION;
 }
 
-// A chain of mirrors in front of the camera, primary first, while the path follows it.
-struct MirrorChain
+// Directional reflectance (reflection) or transmittance of a chain event, as wo sees it.
+float3 PsrEventThroughput(OpenPBRBaseParams p, OpenPBRContext ctx, float3 wo, bool reflection)
+{
+    if (ctx.inside)
+    {
+        float F = FresnelDielectric(ctx.wo.z, ctx.eta);
+        return (reflection ? F : 1.0 - F).xxx;
+    }
+    if (reflection)
+    {
+        PrimaryGuides reflectance;
+        ReflectanceGuides(p, wo, reflectance);
+        return reflectance.specularAlbedo;
+    }
+    return (1.0 - p.baseMetalness) * p.transmissionWeight * (1.0 - ctx.E) * TransmissionTint(p);
+}
+
+// A chain of mirrors and glass in front of the camera, primary first, while the path follows it.
+struct SpecularChain
 {
     bool active;
-    // The chain's transform from real to virtual space, the product of one Householder reflection
-    // per mirror in chain order. A product of k reflections is a rotation when k is even and a
-    // rotation after the fixed z reflection when k is odd, so it is kept as that rotation's
-    // quaternion and the parity instead of a 3x3 matrix.
+    // The chain's transform from real to virtual space, the product of one transform per event in
+    // chain order: the Householder reflection of a mirror, or for a refraction the rotation taking the
+    // refracted direction back to the incident one. A product with k reflections is a rotation when k
+    // is even and a rotation after the fixed z reflection when k is odd, so it is kept as that
+    // rotation's quaternion and the parity instead of a 3x3 matrix.
     bool parityOdd;
     float4 rotor;
-    float3 throughput; // the mirrors' directional specular reflectance, multiplied along the chain
-    float specularFraction; // the primary mirror's SpecularReflectionFraction
-    float primaryDistance; // camera to primary mirror
-    float length; // primary mirror to the latest hit, through the mirrors in between
-    float pixelCurvature; // largest angle a mirror's normal turns over one pixel's footprint
+    float3 throughput; // the events' directional reflectance or transmittance, and any absorption between them
+    float primaryFraction; // share of the primary surface's reflectance in the lobe its path took
+    float primaryDistance; // camera to primary surface
+    float length; // primary surface to the latest hit, through the events in between
+    float pixelDeflection; // largest angle an event turns the path by across one pixel's footprint
 };
 
 float4 QuaternionMultiply(float4 a, float4 b)
@@ -810,32 +886,57 @@ float4 MirrorRotor(float3 n, bool parityOdd)
     return parityOdd ? float4(n.y, -n.x, 0.0, n.z) : float4(-n.y, n.x, 0.0, n.z);
 }
 
-void AddMirror(inout MirrorChain chain, OpenPBRBaseParams mirror, float3 wo, float pixelFootprint, float curvature)
+// The rotation taking unit vector a to unit vector b along the shorter arc, which is well defined
+// for a refraction since it turns the ray by less than 90 degrees.
+float4 ArcRotor(float3 a, float3 b)
 {
-    PrimaryGuides reflectance;
-    ReflectanceGuides(mirror, wo, reflectance);
-    chain.throughput *= reflectance.specularAlbedo;
-    chain.rotor = QuaternionMultiply(chain.rotor, MirrorRotor(mirror.geometryNormal, chain.parityOdd));
-    chain.parityOdd = !chain.parityOdd;
-    chain.pixelCurvature = max(chain.pixelCurvature, curvature * pixelFootprint);
+    return normalize(float4(cross(a, b), 1.0 + dot(a, b)));
 }
 
-MirrorChain StartMirrorChain(OpenPBRBaseParams mirror, float3 wo, float primaryDistance, float pixelFootprint, float curvature)
+// Appends the event where the path arrived along dirIn and left along dirOut, at a surface whose
+// normal turns by curvature radians per unit length.
+void AddPsrEvent(inout SpecularChain chain, OpenPBRBaseParams p, OpenPBRContext ctx, float3 wo, float3 dirIn, float3 dirOut,
+                 bool reflection, float pixelFootprint, float curvature)
 {
-    MirrorChain chain;
+    chain.throughput *= PsrEventThroughput(p, ctx, wo, reflection);
+
+    // How much a turn of the normal turns the path: twice for a reflection or for the mirrored
+    // reflection that a thin wall transmits, 1 - 1/eta for a refraction.
+    float deflection;
+    if (reflection)
+    {
+        chain.rotor = QuaternionMultiply(chain.rotor, MirrorRotor(p.geometryNormal, chain.parityOdd));
+        chain.parityOdd = !chain.parityOdd;
+        deflection = 2.0;
+    }
+    else
+    {
+        // Behind an odd number of reflections the rotation is conjugated by F, which negates the x and
+        // y of its quaternion.
+        float4 q = ArcRotor(dirOut, dirIn);
+        chain.rotor = QuaternionMultiply(chain.rotor, chain.parityOdd ? float4(-q.xy, q.zw) : q);
+        deflection = p.geometryThinWalled ? 2.0 : abs(1.0 - 1.0 / ctx.eta);
+    }
+    chain.pixelDeflection = max(chain.pixelDeflection, deflection * curvature * pixelFootprint);
+}
+
+SpecularChain StartSpecularChain(OpenPBRBaseParams p, OpenPBRContext ctx, float3 wo, float3 dirIn, float3 dirOut, bool reflection,
+                                 float fraction, float primaryDistance, float pixelFootprint, float curvature)
+{
+    SpecularChain chain;
     chain.active = true;
     chain.parityOdd = false;
     chain.rotor = float4(0.0, 0.0, 0.0, 1.0);
     chain.throughput = float3(1.0, 1.0, 1.0);
-    chain.specularFraction = SpecularReflectionFraction(mirror);
+    chain.primaryFraction = fraction;
     chain.primaryDistance = primaryDistance;
     chain.length = 0.0;
-    chain.pixelCurvature = 0.0;
-    AddMirror(chain, mirror, wo, pixelFootprint, curvature);
+    chain.pixelDeflection = 0.0;
+    AddPsrEvent(chain, p, ctx, wo, dirIn, dirOut, reflection, pixelFootprint, curvature);
     return chain;
 }
 
-float3 ApplyMirrorChain(MirrorChain chain, float3 v)
+float3 ApplySpecularChain(SpecularChain chain, float3 v)
 {
     if (chain.parityOdd)
         v.z = -v.z;
@@ -843,25 +944,26 @@ float3 ApplyMirrorChain(MirrorChain chain, float3 v)
     return v + chain.rotor.w * t + cross(chain.rotor.xyz, t);
 }
 
-// Swap the primary mirror's guides for the surface the chain ends on, unless a mirror on the way is
+// Swap the primary surface's guides for the surface the chain ends on, unless an event on the way is
 // curved enough to smear the virtual image. Returns whether it did.
-bool ReplacePrimarySurface(MirrorChain chain, OpenPBRBaseParams surface, float3 wo, float3 cameraDir, inout PrimaryGuides guides)
+bool ReplacePrimarySurface(SpecularChain chain, OpenPBRBaseParams surface, float3 wo, float3 cameraDir, inout PrimaryGuides guides)
 {
     float pathLength = chain.primaryDistance + chain.length;
-    if (2.0 * chain.pixelCurvature * chain.length > PSR_MAX_VIRTUAL_DEPTH_JITTER * pathLength)
+    if (chain.pixelDeflection * chain.length > PSR_MAX_VIRTUAL_DEPTH_JITTER * pathLength)
         return false;
 
-    // Reflections preserve angles, so the reflectance seen in virtual space is the real one.
-    PrimaryGuides reflected;
-    ReflectanceGuides(surface, wo, reflected);
+    // The chain's transform is a rotation or reflection, which preserves the angle between wo and the
+    // normal, so the reflectance seen in virtual space is the real one.
+    PrimaryGuides seen;
+    ReflectanceGuides(surface, wo, seen);
 
-    // What the mirror shows of the surface comes scaled by the chain's reflectance, on top of the
-    // mirror's own (small) diffuse part.
+    // What the primary surface shows of the surface comes scaled by the chain's throughput, on top of
+    // the primary's own (small) diffuse part.
     guides.position = float4(guides.position.xyz + cameraDir * chain.length, 1.0);
-    guides.normal = normalize(ApplyMirrorChain(chain, surface.geometryNormal));
+    guides.normal = normalize(ApplySpecularChain(chain, surface.geometryNormal));
     guides.roughness = surface.specularRoughness;
-    guides.diffuseAlbedo += chain.throughput * reflected.diffuseAlbedo;
-    guides.specularAlbedo = lerp(guides.specularAlbedo, chain.throughput * reflected.specularAlbedo, chain.specularFraction);
+    guides.diffuseAlbedo += chain.throughput * seen.diffuseAlbedo;
+    guides.specularAlbedo = lerp(guides.specularAlbedo, chain.throughput * seen.specularAlbedo, chain.primaryFraction);
     guides.specularHitDistance = InitialSpecularHitDistance(surface.specularRoughness);
     return true;
 }
@@ -872,15 +974,19 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
     // The guides' surface continued the path with a specular reflection, so the next hit gives its
     // specular hit distance.
     bool hitDistancePending = false;
-    MirrorChain mirrors = (MirrorChain)0;
+    SpecularChain chain = (SpecularChain)0;
     const float3 cameraDir = dir;
 
     float3 radiance = float3(0.0, 0.0, 0.0);
     float3 throughput = float3(1.0, 1.0, 1.0);
     float3 segmentExtinction = float3(0.0, 0.0, 0.0);
     float prevBsdfPdf = 0.0;
-    LightSelectVertex prevVertex = (LightSelectVertex)0; // where the current segment started, from bounce 1
+    LightSelectVertex prevVertex = (LightSelectVertex)0; // where the current segment started, once a surface scattered
     RayCone cone = { 0.0, g_Frame.rayConePixelSpread };
+
+    bool fromCamera = true;
+    float3 cameraTransmittance = float3(1.0, 1.0, 1.0); // of the walls in front of the primary surface
+    float cameraDistance = 0.0;
 
     // maxBounces counts indirect bounces, so the primary segment comes on top.
     const uint maxSegments = g_Frame.maxBounces + 1;
@@ -894,15 +1000,20 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             guides.specularHitDistance = hit.hit ? hit.t : SKY_HIT_DISTANCE;
             hitDistancePending = false;
         }
-        if (mirrors.active)
-            mirrors.length += hit.t;
+        if (chain.active)
+            chain.length += hit.t;
+        if (fromCamera)
+            cameraDistance += hit.t;
 
         // Absorption along the segment just travelled, if it was inside a medium.
         if (any(segmentExtinction > 0.0))
         {
             if (!hit.hit)
                 break;
-            throughput *= exp(-segmentExtinction * hit.t);
+            float3 absorption = exp(-segmentExtinction * hit.t);
+            throughput *= absorption;
+            if (chain.active)
+                chain.throughput *= absorption;
         }
 #ifdef ATMOSPHERE
         else
@@ -918,6 +1029,10 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
 
         if (!hit.hit)
         {
+            // Sky seen through a window: the guides describe the sky, as for a camera ray.
+            if (fromCamera)
+                guides = DefaultGuides(dir);
+
             // The sky is never light sampled, so BSDF sampling gets its full contribution.
             radiance += throughput * EnvironmentRadiance(dir);
 
@@ -925,7 +1040,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             float3 Lsun = SunRadiance(dir);
             if (any(Lsun > 0.0))
             {
-                float w = bounce == 0 ? 1.0 : PowerHeuristic(prevBsdfPdf, LightPdf(origin, dir, hit));
+                float w = fromCamera ? 1.0 : PowerHeuristic(prevBsdfPdf, LightPdf(origin, dir, hit));
                 radiance += throughput * Lsun * w;
             }
             break;
@@ -943,7 +1058,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
         if (any(hit.emission > 0.0) && dot(hit.Ng, wo) > 0.0)
         {
             float w = 1.0;
-            if (bounce > 0 && g_Frame.lightCount > 0 && hit.emitter != INVALID_LIGHT_INDEX)
+            if (!fromCamera && g_Frame.lightCount > 0 && hit.emitter != INVALID_LIGHT_INDEX)
             {
                 uint lightIndex = g_Emitters[hit.emitter];
                 if (lightIndex != INVALID_LIGHT_INDEX)
@@ -952,10 +1067,10 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             radiance += throughput * hit.emission * w;
         }
 
-        // Opaque surfaces are treated as two-sided: face the frame towards the viewer so a back
-        // face is not mistaken for the inside of a transmissive object.
+        // Opaque and thin-walled surfaces are treated as two-sided: face the frame towards the viewer
+        // so a back face is not mistaken for the inside of a transmissive object.
         bool opaque = mat.transmissionWeight <= 0.0;
-        if (opaque && dot(hit.Ng, wo) < 0.0)
+        if ((opaque || mat.geometryThinWalled) && dot(hit.Ng, wo) < 0.0)
         {
             hit.Ng = -hit.Ng;
             hit.N = -hit.N;
@@ -965,8 +1080,9 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
         SetShadingBasis(mat, hit.T, hit.B, hit.N, hit.Ns, wo);
         OpenPBRContext ctx = OpenPBRSetup(mat, wo);
         float3 extinction = MediumExtinction(mat);
+        bool deltaTransmission = HasDeltaTransmission(mat);
 
-        if (bounce == 0)
+        if (fromCamera)
         {
             guides.position = float4(hit.position, 1.0);
             guides.normal = mat.geometryNormal;
@@ -974,12 +1090,14 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             // Until the path continues with a specular reflection: no reflection data, or last frame's.
             guides.specularHitDistance = InitialSpecularHitDistance(mat.specularRoughness);
             ReflectanceGuides(mat, wo, guides);
+            guides.diffuseAlbedo *= cameraTransmittance;
+            guides.specularAlbedo *= cameraTransmittance;
         }
 
         // One hash covers the light sample (xy) and the Russian roulette decision (z).
         float3 lightU = Rand3(rng);
 
-        LightSelectVertex vertex = MakeLightSelectVertex(hit.position, mat, ctx, wo, opaque, bounce);
+        LightSelectVertex vertex = MakeLightSelectVertex(hit.position, mat, ctx, wo, opaque || deltaTransmission, bounce);
         LightSample ls = SampleLight(vertex, lightU.xy, rng);
         bool lastSegment = bounce + 1 >= maxSegments;
         float3 neeContribution = float3(0.0, 0.0, 0.0);
@@ -992,21 +1110,37 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             {
                 // The last segment takes no BSDF sample, which leaves NEE as the only strategy there.
                 float w = ls.lightSamplingOnly || lastSegment ? 1.0 : PowerHeuristic(ls.pdf, bsdfPdf);
-                float3 shadowTransmittance =
-                    dot(ls.direction, hit.Ng) < 0.0 ? exp(-extinction * ls.distance) : AtmosphereTransmittance(ls.distance);
+                bool intoMedium = dot(ls.direction, hit.Ng) < 0.0 && !mat.geometryThinWalled;
+                float3 shadowTransmittance = intoMedium ? exp(-extinction * ls.distance) : AtmosphereTransmittance(ls.distance);
                 neeContribution = throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf);
                 traceShadowRay = true;
             }
         }
 
-        // Continue the path by sampling the BSDF, unless this is the last segment.
+        // Continue the path by sampling the BSDF, unless this is the last segment
         bool continuePath = false;
         bool specularReflection = false;
+        bool passThrough = false;
+        uint lobe = LOBE_NONE;
+        const float3 dirIn = dir;
+        float3 passTransmittance = float3(1.0, 1.0, 1.0);
         if (!lastSegment)
         {
             BSDFSample bs = OpenPBRSample(mat, ctx, Rand3(rng));
+            lobe = bs.lobe;
+            passThrough = bs.lobe == LOBE_DELTA_TRANSMISSION;
             continuePath = bs.lobe != LOBE_NONE;
-            if (continuePath)
+            if (passThrough)
+            {
+                // Same direction, same cone. NEE where the segment started reaches the next hit through
+                // this wall with its transmittance, so the MIS there only gains the probability of
+                // picking the lobe, which bs.pdf is.
+                throughput *= bs.weight;
+                prevBsdfPdf *= bs.pdf;
+                passTransmittance = bs.weight * bs.pdf;
+                segmentExtinction = float3(0.0, 0.0, 0.0);
+            }
+            else if (continuePath)
             {
                 specularReflection = bs.lobe == LOBE_SPECULAR_REFLECTION;
                 throughput *= bs.weight;
@@ -1021,24 +1155,33 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             }
         }
 
-        // DLSS-RR guides: the primary surface, or the first surface past the mirrors in front of it.
-        // A mirror that takes another lobe, or ends the path, ends the chain on itself.
-        if (bounce == 0)
+        // DLSS-RR guides: the primary surface, or the first surface past the mirrors and glass in front
+        // of it. A surface that takes another lobe, or ends the path, ends the chain on itself.
+        float psrFraction = 1.0;
+        bool psrEvent = continuePath && IsPsrEvent(mat, ctx, lobe, psrFraction);
+        if (fromCamera)
         {
             hitDistancePending = specularReflection;
-            if (specularReflection && IsPsrMirror(mat))
-                mirrors = StartMirrorChain(mat, wo, hit.t, cone.width, hit.curvature);
+            if (psrEvent)
+                chain = StartSpecularChain(mat, ctx, wo, dirIn, dir, specularReflection, psrFraction, cameraDistance, cone.width,
+                                           hit.curvature);
+            if (passThrough)
+                cameraTransmittance *= passTransmittance;
         }
-        else if (mirrors.active)
+        else if (chain.active)
         {
-            if (specularReflection && IsPsrMirror(mat))
+            if (passThrough)
             {
-                AddMirror(mirrors, mat, wo, cone.width, hit.curvature);
+                chain.throughput *= passTransmittance;
+            }
+            else if (psrEvent)
+            {
+                AddPsrEvent(chain, mat, ctx, wo, dirIn, dir, specularReflection, cone.width, hit.curvature);
             }
             else
             {
-                mirrors.active = false;
-                if (ReplacePrimarySurface(mirrors, mat, wo, cameraDir, guides))
+                chain.active = false;
+                if (ReplacePrimarySurface(chain, mat, wo, cameraDir, guides))
                     hitDistancePending = specularReflection;
             }
         }
@@ -1050,6 +1193,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             break;
 
         origin = OffsetRay(hit.position, hit.Ng, dir);
+        fromCamera = fromCamera && passThrough;
 
         // Russian roulette.
         if (bounce >= RR_START_BOUNCE)
@@ -1243,12 +1387,14 @@ float SurfaceRandom(uint seed)
 
 // Alpha for camera and bounce rays. Masked surfaces are cut at alphaCutoff. Blended ones use
 // stochastic transparency: the ray stops at each with probability alpha, so on average a surface
-// contributes alpha times its shading and lets 1 - alpha of what is behind it through.
+// contributes alpha times its shading and lets 1 - alpha of what is behind it through. 
 [shader("anyhit")]
 void AnyHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
     PrimitiveDesc prim = LoadPrimitive(InstanceID());
     GpuMaterial material = LoadGpuMaterial(prim.materialIndex);
+    if (material.alphaMode == ALPHA_MODE_OPAQUE)
+        return;
     float alpha = LoadBaseColourAlpha(material, prim, attr).a;
 
     bool cutOut = material.alphaMode == ALPHA_MODE_MASK ? alpha < material.alphaCutoff
@@ -1268,6 +1414,39 @@ void ShadowClosestHit(inout ShadowRayPayload payload, in BuiltInTriangleIntersec
     payload.visibility = float3(0.0, 0.0, 0.0);
 }
 
+// Cosine between the shadow ray and the candidate triangle's plane.
+float FaceCosine(PrimitiveDesc prim)
+{
+    uint3 tri = LoadTriangle(prim);
+    float3x3 linearToWorld = (float3x3)ObjectToWorld3x4();
+    float3 e1 = mul(linearToWorld, g_Vertices[tri.y].position - g_Vertices[tri.x].position);
+    float3 e2 = mul(linearToWorld, g_Vertices[tri.z].position - g_Vertices[tri.x].position);
+    float3 n = cross(e1, e2);
+    return abs(dot(n, WorldRayDirection())) * rsqrt(max(dot(n, n), 1.0e-30));
+}
+
+float3 PassThroughTransmittance(GpuMaterial material, PrimitiveDesc prim, BuiltInTriangleIntersectionAttributes attr,
+                                float3 baseColour)
+{
+    float2 uv = InterpolateTexCoord(LoadTriangle(prim), Barycentrics(attr));
+    float transmission = material.transmission;
+    if (material.transmissionTexture != INVALIDDESCRIPTORHANDLE)
+        transmission *= SampleTexture(material.transmissionTexture, uv).r;
+    float metallic = material.metallic;
+    if (material.roughMetalTexture != INVALIDDESCRIPTORHANDLE)
+        metallic *= SampleTexture(material.roughMetalTexture, uv).b;
+
+    OpenPBRBaseParams p = OpenPBRDefaults();
+    p.baseColour = baseColour;
+    p.baseMetalness = saturate(metallic);
+    p.specularRoughness = 0.0;
+    SetTransmission(p, material, transmission, true);
+    ApplyMaterialOverrides(p);
+    return ThinDeltaTransmittance(p, FaceCosine(prim));
+}
+
+// Shadow rays stop at the first surface that blocks them, multiplying in what the blended (1 - alpha)
+// and pass-through surfaces before it let through.
 [shader("anyhit")]
 void ShadowAnyHit(inout ShadowRayPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
@@ -1275,19 +1454,19 @@ void ShadowAnyHit(inout ShadowRayPayload payload, in BuiltInTriangleIntersection
     GpuMaterial material = LoadGpuMaterial(prim.materialIndex);
     float4 albedo = LoadBaseColourAlpha(material, prim, attr);
 
-    if (material.alphaMode == ALPHA_MODE_MASK)
-    {
-        if (albedo.a < material.alphaCutoff)
-            IgnoreHit();
-        AcceptHitAndEndSearch();
-    }
-
+    // Of the light reaching the surface, the share that meets it rather than passing a cut-out or blend.
+    float coverage = 1.0;
+    if (material.alphaMode == ALPHA_MODE_MASK && albedo.a < material.alphaCutoff)
+        IgnoreHit();
     if (material.alphaMode == ALPHA_MODE_BLEND)
-    {
-        payload.visibility *= (1.0 - albedo.a) * lerp(float3(1.0, 1.0, 1.0), albedo.rgb, material.transmission);
-        if (dot(payload.visibility, 0.333) > 0.001)
-            IgnoreHit();
-    }
+        coverage = albedo.a;
 
+    float3 transmitted = float3(1.0 - coverage, 1.0 - coverage, 1.0 - coverage);
+    if ((material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
+        transmitted += coverage * PassThroughTransmittance(material, prim, attr, albedo.rgb);
+
+    payload.visibility *= transmitted;
+    if (dot(payload.visibility, 0.333) > 0.001)
+        IgnoreHit();
     AcceptHitAndEndSearch();
 }

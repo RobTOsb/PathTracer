@@ -83,7 +83,9 @@ struct RenderSettings
 	// DXR 1.2 shader execution reordering: switches to the path tracing pipeline that reorders
 	// threads by material before shading each hit. Ignored where the device has no SER.
 	bool shaderExecutionReordering = true;
-	
+	bool specularMaterials = true;
+	bool transmissiveMaterials = true;
+
 	bool rayConeTextureLod = true;
 	float textureLodBias = 0.0f;
 	float rayConeBsdfSpread = 1.0f;
@@ -99,9 +101,10 @@ struct RenderSettings
 
 	DLSSMode dlssMode = DLSSMode::MaxQuality;
 	DLSSRayReconstructionPreset rrPreset = DLSSRayReconstructionPreset::PresetF;
-	// Primary surface replacement: the guides of a mirror (at most this rough, and reflecting mostly
-	// through its specular lobe) describe the surface it reflects, so RR denoises that surface's
-	// texture detail as it would on screen instead of blurring it as the mirror's lighting.
+	// Primary surface replacement: the guides of a mirror or pane of glass (at most this rough, and
+	// reflecting or transmitting mostly through its specular lobe) describe the surface it reflects or
+	// refracts, so RR denoises that surface's texture detail as it would on screen instead of blurring
+	// it as the mirror's or glass's lighting.
 	bool primarySurfaceReplacement = true;
 	float psrMaxRoughness = 0.1f;
 	// Surfaces at most this rough keep last frame's specular hit distance in frames whose path took

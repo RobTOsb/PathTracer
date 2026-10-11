@@ -8,6 +8,9 @@
 
 #include "imgui.h"
 
+#include <cfloat>
+#include <cstdio>
+
 namespace
 {
 	struct ToneMapperEntry
@@ -76,6 +79,78 @@ namespace
 		}
 	}
 
+	struct ByteString
+	{
+		char text[32];
+	};
+
+	ByteString FormatBytes(uint64_t bytes)
+	{
+		ByteString result;
+		const double mib = static_cast<double>(bytes) / (1024.0 * 1024.0);
+		if (mib >= 1024.0)
+		{
+			snprintf(result.text, sizeof(result.text), "%.2f GB", mib / 1024.0);
+		}
+		else
+		{
+			snprintf(result.text, sizeof(result.text), "%.1f MB", mib);
+		}
+		return result;
+	}
+
+	void MemorySegmentRow(const char *name, const GPUMemorySegment &segment)
+	{
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn();
+		ImGui::TextUnformatted(name);
+		ImGui::TableNextColumn();
+		ImGui::TextUnformatted(FormatBytes(segment.allocator.allocationBytes).text);
+		ImGui::TableNextColumn();
+		ImGui::TextUnformatted(FormatBytes(segment.allocator.blockBytes).text);
+		ImGui::TableNextColumn();
+		ImGui::TextUnformatted(FormatBytes(segment.usageBytes).text);
+		ImGui::TableNextColumn();
+		ImGui::TextUnformatted(FormatBytes(segment.budgetBytes).text);
+	}
+
+	void MemoryUI(const GPUMemoryStats &stats)
+	{
+		const GPUMemorySegment &local = stats.local;
+		const float fraction =
+				local.budgetBytes > 0 ? static_cast<float>(static_cast<double>(local.usageBytes) / local.budgetBytes)
+									  : 0.0f;
+		char overlay[96];
+		snprintf(overlay,
+				 sizeof(overlay),
+				 "%s / %s",
+				 FormatBytes(local.usageBytes).text,
+				 FormatBytes(local.budgetBytes).text);
+		ImGui::ProgressBar(fraction, ImVec2(-FLT_MIN, 0.0f), overlay);
+		ImGui::SetItemTooltip("This process's video memory against the budget the OS gives it, past which it "
+							  "starts paging to system memory");
+
+		constexpr ImGuiTableFlags tableFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+											   ImGuiTableFlags_SizingStretchProp;
+		if (ImGui::BeginTable("Segments", 5, tableFlags))
+		{
+			ImGui::TableSetupColumn("Segment");
+			ImGui::TableSetupColumn("In use");
+			ImGui::TableSetupColumn("Reserved");
+			ImGui::TableSetupColumn("Process");
+			ImGui::TableSetupColumn("Budget");
+			ImGui::TableHeadersRow();
+			MemorySegmentRow(stats.unifiedMemory ? "Unified" : "Video", local);
+			if (!stats.unifiedMemory)
+			{
+				MemorySegmentRow("System", stats.nonLocal);
+			}
+			ImGui::EndTable();
+		}
+		ImGui::TextDisabled("In use / reserved: the allocator's resources and the heaps holding them. "
+							"Process: everything, swap chain and pipelines included.");
+	}
+
 	void ProfileRow(RenderContext *renderContext, const char *scope)
 	{
 		if (const GPUProfileScopeStats *stats = renderContext->GetProfileScopeStats(scope))
@@ -131,6 +206,11 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 				renderContext->GetRenderHeight(),
 				renderContext->GetWindowWidth(),
 				renderContext->GetWindowHeight());
+	const GPUMemoryStats memoryStats = renderContext->GetMemoryStats();
+	ImGui::Text("VRAM %s / %s (allocator %s)",
+				FormatBytes(memoryStats.local.usageBytes).text,
+				FormatBytes(memoryStats.local.budgetBytes).text,
+				FormatBytes(memoryStats.local.allocator.blockBytes).text);
 	if (settings_.atmosphere.enabled)
 	{
 		ProfileRow(renderContext, "SkyAtmosphere");
@@ -153,7 +233,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		EnumCombo("Preset", kRRPresets, settings_.rrPreset);
 		ImGui::Checkbox("Primary surface replacement", &settings_.primarySurfaceReplacement);
 		ImGui::BeginDisabled(!settings_.primarySurfaceReplacement);
-		ImGui::SliderFloat("Mirror roughness", &settings_.psrMaxRoughness, 0.0f, 0.3f, "%.3f");
+		ImGui::SliderFloat("Mirror and glass roughness", &settings_.psrMaxRoughness, 0.0f, 0.3f, "%.3f");
 		ImGui::EndDisabled();
 		ImGui::Checkbox("Hold specular hit distance", &settings_.holdSpecularHitDistance);
 		ImGui::BeginDisabled(!settings_.holdSpecularHitDistance);
@@ -286,6 +366,12 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 			ImGui::TextDisabled("The driver does not actually reorder");
 		}
 
+		ImGui::Checkbox("Specular", &settings_.specularMaterials);
+		ImGui::SetItemTooltip("Off: no specular reflection, metals turn diffuse and glass only refracts");
+		ImGui::SameLine();
+		ImGui::Checkbox("Transmission", &settings_.transmissiveMaterials);
+		ImGui::SetItemTooltip("Off: transmissive materials turn opaque");
+
 		ImGui::Checkbox("Ray cone texture LOD", &settings_.rayConeTextureLod);
 		ImGui::SetItemTooltip("Filters textures over each ray's cone footprint instead of always sampling the top mip");
 		ImGui::BeginDisabled(!settings_.rayConeTextureLod);
@@ -325,6 +411,11 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 			}
 			ImGui::EndCombo();
 		}
+	}
+
+	if (ImGui::CollapsingHeader("Memory"))
+	{
+		MemoryUI(memoryStats);
 	}
 
 	if (ImGui::CollapsingHeader("Camera"))

@@ -225,6 +225,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		++hintBits;
 	}
 	constants.serCoherenceHintBits = hintBits;
+	constants.materialOverrides = (settings_.specularMaterials ? 0u : MATERIAL_OVERRIDE_NO_SPECULAR) |
+								  (settings_.transmissiveMaterials ? 0u : MATERIAL_OVERRIDE_NO_TRANSMISSION);
 
 	// One pixel's angle at the render resolution. DLSS reconstructs at the output resolution, so the
 	// texture footprint shrinks by render / output width, the usual upscaler mip bias.

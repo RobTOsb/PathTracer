@@ -30,7 +30,7 @@ struct FrameConstants
 	// lightCount lights in the light buffer. lightCount is 0 while the lights are switched off.
 	uint lightCount;
 	uint lightSampling; // LightSamplingMode
-	uint pad1;
+	uint materialOverrides; // MaterialOverrideFlags
 	float sunSelectProbability;
 
 	float lightTreeDiffuseOnlyAlpha;
@@ -62,13 +62,24 @@ struct FrameConstants
 	uint atmosphereVolumetricShadows; // in-scattering traces a shadow ray towards the sun
 	uint pad2;
 
-	// DLSS-RR guides (DLSS_RR permutation only). Mirrors at most psrMaxRoughness (perceptual) rough
-	// are described by the surface they reflect, primary surface replacement; negative = off.
+	// DLSS-RR guides (DLSS_RR permutation only). Mirrors and glass at most psrMaxRoughness (perceptual) rough
+	// are described by the surface they reflect or refract, primary surface replacement; negative = off.
 	// Surfaces at most specularHitDistanceHoldRoughness rough keep last frame's specular hit
 	// distance when their path took another lobe, instead of reporting none; negative = off.
 	float psrMaxRoughness;
 	float specularHitDistanceHoldRoughness;
 	float2 pad3;
+};
+
+// Debug switches applied to every material as it is loaded (FrameConstants::materialOverrides).
+UnscopedEnum
+enum MaterialOverrideFlags
+{
+	// No specular reflection: metals become diffuse in their base colour and dielectrics lose their
+	// reflection lobe. The interface keeps its IOR, so glass still refracts.
+	MATERIAL_OVERRIDE_NO_SPECULAR = 1,
+	// No transmission: transmissive materials become opaque, and shadow rays stop passing them.
+	MATERIAL_OVERRIDE_NO_TRANSMISSION = 2,
 };
 
 // How next event estimation picks one light from the light buffer.
@@ -88,6 +99,19 @@ enum GpuAlphaMode
 	ALPHA_MODE_BLEND = 2,
 };
 
+// GpuMaterial::transmissionFlags.
+UnscopedEnum
+enum GpuTransmissionFlags
+{
+	// No KHR_materials_volume thickness: both sides are outside, light crosses without refracting
+	// and without entering a medium.
+	TRANSMISSION_THIN_WALLED = 1,
+	// Thin-walled, transmissive and smooth (roughness factor 0, so every texel is too), which makes
+	// its transmission a delta lobe straight through. Shadow rays pass such surfaces in
+	// ShadowAnyHit, so their geometry is non-opaque in the BLAS.
+	TRANSMISSION_PASS_THROUGH = 2,
+};
+
 // One row per glTF material in a StructuredBuffer. Texture fields are bindless descriptor-heap
 // indices, INVALIDDESCRIPTORHANDLE when the material has no such map.
 struct GpuMaterial
@@ -102,11 +126,15 @@ struct GpuMaterial
 	uint normalTexture; // tangent-space, RGB = XYZ * 0.5 + 0.5
 	uint alphaMode; // GpuAlphaMode
 	float transmission; // KHR_materials_transmission factor
-	uint pad0;
-	uint pad1;
-	uint pad2;
+	float ior; // KHR_materials_ior
+	uint transmissionFlags; // GpuTransmissionFlags
+	uint transmissionTexture; // R multiplies transmission
 	float3 emissive; // emissiveFactor * KHR_materials_emissive_strength, linear, front faces only
 	uint emissiveTexture; // sRGB, multiplies emissive
+	// KHR_materials_volume (not thin-walled only): white light comes out as attenuationColour after
+	// attenuationDistance in the medium. FLT_MAX: no absorption.
+	float3 attenuationColour;
+	float attenuationDistance;
 };
 
 struct GpuVertex
@@ -132,7 +160,7 @@ struct TonemapConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(FrameConstants) == 448,"FrameConstants must match the HLSL cbuffer layout");
-static_assert(sizeof(GpuMaterial) == 80, "GpuMaterial must match the structured buffer stride");
+static_assert(sizeof(GpuMaterial) == 96, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 32, "TonemapConstants must fit the root constants");

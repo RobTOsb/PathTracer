@@ -21,6 +21,7 @@
 //     inside:  the viewer is inside a transmissive object, only the dielectric interface applies.
 //   If a normal map can tilt geometryNormal away from the viewer, bend it back when building
 //   the basis, otherwise an outside hit can be treated as inside.
+//   Thin-walled surfaces have no inside: face the basis towards the viewer, as for opaque ones.
 //
 // Sampling
 //   One-sample mixture over lobes, selected with probabilities from approximate albedos.
@@ -30,9 +31,15 @@
 //   Specular transmission uses spherical cap VNDF sampling (Dupuy and Benyoub 2023), because
 //   the bounded cap is only valid for reflections.
 //   Diffuse and subsurface use cosine-weighted hemisphere sampling.
+//   Thin-walled transmission mirrors the specular reflection lobe through the tangent plane, so it
+//   samples like the reflection. At zero roughness it is a delta lobe straight through
+//   (LOBE_DELTA_TRANSMISSION), which Eval and Pdf leave out; the sample's pdf is then the discrete
+//   probability of picking it, and its weight ThinDeltaTransmittance / pdf.
 //
 // Simplifications
 //   No coat, fuzz or thin film, ambient IOR is 1.
+//   Thin-walled surfaces have no diffuse or subsurface transmission, and their specular transmission
+//   is the single-interface lobe above (as in glTF), not a slab with two interfaces.
 //   Subsurface is approximated by a Lambertian lobe under the dielectric interface.
 //   transmissionColour with zero depth is applied once, on entry. With depth > 0 the renderer
 //   should convert it to medium extinction instead.
@@ -44,6 +51,7 @@ static const uint LOBE_NONE = 0;
 static const uint LOBE_DIFFUSE = 1;
 static const uint LOBE_SPECULAR_REFLECTION = 2;
 static const uint LOBE_SPECULAR_TRANSMISSION = 4;
+static const uint LOBE_DELTA_TRANSMISSION = 8;
 
 struct OpenPBRBaseParams
 {
@@ -65,6 +73,7 @@ struct OpenPBRBaseParams
     float subsurfaceWeight;
     float3 subsurfaceColour;
 
+    bool geometryThinWalled;
     float3 geometryTangent;
     float3 geometryBitangent;
     float3 geometryNormal;
@@ -81,6 +90,7 @@ struct BSDFSample
 struct OpenPBRContext
 {
     bool inside;
+    bool deltaTransmission; // thin-walled and smooth, see LOBE_DELTA_TRANSMISSION
     float3 wo;
     float2 alpha;
     float eta;
@@ -116,6 +126,12 @@ float3 ToWorld(OpenPBRBaseParams p, float3 v)
 float3 TransmissionTint(OpenPBRBaseParams p)
 {
     return p.transmissionDepth > 0.0 ? float3(1.0, 1.0, 1.0) : p.transmissionColour;
+}
+
+// A thin wall that transmits as a delta lobe.
+bool HasDeltaTransmission(OpenPBRBaseParams p)
+{
+    return p.geometryThinWalled && p.specularRoughness <= 0.0 && p.transmissionWeight > 0.0;
 }
 
 // GGX microfacet model
@@ -318,11 +334,34 @@ float EvalPdfGGXTransmission(float3 wi, OpenPBRContext c, out float pdf)
     return abs(wiDotH * woDotH) / abs(wi.z * wo.z) * (1.0 - F) * GGXG2(wi, c.lambdaO, c.alpha) * ndf * invDenom2;
 }
 
+// Thin-walled transmission: the reflection lobe at the mirror image of wi through the tangent plane,
+// with 1 - F in place of F. pdf is that of sampling the reflection lobe towards the mirror image.
+float EvalPdfGGXThinTransmission(float3 wi, OpenPBRContext c, out float pdf)
+{
+    float3 wr = float3(wi.xy, -wi.z);
+    float3 wo = c.wo;
+    float3 h = normalize(wr + wo);
+    float ndf = GGXD(h, c.alpha);
+    pdf = ndf * c.reflPdfScale;
+    float F = FresnelDielectric(saturate(dot(wo, h)), c.eta);
+    return (1.0 - F) * ndf * GGXG2(wr, c.lambdaO, c.alpha) / (4.0 * wr.z * wo.z);
+}
+
+// What a smooth thin wall lets through straight along -wo, cosTheta from its normal: the delta
+// lobe's integral, so its sample weight times the probability of picking it.
+float3 ThinDeltaTransmittance(OpenPBRBaseParams p, float cosTheta)
+{
+    float eta = ModulatedIORRatio(p.specularIor, p.specularWeight);
+    float F = FresnelDielectric(saturate(cosTheta), eta);
+    return (1.0 - p.baseMetalness) * p.transmissionWeight * (1.0 - F) * TransmissionTint(p);
+}
+
 OpenPBRContext OpenPBRSetup(OpenPBRBaseParams p, float3 woWorld)
 {
     float3 wo = ToLocal(p, woWorld);
     OpenPBRContext c;
-    c.inside = wo.z < 0.0;
+    c.inside = wo.z < 0.0 && !p.geometryThinWalled;
+    c.deltaTransmission = p.geometryThinWalled && p.specularRoughness <= 0.0;
     c.wo = c.inside ? -wo : wo;
     c.alpha = GGXAlpha(p.specularRoughness, p.specularRoughnessAnisotropy);
 
@@ -383,8 +422,11 @@ float3 OpenPBREvalPdfLocal(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out
 
     if (wi.z < 0.0)
     {
+        if (c.deltaTransmission)
+            return float3(0.0, 0.0, 0.0);
         float transmissionPdf;
-        float fT = EvalPdfGGXTransmission(wi, c, transmissionPdf) * abs(wi.z);
+        float fT = (p.geometryThinWalled ? EvalPdfGGXThinTransmission(wi, c, transmissionPdf)
+                                        : EvalPdfGGXTransmission(wi, c, transmissionPdf)) * abs(wi.z);
         pdf = c.probSpecT * transmissionPdf;
         if (c.inside)
             return fT.xxx;
@@ -438,6 +480,23 @@ BSDFSample OpenPBRSample(OpenPBRBaseParams p, OpenPBRContext c, float3 u)
         if (wi.z <= 0.0)
             return s;
         lobe = LOBE_SPECULAR_REFLECTION;
+    }
+    else if (u.x < c.probSpecR + c.probSpecT && c.deltaTransmission)
+    {
+        // Straight on, which leaves the local frame alone. Never inside, being thin-walled.
+        s.wi = ToWorld(p, -wo);
+        s.pdf = c.probSpecT;
+        s.weight = ThinDeltaTransmittance(p, wo.z) / c.probSpecT;
+        s.lobe = LOBE_DELTA_TRANSMISSION;
+        return s;
+    }
+    else if (u.x < c.probSpecR + c.probSpecT && p.geometryThinWalled)
+    {
+        wi = SampleGGXReflectionBounded(wo, c.alpha, c.boundedB, u.yz);
+        if (wi.z <= 0.0)
+            return s;
+        wi.z = -wi.z;
+        lobe = LOBE_SPECULAR_TRANSMISSION;
     }
     else if (u.x < c.probSpecR + c.probSpecT)
     {

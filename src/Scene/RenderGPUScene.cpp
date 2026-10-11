@@ -11,6 +11,7 @@
 #include <bit>
 #include <cfloat>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <execution>
 #include <numeric>
@@ -618,8 +619,8 @@ void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene,
 {
 	materials.clear();
 	materials.reserve(scene.GetMaterialCount() + 1);
-	materialAlphaModes_.clear();
-	materialAlphaModes_.reserve(scene.GetMaterialCount() + 1);
+	materialGeometry_.clear();
+	materialGeometry_.reserve(scene.GetMaterialCount() + 1);
 
 	for (size_t i = 0; i < scene.GetMaterialCount(); ++i)
 	{
@@ -634,6 +635,23 @@ void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene,
 		gpu.alphaCutoff = material.GetAlphaCutoff();
 		gpu.alphaMode = static_cast<uint32_t>(material.GetAlphaMode());
 		gpu.transmission = material.GetTransmission();
+		gpu.ior = material.GetIor();
+		gpu.transmissionTexture = gpu.transmission > 0.0f ? UploadTexture(material.GetTransmissionTexture(),
+																		  Format::R8G8B8A8_UNORM,
+																		  "Material_Transmission",
+																		  batch)
+														  : INVALIDDESCRIPTORHANDLE;
+		if (material.IsThinWalled())
+		{
+			gpu.transmissionFlags |= TRANSMISSION_THIN_WALLED;
+			if (gpu.transmission > 0.0f && gpu.roughness <= 0.0f)
+				gpu.transmissionFlags |= TRANSMISSION_PASS_THROUGH;
+		}
+		const float *attenuationColour = material.GetAttenuationColour();
+		gpu.attenuationColour = float3(attenuationColour[0], attenuationColour[1], attenuationColour[2]);
+		gpu.attenuationDistance = std::isfinite(material.GetAttenuationDistance()) && material.GetAttenuationDistance() > 0.0f
+										  ? material.GetAttenuationDistance()
+										  : FLT_MAX;
 		gpu.albedoTexture =
 				UploadTexture(material.GetAlbedoTexture(), Format::R8G8B8A8_UNORM_SRGB, "Material_Albedo", batch);
 		gpu.roughMetalTexture =
@@ -653,7 +671,7 @@ void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene,
 													  batch)
 									  : INVALIDDESCRIPTORHANDLE;
 		materials.push_back(gpu);
-		materialAlphaModes_.push_back(gpu.alphaMode);
+		materialGeometry_.push_back(MaterialGeometryFlags(gpu));
 	}
 
 	// Default material (glTF spec defaults would be metallic 1, which reads badly on untextured
@@ -669,8 +687,12 @@ void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene,
 	fallback.emissiveTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.alphaCutoff = 0.5f;
 	fallback.alphaMode = ALPHA_MODE_OPAQUE;
+	fallback.ior = 1.5f;
+	fallback.transmissionTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.attenuationColour = float3(1.0f, 1.0f, 1.0f);
+	fallback.attenuationDistance = FLT_MAX;
 	materials.push_back(fallback);
-	materialAlphaModes_.push_back(fallback.alphaMode);
+	materialGeometry_.push_back(MaterialGeometryFlags(fallback));
 
 	materialBuffer_ = UploadStream(materials.data(),
 								   materials.size() * sizeof(GpuMaterial),
@@ -841,12 +863,9 @@ void RenderGPUScene::BuildAccelerationStructures()
 		geometry.indexBuffer = indexBuffer;
 		geometry.indexBufferOffset = static_cast<uint64_t>(desc.indexOffset) * sizeof(uint32_t);
 		geometry.indexCount = desc.indexCount;
-		// Only masked and blended materials need the any-hit shaders; opaque geometry skips them. The
-		// shadow any-hit multiplies in each blended surface's transmittance, so a duplicate call for the
-		// same triangle would darken the shadow.
-		const uint32_t alphaMode = materialAlphaModes_[desc.materialIndex];
-		geometry.isOpaque = alphaMode == ALPHA_MODE_OPAQUE;
-		geometry.noDuplicateAnyHit = alphaMode == ALPHA_MODE_BLEND;
+		const MaterialGeometryFlags &flags = materialGeometry_[desc.materialIndex];
+		geometry.isOpaque = flags.isOpaque;
+		geometry.noDuplicateAnyHit = flags.noDuplicateAnyHit;
 
 		blases_[i] = renderContext_->CreateBLAS(geometry);
 		renderContext_->BuildAccelerationStructure(blases_[i]);

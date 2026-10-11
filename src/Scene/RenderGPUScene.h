@@ -16,6 +16,19 @@ namespace Scene
 	class Texture;
 }
 
+struct MaterialGeometryFlags
+{
+	explicit MaterialGeometryFlags(const GpuMaterial &material)
+	{
+		const bool passThrough = (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0;
+		isOpaque = material.alphaMode == ALPHA_MODE_OPAQUE && !passThrough;
+		noDuplicateAnyHit = material.alphaMode == ALPHA_MODE_BLEND || passThrough;
+	}
+
+	bool isOpaque;
+	bool noDuplicateAnyHit;
+};
+
 class RenderGPUScene final : public Scene::GPUScene
 {
 public:
@@ -78,7 +91,7 @@ public:
 	// Rows in the material buffer, including the default material at the end.
 	uint32_t GetMaterialCount() const
 	{
-		return static_cast<uint32_t>(materialAlphaModes_.size());
+		return static_cast<uint32_t>(materialGeometry_.size());
 	}
 
 	ResourceHandle GetPrimitiveBuffer() const
@@ -231,7 +244,8 @@ private:
 	float lightTreeAverageDepth_ = 0.0f;
 
 	std::vector<ResourceHandle> textures_;
-	std::vector<uint32_t> materialAlphaModes_; // GpuAlphaMode per GpuMaterial row; decides each BLAS's geometry flags
+	// Per GpuMaterial row; decides the geometry flags of each BLAS that uses it.
+	std::vector<MaterialGeometryFlags> materialGeometry_;
 	uint64_t pendingUploadBytes_ = 0;
 	double mipBuildMs_ = 0.0; // CPU time spent filtering texture mips during the last BuildGPUScene
 
