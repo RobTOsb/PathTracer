@@ -775,36 +775,13 @@ void ReflectanceGuides(OpenPBRBaseParams p, float3 wo, inout PrimaryGuides g)
     g.diffuseAlbedo = (1.0 - M) * (1.0 - p.transmissionWeight) * lerp(baseColour, p.subsurfaceColour, p.subsurfaceWeight);
 }
 
-// The specular hit distance of a guide surface before its path has sampled a lobe: none (0), or
-// for smooth surfaces with the hold on, "keep last frame's" (negative).
 float InitialSpecularHitDistance(float roughness)
 {
     return roughness <= g_Frame.specularHitDistanceHoldRoughness ? -1.0 : 0.0;
 }
 
-// Primary surface replacement (PSR), after "Rendering Perfect Reflections and Refractions in
-// Path-Traced Games" (NVIDIA 2020) and Bevy Solari's DLSS-RR guides. When the camera sees a mirror
-// or a pane of glass, the guides describe the first surface past the chain of smooth specular events
-// in front of it, placed in the chain's virtual space: along the camera ray at the full path length,
-// with its normal taken through every event on the way. RR then denoises the reflected or refracted
-// surface's texture detail as it would on screen, instead of blurring it as the mirror's or glass's
-// lighting. The scene is static, so a virtual point's motion is the camera's alone and the usual
-// motion vector and depth of guides.position are exact for flat mirrors. Refraction does not map the
-// scene rigidly (the apparent depth changes with the view angle), so behind glass they are close
-// rather than exact. Curved mirrors and glass move their virtual image differently, so those are left
-// alone.
-
-// Mirrors and glass send at least this share of their reflectance through the specular lobe the
-// path takes, reflection for mirrors and transmission for glass.
 static const float PSR_MIN_SPECULAR_FRACTION = 0.9;
-
-// How far a virtual image may shift between neighbouring pixels, as a fraction of its virtual
-// distance, before the chain counts as too curved to replace.
 static const float PSR_MAX_VIRTUAL_DEPTH_JITTER = 0.002;
-
-// Shares of the base's reflectance that leave through its specular reflection (x) and specular
-// transmission (y) lobes. Taken head on, so the decision does not change with the view angle across
-// a surface.
 float2 SpecularFractions(OpenPBRBaseParams p)
 {
     float M = p.baseMetalness;
