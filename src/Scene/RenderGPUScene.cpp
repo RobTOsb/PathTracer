@@ -3,6 +3,7 @@
 #include "GLTFScene.h"
 #include "LightTreeBuilder.h"
 #include "PathTracerInterop.h"
+#include "SceneCache.h"
 
 #include "fmtlog.h"
 
@@ -14,7 +15,10 @@
 #include <cmath>
 #include <cstring>
 #include <execution>
+#include <future>
 #include <numeric>
+#include <stdexcept>
+#include <unordered_map>
 
 
 namespace
@@ -184,6 +188,36 @@ namespace
 		return sum * (1.0f / (kSplits * kSplits));
 	}
 
+	template<typename Remap>
+	void RemapTextures(std::vector<GpuMaterial> &materials, std::vector<GpuLight> &lights, const Remap &remap)
+	{
+		auto apply = [&](uint32_t &texture)
+		{
+			if (texture != INVALIDDESCRIPTORHANDLE)
+			{
+				texture = remap(texture);
+			}
+		};
+		for (GpuMaterial &material: materials)
+		{
+			for (uint32_t *texture: { &material.albedoTexture,
+									  &material.roughMetalTexture,
+									  &material.normalTexture,
+									  &material.transmissionTexture,
+									  &material.emissiveTexture })
+			{
+				apply(*texture);
+			}
+		}
+		// MakeAreaLight keeps the texture in radiance.w, UINT_MAX when untextured.
+		for (GpuLight &light: lights)
+		{
+			uint32_t texture = std::bit_cast<uint32_t>(light.radiance.w);
+			apply(texture);
+			light.radiance.w = std::bit_cast<float>(texture);
+		}
+	}
+
 	template<typename T>
 	void WriteLightBuffer(RenderContext *renderContext,
 						  ResourceHandle &buffer,
@@ -314,6 +348,11 @@ void RenderGPUScene::UpdateLights(const LightTreeBuildSettings &settings)
 
 void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
 {
+	BuildGPUScene(scene, {});
+}
+
+void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene, const std::filesystem::path &cachePath)
+{
 	meshDescs.clear();
 	primitiveDescs.clear();
 	vertices_.clear();
@@ -403,14 +442,19 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
 	FillInstances(scene);
 	ComputeBounds(scene);
 
+	SceneCacheWriter writer;
+	cacheWriter_ = !cachePath.empty() && writer.Open(cachePath) ? &writer : nullptr;
+
 	UploadBatchHandle batch = renderContext_->BeginUpload();
 	pendingUploadBytes_ = 0;
 	mipBuildMs_ = 0.0;
 
 	UploadStreams(batch);
 	std::vector<GpuMaterial> materials;
-	UploadMaterials(scene, batch, materials);
-	CollectEmitters(scene, materials, batch);
+	BuildMaterials(scene, batch, materials);
+	UploadMaterials(materials, batch);
+	std::vector<uint32_t> emitters = CollectEmitters(scene, materials);
+	UploadEmitters(emitters, batch);
 
 	renderContext_->EndUpload(batch);
 
@@ -423,12 +467,216 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
 		 textures_.size());
 	logi("GPUScene: built the texture mip chains in {:.0f} ms", mipBuildMs_);
 
+	if (cacheWriter_ != nullptr)
+	{
+		cacheWriter_ = nullptr;
+		WriteSceneCache(writer, materials, emitters);
+	}
+
+	ReleaseStaging();
+}
+
+void RenderGPUScene::ReleaseStaging()
+{
 	// The GPU has its own copies now.
 	std::vector<GpuVertex>().swap(vertices_);
 	for (std::vector<uint32_t> *stream: { &indices_, &meshletData_, &meshletVertices_, &meshletTriangles_ })
 	{
 		std::vector<uint32_t>().swap(*stream);
 	}
+}
+
+template<typename Archive>
+void RenderGPUScene::SerialiseTables(Archive &archive,
+									 std::vector<GpuMaterial> &materials,
+									 std::vector<uint32_t> &emitters,
+									 std::vector<GpuLight> &lights)
+{
+	archive.Table(meshDescs);
+	archive.Table(primitiveDescs);
+	archive.Table(instances);
+	archive.Table(vertices_);
+	archive.Table(indices_);
+	archive.Table(meshletData_);
+	archive.Table(meshletVertices_);
+	archive.Table(meshletTriangles_);
+	archive.Table(materials);
+	archive.Table(emitters);
+	archive.Table(lights);
+	archive.Table(emissiveFluxScales_);
+	archive.Value(boundsMin_);
+	archive.Value(boundsMax_);
+}
+
+void RenderGPUScene::WriteSceneCache(SceneCacheWriter &writer,
+									 const std::vector<GpuMaterial> &materials,
+									 std::vector<uint32_t> &emitters)
+{
+	// The file refers to textures by their order in it, which is the order of textures_.
+	std::unordered_map<uint32_t, uint32_t> slotOfDescriptor;
+	for (uint32_t i = 0; i < textures_.size(); ++i)
+	{
+		slotOfDescriptor[renderContext_->GetResourceViewInfo(textures_[i]).descriptorIndex] = i;
+	}
+	std::vector<GpuMaterial> cachedMaterials = materials;
+	std::vector<GpuLight> cachedLights = emissiveLights_;
+	RemapTextures(cachedMaterials, cachedLights, [&](uint32_t descriptor) { return slotOfDescriptor.at(descriptor); });
+
+	SerialiseTables(writer, cachedMaterials, emitters, cachedLights);
+	if (writer.Finish())
+	{
+		logi("GPUScene: wrote the scene cache '{}'", writer.GetPath().string());
+	}
+}
+
+bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, uint32_t textureCount) const
+{
+	auto validTexture = [&](uint32_t texture) { return texture == INVALIDDESCRIPTORHANDLE || texture < textureCount; };
+	for (const GpuMaterial &material: materials)
+	{
+		for (uint32_t texture: { material.albedoTexture,
+								 material.roughMetalTexture,
+								 material.normalTexture,
+								 material.transmissionTexture,
+								 material.emissiveTexture })
+		{
+			if (!validTexture(texture))
+			{
+				return false;
+			}
+		}
+	}
+	for (const GpuLight &light: emissiveLights_)
+	{
+		if (!validTexture(std::bit_cast<uint32_t>(light.radiance.w)))
+		{
+			return false;
+		}
+	}
+	for (const MeshGPUDesc &mesh: meshDescs)
+	{
+		if (static_cast<uint64_t>(mesh.primitiveOffset) + mesh.primitiveCount > primitiveDescs.size())
+		{
+			return false;
+		}
+	}
+	for (const PrimitiveGPUDesc &primitive: primitiveDescs)
+	{
+		if (primitive.materialIndex >= materials.size() ||
+			static_cast<uint64_t>(primitive.vertexOffset) + primitive.vertexCount > vertices_.size() ||
+			static_cast<uint64_t>(primitive.indexOffset) + primitive.indexCount > indices_.size())
+		{
+			return false;
+		}
+	}
+	for (const InstanceGPU &instance: instances)
+	{
+		if (instance.meshIndex >= meshDescs.size())
+		{
+			return false;
+		}
+	}
+	return !materials.empty() && emissiveLights_.size() == emissiveFluxScales_.size();
+}
+
+bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
+{
+	SceneCacheReader reader;
+	if (!reader.Open(cachePath))
+	{
+		return false;
+	}
+
+	std::vector<GpuMaterial> materials;
+	std::vector<uint32_t> emitters;
+	SerialiseTables(reader, materials, emitters, emissiveLights_);
+	const std::vector<SceneCacheTexture> &cachedTextures = reader.GetTextures();
+	if (!reader.EndTables() || !ValidateTables(materials, static_cast<uint32_t>(cachedTextures.size())))
+	{
+		logw("GPUScene: '{}' is damaged", cachePath.string());
+		meshDescs.clear();
+		primitiveDescs.clear();
+		instances.clear();
+		emissiveLights_.clear();
+		emissiveFluxScales_.clear();
+		ReleaseStaging();
+		return false;
+	}
+
+	UploadBatchHandle batch = renderContext_->BeginUpload();
+	pendingUploadBytes_ = 0;
+
+	UploadStreams(batch);
+
+	// The next texture is read from disk while the current one uploads.
+	std::vector<uint8_t> pixels;
+	std::vector<uint8_t> nextPixels;
+	auto readTexture = [&](uint32_t index)
+	{
+		return std::async(std::launch::async,
+						  [&reader, &nextPixels, index] { return reader.ReadTexture(index, nextPixels); });
+	};
+	std::future<bool> pendingRead;
+	if (!cachedTextures.empty())
+	{
+		pendingRead = readTexture(0);
+	}
+	std::vector<uint32_t> descriptorOfSlot;
+	descriptorOfSlot.reserve(cachedTextures.size());
+	for (uint32_t i = 0; i < cachedTextures.size(); ++i)
+	{
+		if (!pendingRead.get())
+		{
+			// The textures before this one are already on the GPU, so there is no falling back.
+			throw std::runtime_error("failed to read a texture from '" + cachePath.string() +
+									 "', delete it to rebuild it from the glTF");
+		}
+		pixels.swap(nextPixels);
+		if (i + 1 < cachedTextures.size())
+		{
+			pendingRead = readTexture(i + 1);
+		}
+
+		const SceneCacheTexture &cached = cachedTextures[i];
+		TextureDesc desc = {};
+		desc.width = cached.width;
+		desc.height = cached.height;
+		desc.format = cached.srgb ? Format::R8G8B8A8_UNORM_SRGB : Format::R8G8B8A8_UNORM;
+		desc.mipLevels = cached.mipLevels;
+		desc.debugName = "Material_Texture";
+
+		std::vector<TextureMipData> mips(cached.mipLevels);
+		uint64_t offset = 0;
+		for (uint32_t m = 0; m < mips.size(); ++m)
+		{
+			mips[m].pixels = pixels.data() + offset;
+			mips[m].rowPitch = std::max(cached.width >> m, 1u) * 4;
+			mips[m].rowCount = std::max(cached.height >> m, 1u);
+			offset += SceneCacheMipBytes(cached.width, cached.height, m);
+		}
+		descriptorOfSlot.push_back(UploadTextureMips(desc, mips, batch));
+	}
+
+	RemapTextures(materials, emissiveLights_, [&](uint32_t slot) { return descriptorOfSlot[slot]; });
+	UploadMaterials(materials, batch);
+	UploadEmitters(emitters, batch);
+	lightTreeBuilt_ = false;
+
+	renderContext_->EndUpload(batch);
+
+	logi("GPUScene: loaded '{}': {} mesh(es), {} primitive(s), {} instance(s), {} vertices, {} triangles, "
+		 "{} texture(s), {} emissive triangle light(s)",
+		 cachePath.string(),
+		 meshDescs.size(),
+		 primitiveDescs.size(),
+		 instances.size(),
+		 vertices_.size(),
+		 indices_.size() / 3,
+		 textures_.size(),
+		 emissiveLights_.size());
+
+	ReleaseStaging();
+	return true;
 }
 
 void RenderGPUScene::FillInstances(const Scene::GLTFScene &scene)
@@ -586,15 +834,30 @@ uint32_t RenderGPUScene::UploadTexture(const Scene::Texture &texture,
 	mipBuildMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - mipStart).count();
 
 	std::vector<TextureMipData> mips(levels.size() + 1);
-	uint64_t sizeInBytes = 0;
 	for (uint32_t m = 0; m < mips.size(); ++m)
 	{
 		mips[m].pixels = m == 0 ? texture.GetPixels() : levels[m - 1].data();
 		mips[m].rowPitch = std::max(desc.width >> m, 1u) * 4;
 		mips[m].rowCount = std::max(desc.height >> m, 1u);
-		sizeInBytes += static_cast<uint64_t>(mips[m].rowPitch) * mips[m].rowCount;
 	}
 	desc.mipLevels = static_cast<uint>(mips.size());
+
+	if (cacheWriter_ != nullptr)
+	{
+		cacheWriter_->AddTexture(desc.width, desc.height, format == Format::R8G8B8A8_UNORM_SRGB, mips);
+	}
+	return UploadTextureMips(desc, mips, batch);
+}
+
+uint32_t RenderGPUScene::UploadTextureMips(const TextureDesc &desc,
+										   std::span<const TextureMipData> mips,
+										   UploadBatchHandle &batch)
+{
+	uint64_t sizeInBytes = 0;
+	for (const TextureMipData &mip: mips)
+	{
+		sizeInBytes += static_cast<uint64_t>(mip.rowPitch) * mip.rowCount;
+	}
 
 	if (pendingUploadBytes_ > 0 && pendingUploadBytes_ + sizeInBytes > kMaxPendingUploadBytes)
 	{
@@ -604,23 +867,18 @@ uint32_t RenderGPUScene::UploadTexture(const Scene::Texture &texture,
 	}
 
 	// The pixels go into a staging buffer here, so the levels can go out of scope after.
-	const ResourceHandle gpuTexture = renderContext_->CreateTexture(desc,
-																	ResourceViewType::ShaderResource,
-																	std::span<const TextureMipData>(mips),
-																	batch);
+	const ResourceHandle gpuTexture = renderContext_->CreateTexture(desc, ResourceViewType::ShaderResource, mips, batch);
 	pendingUploadBytes_ += sizeInBytes;
 	textures_.push_back(gpuTexture);
 	return renderContext_->GetResourceViewInfo(gpuTexture).descriptorIndex;
 }
 
-void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene,
-									 UploadBatchHandle &batch,
-									 std::vector<GpuMaterial> &materials)
+void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
+									UploadBatchHandle &batch,
+									std::vector<GpuMaterial> &materials)
 {
 	materials.clear();
 	materials.reserve(scene.GetMaterialCount() + 1);
-	materialGeometry_.clear();
-	materialGeometry_.reserve(scene.GetMaterialCount() + 1);
 
 	for (size_t i = 0; i < scene.GetMaterialCount(); ++i)
 	{
@@ -671,7 +929,6 @@ void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene,
 													  batch)
 									  : INVALIDDESCRIPTORHANDLE;
 		materials.push_back(gpu);
-		materialGeometry_.push_back(MaterialGeometryFlags(gpu));
 	}
 
 	// Default material (glTF spec defaults would be metallic 1, which reads badly on untextured
@@ -692,7 +949,16 @@ void RenderGPUScene::UploadMaterials(const Scene::GLTFScene &scene,
 	fallback.attenuationColour = float3(1.0f, 1.0f, 1.0f);
 	fallback.attenuationDistance = FLT_MAX;
 	materials.push_back(fallback);
-	materialGeometry_.push_back(MaterialGeometryFlags(fallback));
+}
+
+void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &materials, UploadBatchHandle batch)
+{
+	materialGeometry_.clear();
+	materialGeometry_.reserve(materials.size());
+	for (const GpuMaterial &material: materials)
+	{
+		materialGeometry_.push_back(MaterialGeometryFlags(material));
+	}
 
 	materialBuffer_ = UploadStream(materials.data(),
 								   materials.size() * sizeof(GpuMaterial),
@@ -734,9 +1000,8 @@ std::vector<RenderGPUScene::TLASInstanceRef> RenderGPUScene::EnumerateTLASInstan
 	return refs;
 }
 
-void RenderGPUScene::CollectEmitters(const Scene::GLTFScene &scene,
-									 const std::vector<GpuMaterial> &materials,
-									 UploadBatchHandle batch)
+std::vector<uint32_t> RenderGPUScene::CollectEmitters(const Scene::GLTFScene &scene,
+													  const std::vector<GpuMaterial> &materials)
 {
 	emissiveLights_.clear();
 	emissiveFluxScales_.clear();
@@ -817,12 +1082,6 @@ void RenderGPUScene::CollectEmitters(const Scene::GLTFScene &scene,
 		}
 	}
 
-	emitterBuffer_ = UploadStream(emitters.data(),
-								  emitters.size() * sizeof(uint32_t),
-								  sizeof(uint32_t),
-								  "Scene_Emitters",
-								  batch);
-
 	lightTreeBuilt_ = false;
 	if (emissiveInstances > 0)
 	{
@@ -830,6 +1089,16 @@ void RenderGPUScene::CollectEmitters(const Scene::GLTFScene &scene,
 			 emissiveLights_.size(),
 			 emissiveInstances);
 	}
+	return emitters;
+}
+
+void RenderGPUScene::UploadEmitters(const std::vector<uint32_t> &emitters, UploadBatchHandle batch)
+{
+	emitterBuffer_ = UploadStream(emitters.data(),
+								  emitters.size() * sizeof(uint32_t),
+								  sizeof(uint32_t),
+								  "Scene_Emitters",
+								  batch);
 }
 
 void RenderGPUScene::BuildAccelerationStructures()

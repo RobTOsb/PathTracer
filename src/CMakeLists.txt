@@ -4,6 +4,7 @@ add_executable(PathTracer
     main.cpp
     DLSSCommon.cpp
     Scene/RenderGPUScene.cpp
+    Scene/SceneCache.cpp
     Scene/LightTreeBuilder.cpp
     Renderer/PathTracerPass.cpp
     Renderer/SkyAtmospherePass.cpp

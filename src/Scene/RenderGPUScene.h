@@ -8,6 +8,7 @@
 #include "PathTracerInterop.h"
 #include "ShaderInterop.h"
 
+#include <filesystem>
 #include <span>
 #include <vector>
 
@@ -15,6 +16,8 @@ namespace Scene
 {
 	class Texture;
 }
+
+class SceneCacheWriter;
 
 struct MaterialGeometryFlags
 {
@@ -39,6 +42,8 @@ public:
 	RenderGPUScene &operator=(const RenderGPUScene &) = delete;
 
 	void BuildGPUScene(const Scene::GLTFScene &scene) override;
+	void BuildGPUScene(const Scene::GLTFScene &scene, const std::filesystem::path &cachePath);
+	bool LoadGPUScene(const std::filesystem::path &cachePath);
 
 	// Refreshes the per-instance transforms in the instance table. The TLAS is built once at start
 	// up and is not refitted here yet.
@@ -180,14 +185,30 @@ private:
 	std::vector<TLASInstanceRef> EnumerateTLASInstances() const;
 
 	void UploadStreams(UploadBatchHandle batch);
-	void UploadMaterials(const Scene::GLTFScene &scene, UploadBatchHandle &batch, std::vector<GpuMaterial> &materials);
-	void CollectEmitters(const Scene::GLTFScene &scene,
-						 const std::vector<GpuMaterial> &materials,
-						 UploadBatchHandle batch);
+	void BuildMaterials(const Scene::GLTFScene &scene, UploadBatchHandle &batch, std::vector<GpuMaterial> &materials);
+	void UploadMaterials(const std::vector<GpuMaterial> &materials, UploadBatchHandle batch);
+	// Fills the emissive lights and returns the emitter buffer's contents.
+	std::vector<uint32_t> CollectEmitters(const Scene::GLTFScene &scene, const std::vector<GpuMaterial> &materials);
+	void UploadEmitters(const std::vector<uint32_t> &emitters, UploadBatchHandle batch);
 	uint32_t UploadTexture(const Scene::Texture &texture,
 						   Format format,
 						   const char *debugName,
 						   UploadBatchHandle &batch);
+	// Returns the texture's bindless index.
+	uint32_t UploadTextureMips(const TextureDesc &desc, std::span<const TextureMipData> mips, UploadBatchHandle &batch);
+
+	// Writes (SceneCacheWriter) or reads (SceneCacheReader) everything but the textures.
+	template<typename Archive>
+	void SerialiseTables(Archive &archive,
+						 std::vector<GpuMaterial> &materials,
+						 std::vector<uint32_t> &emitters,
+						 std::vector<GpuLight> &lights);
+	void WriteSceneCache(SceneCacheWriter &writer,
+						 const std::vector<GpuMaterial> &materials,
+						 std::vector<uint32_t> &emitters);
+	// Checks the indices between the tables loaded from a cache.
+	bool ValidateTables(const std::vector<GpuMaterial> &materials, uint32_t textureCount) const;
+	void ReleaseStaging();
 	ResourceHandle UploadStream(
 			const void *data, uint64_t sizeInBytes, uint32_t stride, const char *debugName, UploadBatchHandle batch);
 	void ComputeBounds(const Scene::GLTFScene &scene);
@@ -247,6 +268,7 @@ private:
 	// Per GpuMaterial row; decides the geometry flags of each BLAS that uses it.
 	std::vector<MaterialGeometryFlags> materialGeometry_;
 	uint64_t pendingUploadBytes_ = 0;
+	SceneCacheWriter *cacheWriter_ = nullptr; // during a BuildGPUScene that writes a cache
 	double mipBuildMs_ = 0.0; // CPU time spent filtering texture mips during the last BuildGPUScene
 
 	std::vector<AccelerationStructureHandle> blases_; // one per primitive desc, invalid for skipped primitives

@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <filesystem>
 #include <math.h>
 #include <memory>
 #include <stdio.h>
@@ -180,6 +181,61 @@ void BuildPasses(RenderContext *renderContext,
 	passes.push_back(std::make_unique<ImGuiPass>(settings, camera, ngx.IsRayReconstructionSupported(), gpuScene));
 }
 
+// A glTF loads from the .scene file beside it when that is at least as new, and otherwise is
+// imported and written to it for next time. A .scene path loads only that file.
+bool LoadScene(const std::filesystem::path &scenePath, RenderGPUScene &gpuScene)
+{
+	const auto start = std::chrono::steady_clock::now();
+	auto logLoadTime = [&]
+	{
+		logi("Loaded the scene in {:.2f} s",
+			 std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count());
+	};
+
+	if (scenePath.extension() == ".scene")
+	{
+		logi("Loading '{}'", scenePath.string());
+		fmtlog::poll();
+		if (!gpuScene.LoadGPUScene(scenePath))
+		{
+			loge("Failed to load scene '{}'", scenePath.string());
+			return false;
+		}
+		logLoadTime();
+		return true;
+	}
+
+	std::filesystem::path cachePath = scenePath;
+	cachePath.replace_extension(".scene");
+	std::error_code cacheError;
+	std::error_code sceneError;
+	const auto cacheTime = std::filesystem::last_write_time(cachePath, cacheError);
+	const auto sceneTime = std::filesystem::last_write_time(scenePath, sceneError);
+	if (!cacheError && !sceneError && cacheTime >= sceneTime)
+	{
+		logi("Loading '{}'", cachePath.string());
+		fmtlog::poll();
+		if (gpuScene.LoadGPUScene(cachePath))
+		{
+			logLoadTime();
+			return true;
+		}
+		logi("Rebuilding '{}' from the glTF", cachePath.string());
+	}
+
+	Scene::GLTFScene scene;
+	logi("Loading '{}'", scenePath.string());
+	fmtlog::poll();
+	if (Scene::GLTFScene::MakeGLTFScene(scenePath.string().c_str(), scene) != Scene::SCENE_OK)
+	{
+		loge("Failed to load scene '{}'", scenePath.string());
+		return false;
+	}
+	gpuScene.BuildGPUScene(scene, cachePath);
+	logLoadTime();
+	return true;
+}
+
 int Run(const char *scenePath)
 {
 	Window window(WindowDesc{ "PathTracer", 1920, 1080, true });
@@ -189,17 +245,11 @@ int Run(const char *scenePath)
 	renderContext->CreatePerFrameResources();
 	renderContext->InitialiseImgui(window.GetNativeWindow());
 
-	Scene::GLTFScene scene;
-	logi("Loading '{}'", scenePath);
-	fmtlog::poll();
-	if (Scene::GLTFScene::MakeGLTFScene(scenePath, scene) != Scene::SCENE_OK)
+	RenderGPUScene gpuScene(renderContext.get());
+	if (!LoadScene(scenePath, gpuScene))
 	{
-		loge("Failed to load scene '{}'", scenePath);
 		return 1;
 	}
-
-	RenderGPUScene gpuScene(renderContext.get());
-	gpuScene.BuildGPUScene(scene);
 
 	// The scene is static for now, so the acceleration structures are built once in their own
 	// submission before the first frame.
@@ -300,7 +350,7 @@ int main(int argc, char **argv)
 	const char *scenePath = argc >= 2 ? argv[1] : kDefaultScenePath;
 	if (scenePath[0] == '\0')
 	{
-		fprintf(stderr, "Usage: %s <scene.gltf|scene.glb>, or set kDefaultScenePath in main.cpp\n", argv[0]);
+		fprintf(stderr, "Usage: %s <scene.gltf|scene.glb|scene.scene>, or set kDefaultScenePath in main.cpp\n", argv[0]);
 		return 1;
 	}
 

@@ -53,7 +53,7 @@ struct AtmosphereSettings
 	float altitudeKm = 0.0f; // of the scene's y = 0 above the ground
 	// The scene's air is this many times denser than real air at its altitude, so that its haze and
 	// light shafts show at the scale of a building. 1 is physical.
-	float aerialPerspectiveScale = 100.0f;
+	float aerialPerspectiveScale = 10.0f;
 	// Path segments (1 = camera rays only) that gather the sunlight the air scatters into them; the
 	// air only dims the later ones.
 	int inScatterSegments = 1;
