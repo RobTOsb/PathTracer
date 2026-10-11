@@ -16,6 +16,7 @@
 #include <cstring>
 #include <execution>
 #include <future>
+#include <iterator>
 #include <numeric>
 #include <stdexcept>
 #include <unordered_map>
@@ -448,6 +449,7 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene, const std::fil
 	UploadBatchHandle batch = renderContext_->BeginUpload();
 	pendingUploadBytes_ = 0;
 	mipBuildMs_ = 0.0;
+	uploadedTextures_.clear();
 
 	UploadStreams(batch);
 	std::vector<GpuMaterial> materials;
@@ -457,6 +459,7 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene, const std::fil
 	UploadEmitters(emitters, batch);
 
 	renderContext_->EndUpload(batch);
+	uploadedTextures_.clear();
 
 	logi("GPUScene: {} mesh(es), {} primitive(s), {} instance(s), {} vertices, {} triangles, {} texture(s)",
 		 meshDescs.size(),
@@ -752,23 +755,9 @@ void RenderGPUScene::UploadStreams(UploadBatchHandle batch)
 		const char *name;
 	};
 
+	// The meshlet streams stay on the CPU: nothing on the GPU reads them.
 	const StreamSource sources[] = {
 		{ GPUStream::Index, indices_.data(), indices_.size() * sizeof(uint32_t), sizeof(uint32_t), "Scene_Indices" },
-		{ GPUStream::Meshlet,
-		  meshletData_.data(),
-		  meshletData_.size() * sizeof(uint32_t),
-		  sizeof(Scene::Meshlet),
-		  "Scene_Meshlets" },
-		{ GPUStream::MeshletVertices,
-		  meshletVertices_.data(),
-		  meshletVertices_.size() * sizeof(uint32_t),
-		  sizeof(uint32_t),
-		  "Scene_MeshletVertices" },
-		{ GPUStream::MeshletTriangles,
-		  meshletTriangles_.data(),
-		  meshletTriangles_.size() * sizeof(uint32_t),
-		  sizeof(uint32_t),
-		  "Scene_MeshletTriangles" },
 	};
 
 	for (const StreamSource &source: sources)
@@ -822,6 +811,12 @@ uint32_t RenderGPUScene::UploadTexture(const Scene::Texture &texture,
 		return INVALIDDESCRIPTORHANDLE;
 	}
 
+	const auto [uploaded, isNew] = uploadedTextures_.try_emplace({ texture.GetPixels(), format }, 0u);
+	if (!isNew)
+	{
+		return uploaded->second;
+	}
+
 	TextureDesc desc = {};
 	desc.width = static_cast<uint>(texture.GetWidth());
 	desc.height = static_cast<uint>(texture.GetHeight());
@@ -846,7 +841,8 @@ uint32_t RenderGPUScene::UploadTexture(const Scene::Texture &texture,
 	{
 		cacheWriter_->AddTexture(desc.width, desc.height, format == Format::R8G8B8A8_UNORM_SRGB, mips);
 	}
-	return UploadTextureMips(desc, mips, batch);
+	uploaded->second = UploadTextureMips(desc, mips, batch);
+	return uploaded->second;
 }
 
 uint32_t RenderGPUScene::UploadTextureMips(const TextureDesc &desc,
@@ -1137,10 +1133,15 @@ void RenderGPUScene::BuildAccelerationStructures()
 		geometry.noDuplicateAnyHit = flags.noDuplicateAnyHit;
 
 		blases_[i] = renderContext_->CreateBLAS(geometry);
-		renderContext_->BuildAccelerationStructure(blases_[i]);
 	}
 
-	renderContext_->UAVBarrierForAccelerationStructures();
+	// Built and compacted in submissions of their own, which leaves them none of the build's memory.
+	std::vector<AccelerationStructureHandle> builtBlases;
+	std::copy_if(blases_.begin(),
+				 blases_.end(),
+				 std::back_inserter(builtBlases),
+				 [](AccelerationStructureHandle h) { return h != InvalidAccelerationStructureHandle; });
+	renderContext_->BuildCompactedBLASes(builtBlases);
 
 	// One TLAS instance per (node, primitive). InstanceID is the primitive's row in the
 	// PrimitiveGPUDesc table, which is all the hit shader needs to find its data. The order must

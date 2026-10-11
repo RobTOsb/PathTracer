@@ -380,6 +380,9 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SliderFloat("Bounce cone spread", &settings_.rayConeBsdfSpread, 0.0f, 2.0f, "%.2f");
 		ImGui::SetItemTooltip("How much each BSDF sample widens the cone, 1 = the solid angle the sample stands for, "
 							  "0 = only the camera's pixel spread");
+		ImGui::SliderInt("Anisotropic segments", &settings_.anisotropicSegments, 0, settings_.maxBounces + 1);
+		ImGui::SetItemTooltip("Path segments whose hits filter textures anisotropically (16x), the rest trilinearly. "
+							  "0 = none, 1 = camera hits only");
 		ImGui::EndDisabled();
 
 		ImGui::SliderFloat("Exposure", &settings_.exposureEV, -10.0f, 10.0f, "%.2f EV");

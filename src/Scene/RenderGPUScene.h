@@ -9,7 +9,9 @@
 #include "ShaderInterop.h"
 
 #include <filesystem>
+#include <map>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace Scene
@@ -223,6 +225,10 @@ private:
 	std::vector<uint32_t> meshletData_; // Scene::Meshlet rows, raw
 	std::vector<uint32_t> meshletVertices_;
 	std::vector<uint32_t> meshletTriangles_;
+
+	// The textures BuildGPUScene has uploaded, by their pixels (shared by every material using the
+	// image) and format, so each image goes to the GPU once.
+	std::map<std::pair<const uint8_t *, Format>, uint32_t> uploadedTextures_;
 
 	ResourceHandle streamBuffers_[(uint32_t) GPUStream::Count] = {};
 	ResourceHandle vertexBuffer_ = InvalidResourceHandle;

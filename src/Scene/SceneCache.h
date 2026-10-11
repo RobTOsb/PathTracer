@@ -11,7 +11,8 @@
 
 
 // Bump when the layout or anything baked into the tables changes, so older files are rebuilt.
-constexpr uint32_t kSceneCacheVersion = 1;
+// 2: textures shared by materials are stored once.
+constexpr uint32_t kSceneCacheVersion = 2;
 
 struct SceneCacheTexture
 {

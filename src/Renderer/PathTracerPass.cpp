@@ -235,6 +235,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	const float upscalerBias = log2f(static_cast<float>(width_) / static_cast<float>(renderContext->GetWindowWidth()));
 	constants.textureLodScale =
 			settings_.rayConeTextureLod ? exp2f(settings_.textureLodBias + upscalerBias) : 0.0f;
+	constants.anisotropicSegments = static_cast<uint>(std::max(settings_.anisotropicSegments, 0));
 
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
 

@@ -89,6 +89,7 @@ struct RenderSettings
 	bool rayConeTextureLod = true;
 	float textureLodBias = 0.0f;
 	float rayConeBsdfSpread = 1.0f;
+	int anisotropicSegments = 1;
 
 	float exposureEV = 0.0f;
 	ToneMappingOperator toneMapOperator = TONEMAP_ACES_FITTED; // SDR output only

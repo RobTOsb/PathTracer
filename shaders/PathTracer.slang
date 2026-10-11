@@ -70,11 +70,12 @@ float4 SampleTexture(uint textureIndex, float2 uv)
     return texture.SampleLevel(g_LinearWrap, uv, 0.0);
 }
 
-// Filtered over a ray cone's footprint, whose ellipse axes span ddx and ddy in uv.
-float4 SampleTextureGrad(uint textureIndex, float2 uv, float2 ddx, float2 ddy)
+float4 SampleTextureGrad(uint textureIndex, float2 uv, float2 ddx, float2 ddy, bool anisotropic)
 {
     Texture2D<float4> texture = ResourceDescriptorHeap[NonUniformResourceIndex(textureIndex)];
-    return texture.SampleGrad(g_AnisotropicWrap, uv, ddx, ddy);
+    if (anisotropic)
+        return texture.SampleGrad(g_AnisotropicWrap, uv, ddx, ddy);
+    return texture.SampleGrad(g_LinearWrap, uv, ddx, ddy);
 }
 
 // A ray's cone: its width where it last met a surface (0 at a pinhole camera) and its full apex
@@ -566,7 +567,7 @@ void ApplyMaterialOverrides(inout OpenPBRBaseParams p)
 
 // Reads the material row once, samples all of its textures and applies the normal map to hit.Ns.
 // The textures are filtered over the footprint of a ray cone coneWidth wide where it meets the surface.
-OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth)
+OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotropic)
 {
     GpuMaterial material = LoadGpuMaterial(hit.materialId);
     float2 uv = hit.uv;
@@ -576,7 +577,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth)
     // Tangent-space normal map: +X along the tangent, +Y along the bitangent, +Z along N.
     if (material.normalTexture != INVALIDDESCRIPTORHANDLE)
     {
-        float3 tn = SampleTextureGrad(material.normalTexture, uv, ddx, ddy).xyz * 2.0 - 1.0;
+        float3 tn = SampleTextureGrad(material.normalTexture, uv, ddx, ddy, anisotropic).xyz * 2.0 - 1.0;
         tn.y = -tn.y; // flip green channel (DirectX-style normal map convention)
         tn.xy *= material.normalScale;
         hit.Ns = normalize(hit.T * tn.x + hit.B * tn.y + hit.N * tn.z);
@@ -584,20 +585,20 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth)
 
     float3 baseColour = material.baseColour.rgb;
     if (material.albedoTexture != INVALIDDESCRIPTORHANDLE)
-        baseColour *= SampleTextureGrad(material.albedoTexture, uv, ddx, ddy).rgb;
+        baseColour *= SampleTextureGrad(material.albedoTexture, uv, ddx, ddy, anisotropic).rgb;
 
     float roughness = material.roughness;
     float metallic = material.metallic;
     if (material.roughMetalTexture != INVALIDDESCRIPTORHANDLE)
     {
-        float4 roughMetal = SampleTextureGrad(material.roughMetalTexture, uv, ddx, ddy);
+        float4 roughMetal = SampleTextureGrad(material.roughMetalTexture, uv, ddx, ddy, anisotropic);
         roughness *= roughMetal.g;
         metallic *= roughMetal.b;
     }
 
     float transmission = material.transmission;
     if (transmission > 0.0 && material.transmissionTexture != INVALIDDESCRIPTORHANDLE)
-        transmission *= SampleTextureGrad(material.transmissionTexture, uv, ddx, ddy).r;
+        transmission *= SampleTextureGrad(material.transmissionTexture, uv, ddx, ddy, anisotropic).r;
     bool thinWalled = (material.transmissionFlags & TRANSMISSION_THIN_WALLED) != 0;
     if (thinWalled && material.transmission > 0.0 && (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) == 0)
         roughness = max(roughness, 1.0e-4);
@@ -606,7 +607,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth)
     {
         hit.emission = material.emissive;
         if (material.emissiveTexture != INVALIDDESCRIPTORHANDLE)
-            hit.emission *= SampleTextureGrad(material.emissiveTexture, uv, ddx, ddy).rgb;
+            hit.emission *= SampleTextureGrad(material.emissiveTexture, uv, ddx, ddy, anisotropic).rgb;
     }
 
     OpenPBRBaseParams p = OpenPBRDefaults();
@@ -1025,7 +1026,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
 
         // Material and shading basis for this hit, its textures filtered over the cone's footprint.
         cone.width += cone.spread * hit.t;
-        OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale);
+        OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments);
         float3 wo = -dir;
 
         // Emission found by BSDF sampling, from front faces only like the area lights NEE samples.
@@ -1135,7 +1136,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
         // DLSS-RR guides: the primary surface, or the first surface past the mirrors and glass in front
         // of it. A surface that takes another lobe, or ends the path, ends the chain on itself.
         float psrFraction = 1.0;
-        bool psrEvent = continuePath && IsPsrEvent(mat, ctx, lobe, psrFraction);
+        bool psrEvent = continuePath && (fromCamera || chain.active) && IsPsrEvent(mat, ctx, lobe, psrFraction);
         if (fromCamera)
         {
             hitDistancePending = specularReflection;
@@ -1163,13 +1164,15 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             }
         }
 
+        if (continuePath)
+            origin = OffsetRay(hit.position, hit.Ng, dir);
+
         if (traceShadowRay)
             radiance += neeContribution * CastShadowRay(hit.position, hit.Ng, ls.direction, ls.distance);
 
         if (!continuePath)
             break;
 
-        origin = OffsetRay(hit.position, hit.Ng, dir);
         fromCamera = fromCamera && passThrough;
 
         // Russian roulette.

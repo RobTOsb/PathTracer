@@ -46,7 +46,7 @@ struct FrameConstants
 	float rayConePixelSpread;
 	float rayConeBsdfSpread;
 	float textureLodScale; // multiplies the cone footprint (2^mip bias), 0 samples the top mip everywhere
-	uint pad0;
+	uint anisotropicSegments;
 
 	// Sky atmosphere (ATMOSPHERE permutation only, see SkyAtmospherePass). The scene sits at one
 	// altitude of the atmosphere, whose air fills it homogeneously. Coefficients are per scene unit,
