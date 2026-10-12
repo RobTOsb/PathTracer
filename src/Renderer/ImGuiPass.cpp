@@ -239,6 +239,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::BeginDisabled(!settings_.holdSpecularHitDistance);
 		ImGui::SliderFloat("Hold max roughness", &settings_.holdHitDistanceMaxRoughness, 0.0f, 1.0f, "%.2f");
 		ImGui::EndDisabled();
+		ImGui::Checkbox("Specular motion vectors", &settings_.specularMotionVectors);
 		ImGui::EndDisabled();
 	}
 
@@ -371,6 +372,9 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SameLine();
 		ImGui::Checkbox("Transmission", &settings_.transmissiveMaterials);
 		ImGui::SetItemTooltip("Off: transmissive materials turn opaque");
+		ImGui::SliderInt("Glass reflection splits", &settings_.glassReflectionSplits, 0, 4);
+		ImGui::SetItemTooltip("Panes of smooth thin glass in front of the camera whose reflection is traced as well as "
+							  "what is behind them, instead of one or the other. 0 = off");
 
 		ImGui::Checkbox("Ray cone texture LOD", &settings_.rayConeTextureLod);
 		ImGui::SetItemTooltip("Filters textures over each ray's cone footprint instead of always sampling the top mip");

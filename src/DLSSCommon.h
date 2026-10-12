@@ -102,8 +102,7 @@ struct DLSSEvalInputs
 	ID3D12Resource *diffuseAlbedo = nullptr;
 	ID3D12Resource *specularAlbedo = nullptr;
 	ID3D12Resource *normalRoughness = nullptr;
-	// World-space distance to the reflection hit. Optional (null = not supplied), but it is what lets
-	// RR reproject reflections against the reflected geometry rather than the surface they sit on.
+	ID3D12Resource *specularMotionVectors = nullptr;
 	ID3D12Resource *specularHitDistance = nullptr;
 	// Row-major 4x4 view/proj matrices for RR specular reprojection.
 	float worldToView[16] = {};

@@ -21,7 +21,8 @@ struct PathTracerGuides
 	ResourceHandle normalRoughness = InvalidResourceHandle; // RGBA16F, world-space normal + linear roughness in .w
 	ResourceHandle motionVectors = InvalidResourceHandle; // RG16F, render pixels
 	ResourceHandle depth = InvalidResourceHandle; // R32F, reversed-Z hardware depth
-	ResourceHandle specularHitDistance = InvalidResourceHandle; // R16F, world units
+	ResourceHandle specularHitDistance = InvalidResourceHandle;
+	ResourceHandle specularMotionVectors = InvalidResourceHandle; // RG16F
 };
 
 // Traces one path per pixel into an HDR radiance target (RGBA16F) using the DXR pipeline in

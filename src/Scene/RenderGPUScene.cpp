@@ -901,11 +901,8 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 			if (gpu.transmission > 0.0f && gpu.roughness <= 0.0f)
 				gpu.transmissionFlags |= TRANSMISSION_PASS_THROUGH;
 		}
-		const float *attenuationColour = material.GetAttenuationColour();
-		gpu.attenuationColour = float3(attenuationColour[0], attenuationColour[1], attenuationColour[2]);
-		gpu.attenuationDistance = std::isfinite(material.GetAttenuationDistance()) && material.GetAttenuationDistance() > 0.0f
-										  ? material.GetAttenuationDistance()
-										  : FLT_MAX;
+		gpu.attenuationColour = float3(1.0f, 1.0f, 1.0f);
+		gpu.attenuationDistance = FLT_MAX;
 		gpu.albedoTexture =
 				UploadTexture(material.GetAlbedoTexture(), Format::R8G8B8A8_UNORM_SRGB, "Material_Albedo", batch);
 		gpu.roughMetalTexture =

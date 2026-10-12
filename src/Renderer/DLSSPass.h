@@ -8,6 +8,7 @@
 class Camera;
 class NGXContext;
 class PathTracerPass;
+struct RenderSettings;
 
 class DLSSPass final : public RenderPass
 {
@@ -16,8 +17,7 @@ public:
 			 NGXContext &ngx,
 			 const PathTracerPass &pathTracer,
 			 const Camera &camera,
-			 DLSSMode mode,
-			 DLSSRayReconstructionPreset preset);
+			 const RenderSettings &settings);
 	~DLSSPass() override;
 
 	void Execute(RenderContext *renderContext) override;
@@ -32,6 +32,7 @@ private:
 	NGXContext &ngx_;
 	const PathTracerPass &pathTracer_;
 	const Camera &camera_;
+	const RenderSettings &settings_;
 
 	DLSSFeatureParams featureParams_;
 	ResourceHandle output_ = InvalidResourceHandle;

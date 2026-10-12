@@ -66,7 +66,7 @@ static float QueryDisplayPeakNits(void *hwnd)
 
 // constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
 constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
-// constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\Sponza\\glTF\\Sponza.gltf";
+//constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\Sponza\\glTF\\Sponza.gltf";
 // constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
 
 constexpr uint kFramesInFlight = 2;
@@ -163,12 +163,7 @@ void BuildPasses(RenderContext *renderContext,
 	passes.push_back(std::move(atmosphere));
 	if (rayReconstruction)
 	{
-		auto dlss = std::make_unique<DLSSPass>(renderContext,
-											   ngx,
-											   *pathTracer,
-											   camera,
-											   settings.dlssMode,
-											   settings.rrPreset);
+		auto dlss = std::make_unique<DLSSPass>(renderContext, ngx, *pathTracer, camera, settings);
 		radiance = dlss->GetOutput();
 		passes.push_back(std::move(pathTracer));
 		passes.push_back(std::move(dlss));

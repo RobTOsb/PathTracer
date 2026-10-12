@@ -53,6 +53,7 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 		guides_.motionVectors = CreateTarget(Format::R16G16_FLOAT, "PathTracer_MotionVectors");
 		guides_.depth = CreateTarget(Format::R32_FLOAT, "PathTracer_Depth");
 		guides_.specularHitDistance = CreateTarget(Format::R16_FLOAT, "PathTracer_SpecularHitDistance");
+		guides_.specularMotionVectors = CreateTarget(Format::R16G16_FLOAT, "PathTracer_SpecularMotionVectors");
 	}
 
 	frameConstants_.resize(renderContext->GetFramesInFlight());
@@ -70,7 +71,8 @@ PathTracerPass::~PathTracerPass()
 								  guides_.normalRoughness,
 								  guides_.motionVectors,
 								  guides_.depth,
-								  guides_.specularHitDistance })
+								  guides_.specularHitDistance,
+								  guides_.specularMotionVectors })
 	{
 		if (target != InvalidResourceHandle)
 		{
@@ -236,6 +238,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.textureLodScale =
 			settings_.rayConeTextureLod ? exp2f(settings_.textureLodBias + upscalerBias) : 0.0f;
 	constants.anisotropicSegments = static_cast<uint>(std::max(settings_.anisotropicSegments, 0));
+	constants.glassReflectionSplits = static_cast<uint>(std::max(settings_.glassReflectionSplits, 0));
 
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
 
@@ -272,15 +275,16 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	renderContext->BeginEvent("PathTracer");
 	renderContext->BeginProfileScope("PathTracer");
 
-	// The output and then the guides, in their u0..u6 register order.
+	// The output and then the guides, in their u0..u7 register order.
 	const ResourceHandle targets[] = { output_,
 									   guides_.diffuseAlbedo,
 									   guides_.specularAlbedo,
 									   guides_.normalRoughness,
 									   guides_.motionVectors,
 									   guides_.depth,
-									   guides_.specularHitDistance };
-	const uint32_t targetCount = rayReconstruction_ ? 7 : 1;
+									   guides_.specularHitDistance,
+									   guides_.specularMotionVectors };
+	const uint32_t targetCount = rayReconstruction_ ? 8 : 1;
 	for (uint32_t i = 0; i < targetCount; ++i)
 	{
 		renderContext->TransitionResource(targets[i],

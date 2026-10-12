@@ -4,6 +4,7 @@
 
 #include "Camera.h"
 #include "PathTracerPass.h"
+#include "RenderSettings.h"
 
 #include "fmtlog.h"
 
@@ -13,13 +14,13 @@ DLSSPass::DLSSPass(RenderContext *renderContext,
 				   NGXContext &ngx,
 				   const PathTracerPass &pathTracer,
 				   const Camera &camera,
-				   DLSSMode mode,
-				   DLSSRayReconstructionPreset preset) :
-	renderContext_(renderContext), ngx_(ngx), pathTracer_(pathTracer), camera_(camera)
+				   const RenderSettings &settings) :
+	renderContext_(renderContext), ngx_(ngx), pathTracer_(pathTracer), camera_(camera), settings_(settings)
 {
+	// main rebuilds the pass when the mode or preset changes.
 	featureParams_.kind = DLSSFeatureKind::RayReconstruction;
-	featureParams_.mode = mode;
-	featureParams_.rrPreset = preset;
+	featureParams_.mode = settings.dlssMode;
+	featureParams_.rrPreset = settings.rrPreset;
 	featureParams_.renderWidth = pathTracer.GetWidth();
 	featureParams_.renderHeight = pathTracer.GetHeight();
 	featureParams_.outputWidth = renderContext->GetWindowWidth();
@@ -53,10 +54,13 @@ void DLSSPass::Execute(RenderContext *renderContext)
 
 	// DLSS reads its inputs from compute shaders and writes the output as a UAV, and returns every
 	// resource to these states when it is done.
+	// The reflections' motion comes either as motion vectors or as the hit distance RR derives it from.
 	const PathTracerGuides &guides = pathTracer_.GetGuides();
+	const ResourceHandle specularMotion =
+			settings_.specularMotionVectors ? guides.specularMotionVectors : guides.specularHitDistance;
 	const ResourceHandle inputs[] = { pathTracer_.GetOutput(), guides.diffuseAlbedo,	guides.specularAlbedo,
 									  guides.normalRoughness,  guides.motionVectors, guides.depth,
-									  guides.specularHitDistance };
+									  specularMotion };
 	for (ResourceHandle input: inputs)
 	{
 		renderContext->TransitionResource(input,
@@ -80,7 +84,14 @@ void DLSSPass::Execute(RenderContext *renderContext)
 		eval.diffuseAlbedo = d3dContext->GetNativeResource(guides.diffuseAlbedo);
 		eval.specularAlbedo = d3dContext->GetNativeResource(guides.specularAlbedo);
 		eval.normalRoughness = d3dContext->GetNativeResource(guides.normalRoughness);
-		eval.specularHitDistance = d3dContext->GetNativeResource(guides.specularHitDistance);
+		if (settings_.specularMotionVectors)
+		{
+			eval.specularMotionVectors = d3dContext->GetNativeResource(guides.specularMotionVectors);
+		}
+		else
+		{
+			eval.specularHitDistance = d3dContext->GetNativeResource(guides.specularHitDistance);
+		}
 		eval.renderWidth = featureParams_.renderWidth;
 		eval.renderHeight = featureParams_.renderHeight;
 		eval.reset = reset_;

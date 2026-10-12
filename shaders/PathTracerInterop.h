@@ -68,7 +68,8 @@ struct FrameConstants
 	// distance when their path took another lobe, instead of reporting none; negative = off.
 	float psrMaxRoughness;
 	float specularHitDistanceHoldRoughness;
-	float2 pad3;
+	uint glassReflectionSplits;
+	float pad3;
 };
 
 // Debug switches applied to every material as it is loaded (FrameConstants::materialOverrides).
@@ -103,8 +104,8 @@ enum GpuAlphaMode
 UnscopedEnum
 enum GpuTransmissionFlags
 {
-	// No KHR_materials_volume thickness: both sides are outside, light crosses without refracting
-	// and without entering a medium.
+	// Material::IsThinWalled: both sides are outside, light crosses without refracting and without
+	// entering a medium.
 	TRANSMISSION_THIN_WALLED = 1,
 	// Thin-walled, transmissive and smooth (roughness factor 0, so every texel is too), which makes
 	// its transmission a delta lobe straight through. Shadow rays pass such surfaces in
@@ -131,8 +132,8 @@ struct GpuMaterial
 	uint transmissionTexture; // R multiplies transmission
 	float3 emissive; // emissiveFactor * KHR_materials_emissive_strength, linear, front faces only
 	uint emissiveTexture; // sRGB, multiplies emissive
-	// KHR_materials_volume (not thin-walled only): white light comes out as attenuationColour after
-	// attenuationDistance in the medium. FLT_MAX: no absorption.
+	// Not thin-walled only: white light comes out as attenuationColour after attenuationDistance in
+	// the medium. FLT_MAX: no absorption (always, while KHR_materials_volume is not loaded).
 	float3 attenuationColour;
 	float attenuationDistance;
 };

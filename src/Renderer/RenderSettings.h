@@ -85,6 +85,7 @@ struct RenderSettings
 	bool shaderExecutionReordering = true;
 	bool specularMaterials = true;
 	bool transmissiveMaterials = true;
+	int glassReflectionSplits = 2;
 
 	bool rayConeTextureLod = true;
 	float textureLodBias = 0.0f;
@@ -112,6 +113,7 @@ struct RenderSettings
 	// the diffuse lobe, so the guide does not flicker between a distance and none.
 	bool holdSpecularHitDistance = true;
 	float holdHitDistanceMaxRoughness = 0.25f;
+	bool specularMotionVectors = true;
 
 	float cameraSpeed = 5.0f; // world units per second
 };
