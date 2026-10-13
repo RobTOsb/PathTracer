@@ -10,6 +10,7 @@
 
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <span>
 #include <utility>
 #include <vector>
@@ -196,6 +197,8 @@ private:
 						   Format format,
 						   const char *debugName,
 						   UploadBatchHandle &batch);
+	// The RGBA8 mips as a BC7 chain, or false when they stay uncompressed.
+	bool CompressBC7(const TextureDesc &desc, std::span<const TextureMipData> mips, DirectX::ScratchImage &compressed);
 	// Returns the texture's bindless index.
 	uint32_t UploadTextureMips(const TextureDesc &desc, std::span<const TextureMipData> mips, UploadBatchHandle &batch);
 
@@ -276,6 +279,10 @@ private:
 	uint64_t pendingUploadBytes_ = 0;
 	SceneCacheWriter *cacheWriter_ = nullptr; // during a BuildGPUScene that writes a cache
 	double mipBuildMs_ = 0.0; // CPU time spent filtering texture mips during the last BuildGPUScene
+	std::unique_ptr<ITextureCompressor> textureCompressor_; // during a BuildGPUScene
+	double compressMs_ = 0.0; // time spent compressing textures to BC7 during the last BuildGPUScene
+	uint32_t compressedTextures_ = 0;
+	uint32_t uncompressedTextures_ = 0; // left as RGBA8 by CompressBC7 (not whole 4x4 blocks, or it failed)
 
 	std::vector<AccelerationStructureHandle> blases_; // one per primitive desc, invalid for skipped primitives
 	AccelerationStructureHandle tlas_ = InvalidAccelerationStructureHandle;

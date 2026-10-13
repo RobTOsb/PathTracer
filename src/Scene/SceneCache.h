@@ -12,7 +12,9 @@
 
 // Bump when the layout or anything baked into the tables changes, so older files are rebuilt.
 // 2: textures shared by materials are stored once.
-constexpr uint32_t kSceneCacheVersion = 2;
+// 3: textures store their format, BC7 where they could be compressed.
+// 4: rebuilds the version 3 files, whose BC7 blocks the encoder wrote as zeros.
+constexpr uint32_t kSceneCacheVersion = 4;
 
 struct SceneCacheTexture
 {
@@ -20,10 +22,12 @@ struct SceneCacheTexture
 	uint32_t width;
 	uint32_t height;
 	uint32_t mipLevels;
-	uint32_t srgb; // R8G8B8A8_UNORM_SRGB rather than R8G8B8A8_UNORM
+	Format format; // R8G8B8A8_UNORM(_SRGB) or BC7_UNORM(_SRGB)
 };
 
-uint64_t SceneCacheMipBytes(uint32_t width, uint32_t height, uint32_t mip);
+// The tightly packed rows of one mip (texels, or 4x4 blocks for BC7), with no pixels.
+TextureMipData SceneCacheMipLayout(const SceneCacheTexture &texture, uint32_t mip);
+uint64_t SceneCacheMipBytes(const SceneCacheTexture &texture, uint32_t mip);
 uint64_t SceneCacheTextureBytes(const SceneCacheTexture &texture);
 
 class SceneCacheWriter
@@ -37,7 +41,7 @@ public:
 
 	bool Open(const std::filesystem::path &path);
 
-	uint32_t AddTexture(uint32_t width, uint32_t height, bool srgb, std::span<const TextureMipData> mips);
+	uint32_t AddTexture(uint32_t width, uint32_t height, Format format, std::span<const TextureMipData> mips);
 
 	template<typename T>
 	void Table(const std::vector<T> &table)

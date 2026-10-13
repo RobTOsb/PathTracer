@@ -446,6 +446,17 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene, const std::fil
 	SceneCacheWriter writer;
 	cacheWriter_ = !cachePath.empty() && writer.Open(cachePath) ? &writer : nullptr;
 
+	// The material textures go to the GPU, and into the cache, as BC7.
+	textureCompressor_ = renderContext_->CreateTextureCompressor();
+	if (textureCompressor_ != nullptr && !textureCompressor_->Initialise())
+	{
+		logw("GPUScene: the BC7 encoder failed to initialise, so the textures stay uncompressed");
+		textureCompressor_.reset();
+	}
+	compressMs_ = 0.0;
+	compressedTextures_ = 0;
+	uncompressedTextures_ = 0;
+
 	UploadBatchHandle batch = renderContext_->BeginUpload();
 	pendingUploadBytes_ = 0;
 	mipBuildMs_ = 0.0;
@@ -460,6 +471,7 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene, const std::fil
 
 	renderContext_->EndUpload(batch);
 	uploadedTextures_.clear();
+	textureCompressor_.reset();
 
 	logi("GPUScene: {} mesh(es), {} primitive(s), {} instance(s), {} vertices, {} triangles, {} texture(s)",
 		 meshDescs.size(),
@@ -469,6 +481,10 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene, const std::fil
 		 indices_.size() / 3,
 		 textures_.size());
 	logi("GPUScene: built the texture mip chains in {:.0f} ms", mipBuildMs_);
+	logi("GPUScene: compressed {} texture(s) to BC7 in {:.0f} ms, {} left as RGBA8",
+		 compressedTextures_,
+		 compressMs_,
+		 uncompressedTextures_);
 
 	if (cacheWriter_ != nullptr)
 	{
@@ -644,7 +660,7 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 		TextureDesc desc = {};
 		desc.width = cached.width;
 		desc.height = cached.height;
-		desc.format = cached.srgb ? Format::R8G8B8A8_UNORM_SRGB : Format::R8G8B8A8_UNORM;
+		desc.format = cached.format;
 		desc.mipLevels = cached.mipLevels;
 		desc.debugName = "Material_Texture";
 
@@ -652,10 +668,9 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 		uint64_t offset = 0;
 		for (uint32_t m = 0; m < mips.size(); ++m)
 		{
+			mips[m] = SceneCacheMipLayout(cached, m);
 			mips[m].pixels = pixels.data() + offset;
-			mips[m].rowPitch = std::max(cached.width >> m, 1u) * 4;
-			mips[m].rowCount = std::max(cached.height >> m, 1u);
-			offset += SceneCacheMipBytes(cached.width, cached.height, m);
+			offset += SceneCacheMipBytes(cached, m);
 		}
 		descriptorOfSlot.push_back(UploadTextureMips(desc, mips, batch));
 	}
@@ -837,12 +852,75 @@ uint32_t RenderGPUScene::UploadTexture(const Scene::Texture &texture,
 	}
 	desc.mipLevels = static_cast<uint>(mips.size());
 
+	DirectX::ScratchImage compressed;
+	if (CompressBC7(desc, mips, compressed))
+	{
+		desc.format = format == Format::R8G8B8A8_UNORM_SRGB ? Format::BC7_UNORM_SRGB : Format::BC7_UNORM;
+		for (uint32_t m = 0; m < mips.size(); ++m)
+		{
+			const DirectX::Image *image = compressed.GetImage(m, 0, 0);
+			mips[m].pixels = image->pixels;
+			mips[m].rowPitch = static_cast<uint32_t>(image->rowPitch);
+			mips[m].rowCount = static_cast<uint32_t>(image->slicePitch / image->rowPitch); // rows of blocks
+		}
+	}
+
 	if (cacheWriter_ != nullptr)
 	{
-		cacheWriter_->AddTexture(desc.width, desc.height, format == Format::R8G8B8A8_UNORM_SRGB, mips);
+		cacheWriter_->AddTexture(desc.width, desc.height, desc.format, mips);
 	}
 	uploaded->second = UploadTextureMips(desc, mips, batch);
 	return uploaded->second;
+}
+
+bool RenderGPUScene::CompressBC7(const TextureDesc &desc,
+								 std::span<const TextureMipData> mips,
+								 DirectX::ScratchImage &compressed)
+{
+	if (textureCompressor_ == nullptr)
+	{
+		return false;
+	}
+	// A block-compressed texture's top mip must be whole blocks.
+	if (desc.width % 4 != 0 || desc.height % 4 != 0)
+	{
+		++uncompressedTextures_;
+		return false;
+	}
+
+	const auto start = std::chrono::steady_clock::now();
+	DirectX::ScratchImage source;
+	if (FAILED(source.Initialize2D(DXGI_FORMAT_R8G8B8A8_UNORM, desc.width, desc.height, 1, mips.size())))
+	{
+		++uncompressedTextures_;
+		return false;
+	}
+	for (uint32_t m = 0; m < mips.size(); ++m)
+	{
+		const DirectX::Image *image = source.GetImage(m, 0, 0);
+		const uint8_t *src = static_cast<const uint8_t *>(mips[m].pixels);
+		for (uint32_t row = 0; row < mips[m].rowCount; ++row)
+		{
+			std::memcpy(image->pixels + row * image->rowPitch, src + row * mips[m].rowPitch, mips[m].rowPitch);
+		}
+	}
+
+	// The sRGB bytes are encoded as they are; the format only changes how they are sampled.
+	const DXGI_FORMAT bcFormat =
+			desc.format == Format::R8G8B8A8_UNORM_SRGB ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM;
+	const HRESULT hr = textureCompressor_->Compress(source, bcFormat, compressed);
+	compressMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+	if (FAILED(hr))
+	{
+		logw("GPUScene: BC7 compression of a {}x{} texture failed ({:#x}), so it stays uncompressed",
+			 desc.width,
+			 desc.height,
+			 static_cast<uint32_t>(hr));
+		++uncompressedTextures_;
+		return false;
+	}
+	++compressedTextures_;
+	return true;
 }
 
 uint32_t RenderGPUScene::UploadTextureMips(const TextureDesc &desc,

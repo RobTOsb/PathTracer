@@ -34,9 +34,28 @@ namespace
 	};
 } // namespace
 
-uint64_t SceneCacheMipBytes(uint32_t width, uint32_t height, uint32_t mip)
+TextureMipData SceneCacheMipLayout(const SceneCacheTexture &texture, uint32_t mip)
 {
-	return static_cast<uint64_t>(std::max(width >> mip, 1u)) * std::max(height >> mip, 1u) * 4;
+	const uint32_t width = std::max(texture.width >> mip, 1u);
+	const uint32_t height = std::max(texture.height >> mip, 1u);
+	TextureMipData layout = {};
+	if (texture.format == Format::BC7_UNORM || texture.format == Format::BC7_UNORM_SRGB)
+	{
+		layout.rowPitch = (width + 3) / 4 * 16;
+		layout.rowCount = (height + 3) / 4;
+	}
+	else
+	{
+		layout.rowPitch = width * 4;
+		layout.rowCount = height;
+	}
+	return layout;
+}
+
+uint64_t SceneCacheMipBytes(const SceneCacheTexture &texture, uint32_t mip)
+{
+	const TextureMipData layout = SceneCacheMipLayout(texture, mip);
+	return static_cast<uint64_t>(layout.rowPitch) * layout.rowCount;
 }
 
 uint64_t SceneCacheTextureBytes(const SceneCacheTexture &texture)
@@ -44,7 +63,7 @@ uint64_t SceneCacheTextureBytes(const SceneCacheTexture &texture)
 	uint64_t bytes = 0;
 	for (uint32_t m = 0; m < texture.mipLevels; ++m)
 	{
-		bytes += SceneCacheMipBytes(texture.width, texture.height, m);
+		bytes += SceneCacheMipBytes(texture, m);
 	}
 	return bytes;
 }
@@ -90,21 +109,21 @@ void SceneCacheWriter::Write(const void *data, uint64_t size)
 	position_ += size;
 }
 
-uint32_t SceneCacheWriter::AddTexture(uint32_t width, uint32_t height, bool srgb, std::span<const TextureMipData> mips)
+uint32_t SceneCacheWriter::AddTexture(uint32_t width, uint32_t height, Format format, std::span<const TextureMipData> mips)
 {
 	SceneCacheTexture texture = {};
 	texture.offset = position_;
 	texture.width = width;
 	texture.height = height;
 	texture.mipLevels = static_cast<uint32_t>(mips.size());
-	texture.srgb = srgb ? 1 : 0;
+	texture.format = format;
 
 	for (uint32_t m = 0; m < mips.size(); ++m)
 	{
 		const uint64_t bytes = static_cast<uint64_t>(mips[m].rowPitch) * mips[m].rowCount;
-		if (tableOffset_ != 0 || bytes != SceneCacheMipBytes(width, height, m))
+		if (tableOffset_ != 0 || bytes != SceneCacheMipBytes(texture, m))
 		{
-			failed_ = true; // after the tables, or not tightly packed RGBA8
+			failed_ = true; // after the tables, or not tightly packed
 		}
 		Write(mips[m].pixels, bytes);
 	}
@@ -224,7 +243,11 @@ bool SceneCacheReader::Open(const std::filesystem::path &path)
 	// The pixels must sit between the header and the tables.
 	for (const SceneCacheTexture &texture: textures_)
 	{
-		const bool valid = texture.width > 0 && texture.height > 0 && texture.width <= 16384 &&
+		const bool bc7 = texture.format == Format::BC7_UNORM || texture.format == Format::BC7_UNORM_SRGB;
+		const bool validFormat = bc7 ? texture.width % 4 == 0 && texture.height % 4 == 0
+									 : texture.format == Format::R8G8B8A8_UNORM ||
+											   texture.format == Format::R8G8B8A8_UNORM_SRGB;
+		const bool valid = validFormat && texture.width > 0 && texture.height > 0 && texture.width <= 16384 &&
 						   texture.height <= 16384 && texture.mipLevels > 0 && texture.mipLevels <= 15 &&
 						   texture.offset >= sizeof(header) && texture.offset <= header.tableOffset &&
 						   SceneCacheTextureBytes(texture) <= header.tableOffset - texture.offset;
