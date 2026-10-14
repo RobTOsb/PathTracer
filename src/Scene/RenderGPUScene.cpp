@@ -28,6 +28,11 @@ namespace
 	// large texture sets from needing all of their staging buffers alive at once.
 	constexpr uint64_t kMaxPendingUploadBytes = 256ull * 1024 * 1024;
 
+	// Temporary: every transmissive material is thin-walled, whatever the glTF loader says, so light
+	// sampling reaches the bulbs inside Intel Sponza's lanterns (open quads, not closed volumes) through
+	// their glass. Solid glass blocks shadow rays. Bump kSceneCacheVersion when changing this.
+	constexpr bool kThinWalledTransmission = true;
+
 	bool IsUsablePrimitive(const Scene::Primitive &primitive)
 	{
 		return primitive.IsValid() && primitive.HasIndices() && primitive.GetIndexCount() >= 3;
@@ -973,7 +978,7 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 																		  "Material_Transmission",
 																		  batch)
 														  : INVALIDDESCRIPTORHANDLE;
-		if (material.IsThinWalled())
+		if (material.IsThinWalled() || (kThinWalledTransmission && gpu.transmission > 0.0f))
 		{
 			gpu.transmissionFlags |= TRANSMISSION_THIN_WALLED;
 			if (gpu.transmission > 0.0f && gpu.roughness <= 0.0f)

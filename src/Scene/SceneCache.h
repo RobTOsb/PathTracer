@@ -14,7 +14,8 @@
 // 2: textures shared by materials are stored once.
 // 3: textures store their format, BC7 where they could be compressed.
 // 4: rebuilds the version 3 files, whose BC7 blocks the encoder wrote as zeros.
-constexpr uint32_t kSceneCacheVersion = 4;
+// 5: transmissive materials thin-walled (kThinWalledTransmission in RenderGPUScene.cpp).
+constexpr uint32_t kSceneCacheVersion = 5;
 
 struct SceneCacheTexture
 {
