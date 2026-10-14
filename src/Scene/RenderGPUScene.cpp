@@ -843,7 +843,7 @@ uint32_t RenderGPUScene::UploadTexture(const Scene::Texture &texture,
 	desc.format = format;
 	desc.debugName = debugName;
 
-	// The full chain, for the ray cone filtering in PathTracer.slang.
+	// The full chain, for the ray cone filtering in PathTracer/Geometry.slang.
 	const auto mipStart = std::chrono::steady_clock::now();
 	const std::vector<std::vector<uint8_t>> levels = BuildMipChain(texture, format == Format::R8G8B8A8_UNORM_SRGB);
 	mipBuildMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - mipStart).count();

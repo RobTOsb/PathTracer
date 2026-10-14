@@ -151,7 +151,7 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 
 	result.shaderTable = renderContext_->CreateShaderTable(result.pipeline);
 	renderContext_->AddRayGenShaderRecord(result.shaderTable, "RayGen");
-	// Record order matches STANDARD_RAY_INDEX and SHADOW_RAY_INDEX in PathTracer.slang.
+	// Record order matches STANDARD_RAY_INDEX and SHADOW_RAY_INDEX in PathTracer/RayTracing.slang.
 	renderContext_->AddMissShaderRecord(result.shaderTable, "Miss");
 	renderContext_->AddMissShaderRecord(result.shaderTable, "ShadowMiss");
 	renderContext_->AddHitGroupShaderRecord(result.shaderTable, "HitGroup");
@@ -296,7 +296,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	renderContext->SetRaytracingPipeline(pipeline->pipeline);
 	renderContext->SetRaytracingConstantBuffer(0, constantBuffer);
 	renderContext->SetRaytracingSRV(0, scene_.GetTLASSRV());
-	// Scene buffers are root SRVs, registers must match PathTracer.slang.
+	// Scene buffers are root SRVs, registers must match PathTracer/Resources.slang.
 	renderContext->SetRaytracingSRV(1, scene_.GetPrimitiveBuffer());
 	renderContext->SetRaytracingSRV(2, scene_.GetStreamBuffer(GPUStream::Index));
 	renderContext->SetRaytracingSRV(3, scene_.GetVertexBuffer());
