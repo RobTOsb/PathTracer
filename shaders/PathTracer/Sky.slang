@@ -4,6 +4,7 @@ import PathTracer.Math;
 import PathTracer.Random;
 import PathTracer.RayTracing;
 import PathTracer.Resources;
+import PathTracer.Shadows;
 
 bool SunIsDelta()
 {

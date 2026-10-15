@@ -367,6 +367,10 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 			ImGui::TextDisabled("The driver does not actually reorder");
 		}
 
+		ImGui::Checkbox("Inline shadow rays", &settings_.inlineShadowRays);
+		ImGui::SetItemTooltip("Shadow rays as inline ray queries, keeping the path's state in registers instead of "
+							  "saving it around a TraceRay");
+
 		ImGui::Checkbox("Specular", &settings_.specularMaterials);
 		ImGui::SetItemTooltip("Off: no specular reflection, metals turn diffuse and glass only refracts");
 		ImGui::SameLine();

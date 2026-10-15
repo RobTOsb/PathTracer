@@ -54,6 +54,13 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 		guides_.depth = CreateTarget(Format::R32_FLOAT, "PathTracer_Depth");
 		guides_.specularHitDistance = CreateTarget(Format::R16_FLOAT, "PathTracer_SpecularHitDistance");
 		guides_.specularMotionVectors = CreateTarget(Format::R16G16_FLOAT, "PathTracer_SpecularMotionVectors");
+
+		BufferDesc cameraStateDesc = {};
+		cameraStateDesc.sizeInBytes = static_cast<uint64_t>(width_) * height_ * sizeof(GpuCameraState);
+		cameraStateDesc.structureByteStride = sizeof(GpuCameraState);
+		cameraStateDesc.usageFlags = ResourceUsageFlags::UnorderedAccess;
+		cameraStateDesc.debugName = "PathTracer_CameraState";
+		cameraState_ = renderContext->CreateBuffer(cameraStateDesc, ResourceViewType::UnorderedAccess);
 	}
 
 	frameConstants_.resize(renderContext->GetFramesInFlight());
@@ -72,7 +79,8 @@ PathTracerPass::~PathTracerPass()
 								  guides_.motionVectors,
 								  guides_.depth,
 								  guides_.specularHitDistance,
-								  guides_.specularMotionVectors })
+								  guides_.specularMotionVectors,
+								  cameraState_ })
 	{
 		if (target != InvalidResourceHandle)
 		{
@@ -88,11 +96,12 @@ PathTracerPass::~PathTracerPass()
 const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 {
 	const bool atmosphere = atmosphere_.IsEnabled();
+	const bool inlineShadows = settings_.inlineShadowRays;
 
 	// A failed SER compile is logged once and the plain pipeline takes over.
 	if (settings_.shaderExecutionReordering && serSupported_ && !serFailed_)
 	{
-		if (const Pipeline *pipeline = GetPipeline(true, atmosphere))
+		if (const Pipeline *pipeline = GetPipeline(true, atmosphere, inlineShadows))
 		{
 			return pipeline;
 		}
@@ -100,7 +109,7 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 		serFailed_ = true;
 	}
 
-	const Pipeline *pipeline = GetPipeline(false, atmosphere);
+	const Pipeline *pipeline = GetPipeline(false, atmosphere, inlineShadows);
 	if (pipeline == nullptr)
 	{
 		throw std::runtime_error("Failed to create the path tracing pipeline (see the shader log above).");
@@ -108,22 +117,29 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 	return pipeline;
 }
 
-const PathTracerPass::Pipeline *PathTracerPass::GetPipeline(bool shaderExecutionReordering, bool atmosphere)
+const PathTracerPass::Pipeline *PathTracerPass::GetPipeline(bool shaderExecutionReordering, bool atmosphere,
+															bool inlineShadows)
 {
-	Pipeline &pipeline = pipelines_[shaderExecutionReordering ? 1 : 0][atmosphere ? 1 : 0];
+	Pipeline &pipeline = pipelines_[shaderExecutionReordering ? 1 : 0][atmosphere ? 1 : 0][inlineShadows ? 1 : 0];
 	if (pipeline.pipeline == InvalidPipelineHandle)
 	{
-		pipeline = CreatePipeline(shaderExecutionReordering, atmosphere);
+		pipeline = CreatePipeline(shaderExecutionReordering, atmosphere, inlineShadows);
 	}
 	return pipeline.pipeline != InvalidPipelineHandle ? &pipeline : nullptr;
 }
 
-PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReordering, bool atmosphere) const
+PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReordering, bool atmosphere,
+														 bool inlineShadows) const
 {
 	RaytracingPipelineDesc desc = {};
-	desc.exports = { "RayGen", "Miss", "ClosestHit", "AnyHit", "ShadowMiss", "ShadowClosestHit", "ShadowAnyHit" };
-	desc.hitGroups = { RaytracingHitGroup{ "HitGroup", "ClosestHit", "AnyHit", "" },
-					   RaytracingHitGroup{ "ShadowHitGroup", "ShadowClosestHit", "ShadowAnyHit", "" } };
+	desc.exports = { "RayGen", "Miss", "ClosestHit", "AnyHit" };
+	desc.hitGroups = { RaytracingHitGroup{ "HitGroup", "ClosestHit", "AnyHit", "" } };
+	// Inline shadow rays are ray queries, so that permutation has no shadow shaders.
+	if (!inlineShadows)
+	{
+		desc.exports.insert(desc.exports.end(), { "ShadowMiss", "ShadowClosestHit", "ShadowAnyHit" });
+		desc.hitGroups.push_back(RaytracingHitGroup{ "ShadowHitGroup", "ShadowClosestHit", "ShadowAnyHit", "" });
+	}
 	desc.maxPayloadSizeInBytes = kMaxPayloadSizeInBytes;
 	desc.maxAttributeSizeInBytes = 8; // triangle barycentrics
 	desc.maxTraceRecursionDepth = 1; // primary and shadow rays are both traced from raygen
@@ -134,6 +150,10 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 	if (atmosphere)
 	{
 		desc.defines.push_back("ATMOSPHERE");
+	}
+	if (inlineShadows)
+	{
+		desc.defines.push_back("INLINE_SHADOWS");
 	}
 	if (shaderExecutionReordering)
 	{
@@ -153,9 +173,12 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 	renderContext_->AddRayGenShaderRecord(result.shaderTable, "RayGen");
 	// Record order matches STANDARD_RAY_INDEX and SHADOW_RAY_INDEX in PathTracer/RayTracing.slang.
 	renderContext_->AddMissShaderRecord(result.shaderTable, "Miss");
-	renderContext_->AddMissShaderRecord(result.shaderTable, "ShadowMiss");
 	renderContext_->AddHitGroupShaderRecord(result.shaderTable, "HitGroup");
-	renderContext_->AddHitGroupShaderRecord(result.shaderTable, "ShadowHitGroup");
+	if (!inlineShadows)
+	{
+		renderContext_->AddMissShaderRecord(result.shaderTable, "ShadowMiss");
+		renderContext_->AddHitGroupShaderRecord(result.shaderTable, "ShadowHitGroup");
+	}
 	renderContext_->BuildShaderTable(result.shaderTable);
 	return result;
 }
@@ -275,7 +298,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	renderContext->BeginEvent("PathTracer");
 	renderContext->BeginProfileScope("PathTracer");
 
-	// The output and then the guides, in their u0..u7 register order.
+	// The output, the guides and the camera state, in their u0..u8 register order.
 	const ResourceHandle targets[] = { output_,
 									   guides_.diffuseAlbedo,
 									   guides_.specularAlbedo,
@@ -283,8 +306,9 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 									   guides_.motionVectors,
 									   guides_.depth,
 									   guides_.specularHitDistance,
-									   guides_.specularMotionVectors };
-	const uint32_t targetCount = rayReconstruction_ ? 8 : 1;
+									   guides_.specularMotionVectors,
+									   cameraState_ };
+	const uint32_t targetCount = rayReconstruction_ ? 9 : 1;
 	for (uint32_t i = 0; i < targetCount; ++i)
 	{
 		renderContext->TransitionResource(targets[i],

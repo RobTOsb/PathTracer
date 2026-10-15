@@ -17,16 +17,16 @@ float SampledConeSpread(float pdf)
     return 2.0 * rsqrt(PI * pdf);
 }
 
-// Vertex indices of the triangle being hit, already rebased into the shared vertex buffer.
-uint3 LoadTriangle(PrimitiveDesc prim)
+// Vertex indices of a triangle of prim, already rebased into the shared vertex buffer.
+uint3 LoadTriangle(PrimitiveDesc prim, uint primitiveIndex)
 {
-    uint first = prim.indexOffset + PrimitiveIndex() * 3;
+    uint first = prim.indexOffset + primitiveIndex * 3;
     return uint3(g_Indices[first], g_Indices[first + 1], g_Indices[first + 2]) + prim.vertexOffset;
 }
 
-float3 Barycentrics(BuiltInTriangleIntersectionAttributes attr)
+float3 Barycentrics(float2 barycentrics)
 {
-    return float3(1.0 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
+    return float3(1.0 - barycentrics.x - barycentrics.y, barycentrics.x, barycentrics.y);
 }
 
 float2 InterpolateTexCoord(uint3 tri, float3 bary)
@@ -34,15 +34,13 @@ float2 InterpolateTexCoord(uint3 tri, float3 bary)
     return g_Vertices[tri.x].texCoord * bary.x + g_Vertices[tri.y].texCoord * bary.y + g_Vertices[tri.z].texCoord * bary.z;
 }
 
-// Cosine between the shadow ray and the candidate triangle's plane.
-float FaceCosine(PrimitiveDesc prim)
+// Cosine between a ray along dir and the plane of triangle tri, placed in the world by linearToWorld.
+float FaceCosine(uint3 tri, float3x3 linearToWorld, float3 dir)
 {
-    uint3 tri = LoadTriangle(prim);
-    float3x3 linearToWorld = (float3x3)ObjectToWorld3x4();
     float3 e1 = mul(linearToWorld, g_Vertices[tri.y].position - g_Vertices[tri.x].position);
     float3 e2 = mul(linearToWorld, g_Vertices[tri.z].position - g_Vertices[tri.x].position);
     float3 n = cross(e1, e2);
-    return abs(dot(n, WorldRayDirection())) * rsqrt(max(dot(n, n), 1.0e-30));
+    return abs(dot(n, dir)) * rsqrt(max(dot(n, n), 1.0e-30));
 }
 
 // uv across the ellipse a unit-width ray cone makes on the triangle's plane, as SampleGrad's ddx (.xy)

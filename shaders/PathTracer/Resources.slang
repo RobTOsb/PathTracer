@@ -36,6 +36,7 @@ RWTexture2D<float2> g_MotionVectors : register(u4);   // render pixels, current 
 RWTexture2D<float> g_Depth : register(u5);            // hardware depth, reversed Z
 RWTexture2D<float> g_SpecularHitDistance : register(u6); // kept across frames for the hold, see InitialSpecularHitDistance
 RWTexture2D<float2> g_SpecularMotionVectors : register(u7); // render pixels, current to previous, of the reflection
+RWStructuredBuffer<GpuCameraState> g_CameraState : register(u8); // per pixel, see PathTracer/CameraState.slang
 #endif
 
 struct PrimitiveDesc

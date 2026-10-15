@@ -83,6 +83,8 @@ struct RenderSettings
 	// DXR 1.2 shader execution reordering: switches to the path tracing pipeline that reorders
 	// threads by material before shading each hit. Ignored where the device has no SER.
 	bool shaderExecutionReordering = true;
+	// Shadow rays as inline ray queries (INLINE_SHADOWS) instead of TraceRay with the shadow hit group.
+	bool inlineShadowRays = true;
 	bool specularMaterials = true;
 	bool transmissiveMaterials = true;
 	int glassReflectionSplits = 2;

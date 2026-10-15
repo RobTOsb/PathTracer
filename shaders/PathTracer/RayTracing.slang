@@ -134,29 +134,3 @@ HitInfo UnpackHit(HitPayload payload, float3 origin, float3 dir)
     hit.Ns = hit.N; // LoadMaterial applies the normal map
     return hit;
 }
-
-// Visibility of the light from 0 (occluded) to 1 (unoccluded) per channel, using the dedicated
-// shadow hit group with simpler shaders.
-float3 TraceShadowRay(float3 origin, float3 directionToLight, float tracingDistance)
-{
-    RayDesc ray;
-    ray.Origin = origin;
-    ray.Direction = directionToLight;
-    ray.TMin = 0.0f;
-    ray.TMax = tracingDistance;
-
-    ShadowRayPayload payload;
-    payload.visibility = float3(1.0f, 1.0f, 1.0f);
-
-    uint rayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH;
-    TraceRay(g_Scene, rayFlags, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX, ray, payload);
-
-    return payload.visibility;
-}
-
-// Shadow ray from a surface, offset to whichever side the light is on (below it for transmission).
-// The caller already skips back-facing light directions on opaque surfaces.
-float3 CastShadowRay(float3 hitPosition, float3 surfaceNormal, float3 directionToLight, float tracingDistance)
-{
-    return TraceShadowRay(OffsetRay(hitPosition, surfaceNormal, directionToLight), directionToLight, tracingDistance);
-}

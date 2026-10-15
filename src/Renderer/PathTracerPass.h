@@ -80,8 +80,8 @@ private:
 	};
 
 	const Pipeline *SelectPipeline();
-	const Pipeline *GetPipeline(bool shaderExecutionReordering, bool atmosphere);
-	Pipeline CreatePipeline(bool shaderExecutionReordering, bool atmosphere) const;
+	const Pipeline *GetPipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows);
+	Pipeline CreatePipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows) const;
 	ResourceHandle CreateTarget(Format format, const char *debugName) const;
 
 	RenderContext *renderContext_ = nullptr;
@@ -91,11 +91,12 @@ private:
 	const SkyAtmospherePass &atmosphere_;
 	const bool rayReconstruction_;
 
-	Pipeline pipelines_[2][2]; // indexed by shaderExecutionReordering, then atmosphere
+	Pipeline pipelines_[2][2][2]; // indexed by shaderExecutionReordering, atmosphere, then inline shadows
 	bool serSupported_ = false;
 	bool serFailed_ = false; // the SER pipeline did not compile, so stay on the plain one
 	ResourceHandle output_ = InvalidResourceHandle;
 	PathTracerGuides guides_;
+	ResourceHandle cameraState_ = InvalidResourceHandle; // GpuCameraState per pixel, DLSS-RR only
 	std::vector<ResourceHandle> frameConstants_; // one per frame in flight, CPU-written each frame
 	uint width_ = 0;
 	uint height_ = 0;

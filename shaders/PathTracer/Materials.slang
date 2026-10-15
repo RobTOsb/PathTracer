@@ -121,20 +121,18 @@ float3 MediumExtinction(OpenPBRBaseParams p)
     return -log(max(p.transmissionColour, 1.0e-4)) / p.transmissionDepth;
 }
 
-// Base colour and alpha at the candidate hit, for the any-hit shaders.
-float4 LoadBaseColourAlpha(GpuMaterial material, PrimitiveDesc prim, BuiltInTriangleIntersectionAttributes attr)
+// Base colour and alpha at a candidate hit, for the any-hit shaders and the inline shadow query.
+float4 LoadBaseColourAlpha(GpuMaterial material, float2 uv)
 {
     float4 albedo = material.baseColour;
     if (material.albedoTexture != INVALIDDESCRIPTORHANDLE)
-        albedo *= SampleTexture(material.albedoTexture, InterpolateTexCoord(LoadTriangle(prim), Barycentrics(attr)));
+        albedo *= SampleTexture(material.albedoTexture, uv);
     return albedo;
 }
 
-// What a pass-through surface lets a shadow ray through, for ShadowAnyHit.
-float3 PassThroughTransmittance(GpuMaterial material, PrimitiveDesc prim, BuiltInTriangleIntersectionAttributes attr,
-                                float3 baseColour)
+// What a pass-through surface lets a shadow ray through.
+float3 PassThroughTransmittance(GpuMaterial material, float2 uv, float3 baseColour, float faceCosine)
 {
-    float2 uv = InterpolateTexCoord(LoadTriangle(prim), Barycentrics(attr));
     float transmission = material.transmission;
     if (material.transmissionTexture != INVALIDDESCRIPTORHANDLE)
         transmission *= SampleTexture(material.transmissionTexture, uv).r;
@@ -148,5 +146,29 @@ float3 PassThroughTransmittance(GpuMaterial material, PrimitiveDesc prim, BuiltI
     p.specularRoughness = 0.0;
     SetTransmission(p, material, transmission, true);
     ApplyMaterialOverrides(p);
-    return ThinDeltaTransmittance(p, FaceCosine(prim));
+    return ThinDeltaTransmittance(p, faceCosine);
+}
+
+// What a candidate triangle lets a shadow ray along dir through: blended (1 - alpha) and pass-through
+// surfaces some, anything else nothing. False for a cut-out, which the ray ignores.
+bool ShadowCandidateTransmittance(PrimitiveDesc prim, uint primitiveIndex, float2 barycentrics, float3x3 linearToWorld,
+                                  float3 dir, out float3 transmitted)
+{
+    transmitted = float3(0.0, 0.0, 0.0);
+    GpuMaterial material = LoadGpuMaterial(prim.materialIndex);
+    uint3 tri = LoadTriangle(prim, primitiveIndex);
+    float2 uv = InterpolateTexCoord(tri, Barycentrics(barycentrics));
+    float4 albedo = LoadBaseColourAlpha(material, uv);
+
+    // Of the light reaching the surface, the share that meets it rather than passing a cut-out or blend.
+    float coverage = 1.0;
+    if (material.alphaMode == ALPHA_MODE_MASK && albedo.a < material.alphaCutoff)
+        return false;
+    if (material.alphaMode == ALPHA_MODE_BLEND)
+        coverage = albedo.a;
+
+    transmitted = float3(1.0 - coverage, 1.0 - coverage, 1.0 - coverage);
+    if ((material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
+        transmitted += coverage * PassThroughTransmittance(material, uv, albedo.rgb, FaceCosine(tri, linearToWorld, dir));
+    return true;
 }

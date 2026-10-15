@@ -146,6 +146,28 @@ struct GpuVertex
 	float4 tangent; // .w = bitangent sign
 };
 
+// One per render pixel under DLSS_RR: what TracePath keeps for the camera between the path segments
+// that touch it, packed by PathTracer/CameraState.slang.
+struct GpuCameraState
+{
+	float3 guidePosition; // the guides' position, its w in flags
+	uint guideNormal; // octahedral snorm16x2
+	uint3 guideAlbedos; // half: diffuse rgb, then specular rgb
+	uint guideRoughnessCurvature; // half2
+	float guideSpecularHitDistance;
+	float chainPrimaryDistance;
+	float chainLength;
+	float chainPixelDeflection;
+	float4 chainRotor;
+	uint2 chainThroughputFraction; // half: throughput rgb, primary fraction
+	uint2 paneAlbedoLuminance; // half: albedo rgb, luminance
+	float paneDistance;
+	uint paneCurvatureHitDistance; // half2
+	uint2 transmittance; // half: camera transmittance rgb, then unused
+	float distance;
+	uint flags; // CAMERA_STATE_* in CameraState.slang
+};
+
 // Root constants for the tonemap compute pass (bound as g_PushConstants).
 struct TonemapConstants
 {
@@ -164,6 +186,7 @@ static_assert(sizeof(FrameConstants) == 448,"FrameConstants must match the HLSL 
 static_assert(sizeof(GpuMaterial) == 96, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
+static_assert(sizeof(GpuCameraState) == 104, "GpuCameraState must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 32, "TonemapConstants must fit the root constants");
 #endif
 
