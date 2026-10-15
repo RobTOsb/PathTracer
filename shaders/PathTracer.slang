@@ -52,7 +52,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
     {
         for (; bounce < maxSegments; ++bounce)
         {
-            HitInfo hit = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, rng);
+            HitInfo hit = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, fromCamera || chain.active, rng);
 
             if (hitDistancePending)
             {
@@ -499,21 +499,28 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     float3 Ng = normalize(faceCross * handedness);
 
     payload.hitT = RayTCurrent();
-    payload.Ng = Ng;
-    payload.materialId = prim.materialIndex;
-    payload.N = normalize(mul(cofactor, objectNormal) * handedness);
-    payload.T = normalize(mul(linearToWorld, objectTangent.xyz));
+    payload.Ng = OctEncode(Ng);
+    payload.N = OctEncode(mul(cofactor, objectNormal) * handedness);
+    payload.T = OctEncode(mul(linearToWorld, objectTangent.xyz));
     // A mirroring transform flips cross(N, T), so fold its handedness into the bitangent sign.
-    payload.tangentSign = (objectTangent.w < 0.0 ? -1.0 : 1.0) * handedness;
+    bool tangentNegative = (objectTangent.w < 0.0) != (handedness < 0.0);
+    payload.materialId = prim.materialIndex | (tangentNegative ? TANGENT_SIGN_BIT : 0u);
     float2 uv0 = v0.texCoord;
     float2 uv1 = v1.texCoord;
     float2 uv2 = v2.texCoord;
     payload.uv = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
-    payload.uvGradients = RayConeUvGradients(e1, e2, faceCross, uv0, uv1, uv2, WorldRayDirection());
+    float4 uvGradients = RayConeUvGradients(e1, e2, faceCross, uv0, uv1, uv2, WorldRayDirection());
+    payload.uvGradients = uint2(PackHalf2(uvGradients.xy), PackHalf2(uvGradients.zw));
+
+    uint emitterTable = g_Emitters[InstanceIndex()];
+    payload.emitter = emitterTable != INVALID_LIGHT_INDEX ? emitterTable + PrimitiveIndex() : INVALID_LIGHT_INDEX;
 
 #ifdef DLSS_RR
     // Largest turn of the vertex normals per unit length along an edge, telling flat mirrors from curved
     // ones for PSR. Chords between object-space normals stand in for angles, over world-space edges.
+    // Only the guides use it, so other hits skip it.
+    if (payload.curvature == 0)
+        return;
     float3 dn1 = v1.normal - v0.normal;
     float3 dn2 = v2.normal - v0.normal;
     float3 dn3 = dn2 - dn1;
@@ -533,9 +540,6 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
 #else
     payload.curvature = 0;
 #endif
-
-    uint emitterTable = g_Emitters[InstanceIndex()];
-    payload.emitter = emitterTable != INVALID_LIGHT_INDEX ? emitterTable + PrimitiveIndex() : INVALID_LIGHT_INDEX;
 }
 
 // Alpha for camera and bounce rays: masked surfaces are cut at alphaCutoff, blended ones use

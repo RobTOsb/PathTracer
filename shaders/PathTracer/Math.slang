@@ -15,6 +15,39 @@ float2 UnpackHalf2(float packed)
     return float2(f16tof32(bits & 0xFFFF), f16tof32(bits >> 16));
 }
 
+// Two float16 values, x in the low half, clamped to the finite range.
+uint PackHalf2(float2 v)
+{
+    v = clamp(v, -HALF_MAX, HALF_MAX);
+    return f32tof16(v.x) | (f32tof16(v.y) << 16);
+}
+
+float2 UnpackHalf2(uint bits)
+{
+    return float2(f16tof32(bits & 0xFFFF), f16tof32(bits >> 16));
+}
+
+// Unit vector to octahedral snorm16x2, x in the low half.
+uint OctEncode(float3 n)
+{
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    float2 e = n.xy;
+    if (n.z < 0.0)
+        e = (1.0 - abs(e.yx)) * float2(e.x >= 0.0 ? 1.0 : -1.0, e.y >= 0.0 ? 1.0 : -1.0);
+    int2 q = int2(round(clamp(e, -1.0, 1.0) * 32767.0));
+    return (uint(q.x) & 0xFFFF) | (uint(q.y) << 16);
+}
+
+float3 OctDecode(uint bits)
+{
+    float2 e = max(float2(int2(int(bits << 16) >> 16, int(bits) >> 16)) * (1.0 / 32767.0), -1.0);
+    float3 v = float3(e, 1.0 - abs(e.x) - abs(e.y));
+    float t = saturate(-v.z);
+    v.x += v.x >= 0.0 ? -t : t;
+    v.y += v.y >= 0.0 ? -t : t;
+    return normalize(v);
+}
+
 void BuildOrthonormalBasis(float3 n, out float3 t, out float3 b)
 {
     // Duff et al. 2017

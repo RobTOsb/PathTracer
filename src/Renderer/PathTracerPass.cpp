@@ -19,7 +19,7 @@
 
 namespace
 {
-	constexpr uint32_t kMaxPayloadSizeInBytes = 80;
+	constexpr uint32_t kMaxPayloadSizeInBytes = 44;
 
 	// Halton phases before the jitter repeats. The DLSS guide asks for 8 * (output / render)^2, so
 	// 72 at Ultra Performance, and the RR guide for at least 32 with no reason to limit it.

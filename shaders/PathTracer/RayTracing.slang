@@ -31,19 +31,21 @@ struct ShadowRayPayload
     float3 visibility;
 };
 
+// Packed like a G-buffer to keep it in registers: 44 bytes.
 struct HitPayload
 {
     float hitT;
-    float3 Ng;
-    uint materialId; // on the way in, the seed AnyHit draws its blend decisions from
-    float3 N;
-    float tangentSign;
-    float3 T;
-    float2 uv;
+    uint materialId; // on the way in, the seed AnyHit draws its blend decisions from; bit 31 is the tangent sign
     uint emitter;
-    float4 uvGradients;
-    uint curvature; // half2: HitInfo::curvature, HitInfo::meanCurvature
+    uint Ng; // octahedral snorm16x2
+    uint N;  // octahedral snorm16x2
+    uint T;  // octahedral snorm16x2
+    float2 uv;
+    uint2 uvGradients; // half4
+    uint curvature; // half2: HitInfo::curvature, HitInfo::meanCurvature; on the way in, nonzero to compute them
 };
+
+static const uint TANGENT_SIGN_BIT = 0x80000000u;
 
 // First bounce whose hits the SER pipeline reorders. Camera rays leave raygen in screen order, so
 // their hits are already about as coherent as reordering would make them.
@@ -64,7 +66,8 @@ void GenerateCameraRay(uint2 pixel, float2 u, out float3 origin, out float3 dir)
     dir = normalize(mul(float4(viewDir, 0.0), g_Frame.invView).xyz);
 }
 
-HitInfo TraceClosest(float3 origin, float3 dir, bool reorder, inout uint rng)
+// needCurvature: the hit feeds the DLSS-RR guides, the only users of its curvature.
+HitInfo TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvature, inout uint rng)
 {
     RayDesc ray;
     ray.Origin = origin;
@@ -75,6 +78,7 @@ HitInfo TraceClosest(float3 origin, float3 dir, bool reorder, inout uint rng)
     HitPayload payload = (HitPayload)0;
     payload.hitT = -1.0;
     payload.materialId = rng++;
+    payload.curvature = needCurvature ? 1u : 0u;
     // Masked and blended geometry runs AnyHit; everything else is flagged opaque in its BLAS.
 #ifdef SER
     // DXR 1.2 SER: traverse, regroup threads by hit/miss and material, then shade. The threads stay in
@@ -98,15 +102,16 @@ HitInfo TraceClosest(float3 origin, float3 dir, bool reorder, inout uint rng)
 
     hit.t = payload.hitT;
     hit.position = origin + dir * payload.hitT;
-    hit.Ng = payload.Ng;
-    hit.N = payload.N;
-    hit.T = normalize(payload.T - hit.N * dot(hit.N, payload.T));
-    hit.B = cross(hit.N, hit.T) * payload.tangentSign;
+    hit.Ng = OctDecode(payload.Ng);
+    hit.N = OctDecode(payload.N);
+    float3 T = OctDecode(payload.T);
+    hit.T = normalize(T - hit.N * dot(hit.N, T));
+    hit.B = cross(hit.N, hit.T) * ((payload.materialId & TANGENT_SIGN_BIT) != 0 ? -1.0 : 1.0);
     hit.uv = payload.uv;
-    hit.uvGradients = payload.uvGradients;
-    hit.materialId = payload.materialId;
+    hit.uvGradients = float4(UnpackHalf2(payload.uvGradients.x), UnpackHalf2(payload.uvGradients.y));
+    hit.materialId = payload.materialId & ~TANGENT_SIGN_BIT;
     hit.emitter = payload.emitter;
-    float2 curvature = f16tof32(uint2(payload.curvature, payload.curvature >> 16));
+    float2 curvature = UnpackHalf2(payload.curvature);
     hit.curvature = curvature.x;
     hit.meanCurvature = curvature.y;
     hit.emission = float3(0.0, 0.0, 0.0);
