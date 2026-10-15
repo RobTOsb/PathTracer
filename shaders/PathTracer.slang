@@ -12,6 +12,8 @@ import PathTracer.Psr;
 import PathTracer.GlassSplit;
 
 static const uint RR_START_BOUNCE = 1;
+// Longest path through a medium that absorption is evaluated over
+static const float MAX_MEDIUM_DISTANCE = 1.0e30;
 
 float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides guides)
 {
@@ -174,7 +176,10 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
                     // The last segment takes no BSDF sample, which leaves NEE as the only strategy there.
                     float w = ls.lightSamplingOnly || lastSegment ? 1.0 : PowerHeuristic(ls.pdf, bsdfPdf);
                     bool intoMedium = dot(ls.direction, hit.Ng) < 0.0 && !mat.geometryThinWalled;
-                    float3 shadowTransmittance = intoMedium ? exp(-extinction * ls.distance) : AtmosphereTransmittance(ls.distance);
+                    // The sun is FLT_MAX away. Capped, so a zero extinction cannot meet an overflowed distance
+                    // (0 * inf) once the compiler folds exp's log2(e) into it; any medium is far shorter.
+                    float3 shadowTransmittance = intoMedium ? exp(-extinction * min(ls.distance, MAX_MEDIUM_DISTANCE))
+                                                            : AtmosphereTransmittance(ls.distance);
                     neeContribution = throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf);
                     traceShadowRay = true;
                 }
