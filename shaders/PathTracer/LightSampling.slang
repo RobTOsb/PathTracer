@@ -102,6 +102,47 @@ LightSelectVertex MakeLightSelectVertex(float3 position, OpenPBRBaseParams mat, 
     return v;
 }
 
+// A LightSelectVertex as the path carries it to the next hit, half the registers: directions
+// octahedral, weights and alpha as halves.
+struct PackedLightSelectVertex
+{
+    float3 position;
+    uint normal;
+    uint tangent;
+    uint wo;
+    uint weights; // half2: diffuseWeight, specularWeight
+    uint alpha;   // half2
+    bool tree;
+};
+
+PackedLightSelectVertex PackLightSelectVertex(LightSelectVertex v)
+{
+    PackedLightSelectVertex p;
+    p.position = v.position;
+    p.normal = OctEncode(v.normal);
+    p.tangent = OctEncode(v.tangent);
+    p.wo = OctEncode(v.wo);
+    p.weights = PackHalf2(float2(v.diffuseWeight, v.specularWeight));
+    p.alpha = PackHalf2(v.alpha);
+    p.tree = v.tree;
+    return p;
+}
+
+LightSelectVertex UnpackLightSelectVertex(PackedLightSelectVertex p)
+{
+    LightSelectVertex v;
+    v.position = p.position;
+    v.normal = OctDecode(p.normal);
+    v.tangent = OctDecode(p.tangent);
+    v.wo = OctDecode(p.wo);
+    float2 weights = UnpackHalf2(p.weights);
+    v.diffuseWeight = weights.x;
+    v.specularWeight = weights.y;
+    v.alpha = UnpackHalf2(p.alpha);
+    v.tree = p.tree;
+    return v;
+}
+
 LightTreeShadingContext MakeLightTreeShadingContext(LightSelectVertex v)
 {
     return MakeLightTreeShadingContext(v.position, v.tangent, cross(v.normal, v.tangent), v.normal, v.wo,

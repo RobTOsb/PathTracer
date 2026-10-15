@@ -150,7 +150,7 @@ float4 LightTreeGroupImportance(StructuredBuffer<GpuLightTreeNode> nodes, uint f
     for (uint i = 0; i < LIGHT_TREE_WIDTH; ++i)
         childOrLight[i] = LightTreeChildOrLight(group[i]);
     float4 importance = float4(0.0, 0.0, 0.0, 0.0);
-    [loop]
+    [unroll]
     for (uint i = 0; i < LIGHT_TREE_WIDTH; ++i)
     {
         GpuLightTreeNode node = i == 0 ? group[0] : i == 1 ? group[1] : i == 2 ? group[2] : group[3];

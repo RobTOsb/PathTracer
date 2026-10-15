@@ -66,8 +66,9 @@ void GenerateCameraRay(uint2 pixel, float2 u, out float3 origin, out float3 dir)
     dir = normalize(mul(float4(viewDir, 0.0), g_Frame.invView).xyz);
 }
 
-// needCurvature: the hit feeds the DLSS-RR guides, the only users of its curvature.
-HitInfo TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvature, inout uint rng)
+// needCurvature: the hit feeds the DLSS-RR guides, the only users of its curvature. Returns the
+// payload still packed (see HitDistance and UnpackHit), the smaller form to keep across other rays.
+HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvature, inout uint rng)
 {
     RayDesc ray;
     ray.Origin = origin;
@@ -90,16 +91,31 @@ HitInfo TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvature
         uint materialHint = hitObject.IsHit() ? LoadPrimitive(hitObject.GetInstanceID()).materialIndex : 0;
         ReorderThread(hitObject, materialHint, g_Frame.serCoherenceHintBits);
     }
+    // A fresh payload: only AnyHit read the traced one, so it need not survive the reorder.
+    payload = (HitPayload)0;
+    payload.hitT = -1.0;
+    payload.curvature = needCurvature ? 1u : 0u;
     HitObject::Invoke(hitObject, payload);
 #else
     TraceRay(g_Scene, RAY_FLAG_NONE, 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
 #endif
+    return payload;
+}
 
+// Whether and how far the ray went, the rest of the hit left at zero.
+HitInfo HitDistance(HitPayload payload)
+{
     HitInfo hit = (HitInfo)0;
     hit.hit = payload.hitT >= 0.0;
-    if (!hit.hit)
-        return hit;
+    hit.t = hit.hit ? payload.hitT : 0.0;
+    return hit;
+}
 
+// The whole hit of a ray from origin along dir that met a surface.
+HitInfo UnpackHit(HitPayload payload, float3 origin, float3 dir)
+{
+    HitInfo hit;
+    hit.hit = true;
     hit.t = payload.hitT;
     hit.position = origin + dir * payload.hitT;
     hit.Ng = OctDecode(payload.Ng);

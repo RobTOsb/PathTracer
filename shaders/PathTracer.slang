@@ -37,7 +37,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
     float3 throughput = float3(1.0, 1.0, 1.0);
     float3 segmentExtinction = float3(0.0, 0.0, 0.0);
     float prevBsdfPdf = 0.0;
-    LightSelectVertex prevVertex = (LightSelectVertex)0; // where the current segment started, once a surface scattered
+    PackedLightSelectVertex prevVertex = (PackedLightSelectVertex)0; // where the current segment started, once a surface scattered
     RayCone cone = { 0.0, g_Frame.rayConePixelSpread };
 
     bool fromCamera = true;
@@ -52,7 +52,9 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
     {
         for (; bounce < maxSegments; ++bounce)
         {
-            HitInfo hit = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, fromCamera || chain.active, rng);
+            HitPayload payload = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, fromCamera || chain.active, rng);
+            // Unpacked after the in-scatter's shadow ray, so only the packed payload is held across it.
+            HitInfo hit = HitDistance(payload);
 
             if (hitDistancePending)
             {
@@ -110,6 +112,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
                 break;
             }
 
+            hit = UnpackHit(payload, origin, dir);
+
             // Material and shading basis for this hit, its textures filtered over the cone's footprint.
             cone.width += cone.spread * hit.t;
             OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments);
@@ -124,7 +128,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
                 {
                     uint lightIndex = g_Emitters[hit.emitter];
                     if (lightIndex != INVALID_LIGHT_INDEX)
-                        w = PowerHeuristic(prevBsdfPdf, EmitterLightPdf(prevVertex, lightIndex, dir, hit.position));
+                        w = PowerHeuristic(prevBsdfPdf, EmitterLightPdf(UnpackLightSelectVertex(prevVertex), lightIndex, dir, hit.position));
                 }
                 radiance += throughput * hit.emission * w;
             }
@@ -162,8 +166,10 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng, out PrimaryGuides gu
             // One hash covers the light sample (xy) and the Russian roulette decision (z).
             float3 lightU = Rand3(rng);
 
-            LightSelectVertex vertex = MakeLightSelectVertex(hit.position, mat, ctx, wo, opaque || deltaTransmission, bounce);
-            LightSample ls = SampleLight(vertex, lightU.xy, rng);
+            // Sampled with the rounding prevVertex keeps, so both ends of an emitter's MIS see the same pmf.
+            PackedLightSelectVertex vertex =
+                PackLightSelectVertex(MakeLightSelectVertex(hit.position, mat, ctx, wo, opaque || deltaTransmission, bounce));
+            LightSample ls = SampleLight(UnpackLightSelectVertex(vertex), lightU.xy, rng);
             bool lastSegment = bounce + 1 >= maxSegments;
             float3 neeContribution = float3(0.0, 0.0, 0.0);
             bool traceShadowRay = false;
