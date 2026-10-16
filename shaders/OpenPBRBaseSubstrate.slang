@@ -30,7 +30,8 @@
 //   Specular reflection uses bounded VNDF sampling (Eto and Tokuyoshi 2023).
 //   Specular transmission uses spherical cap VNDF sampling (Dupuy and Benyoub 2023), because
 //   the bounded cap is only valid for reflections.
-//   Diffuse and subsurface use cosine-weighted hemisphere sampling.
+//   Diffuse and subsurface use cosine-weighted hemisphere sampling. On a thin wall the diffuse lobe's
+//   sample goes to the lower hemisphere with the transmitted share of its albedo (DiffuseTransmittedShare).
 //   Thin-walled transmission mirrors the specular reflection lobe through the tangent plane, so it
 //   samples like the reflection. At zero roughness it is a delta lobe straight through
 //   (LOBE_DELTA_TRANSMISSION), which Eval and Pdf leave out; the sample's pdf is then the discrete
@@ -38,9 +39,12 @@
 //
 // Simplifications
 //   No coat, fuzz or thin film, ambient IOR is 1.
-//   Thin-walled surfaces have no diffuse or subsurface transmission, and their specular transmission
-//   is the single-interface lobe above (as in glTF), not a slab with two interfaces.
-//   Subsurface is approximated by a Lambertian lobe under the dielectric interface.
+//   Thin-walled specular transmission is the single-interface lobe above (as in glTF), not a slab with
+//   two interfaces.
+//   Subsurface is approximated by a Lambertian lobe under the dielectric interface. On a thin wall it
+//   splits into Lambertian reflection, (1 - g) / 2 of it, and Lambertian transmission, (1 + g) / 2, with
+//   g = subsurfaceScatterAnisotropy (spec, thin-walled mode); base_diffuse_roughness does not shape
+//   the transmission. Both carry the same (1 - E(wo)) albedo scaling, for the interface on the way in.
 //   transmissionColour with zero depth is applied once, on entry. With depth > 0 the renderer
 //   should convert it to medium extinction instead.
 //   No multiple-scattering compensation for the GGX lobes.
@@ -52,6 +56,7 @@ static const uint LOBE_DIFFUSE = 1;
 static const uint LOBE_SPECULAR_REFLECTION = 2;
 static const uint LOBE_SPECULAR_TRANSMISSION = 4;
 static const uint LOBE_DELTA_TRANSMISSION = 8;
+static const uint LOBE_DIFFUSE_TRANSMISSION = 16;
 
 struct OpenPBRBaseParams
 {
@@ -72,6 +77,7 @@ struct OpenPBRBaseParams
 
     float subsurfaceWeight;
     float3 subsurfaceColour;
+    float subsurfaceScatterAnisotropy; // thin-walled only: -1 all reflected, 1 all transmitted
 
     bool geometryThinWalled;
     float3 geometryTangent;
@@ -132,6 +138,32 @@ float3 TransmissionTint(OpenPBRBaseParams p)
 bool HasDeltaTransmission(OpenPBRBaseParams p)
 {
     return p.geometryThinWalled && p.specularRoughness <= 0.0 && p.transmissionWeight > 0.0;
+}
+
+// A thin wall whose subsurface transmits diffusely to the other side.
+bool HasDiffuseTransmission(OpenPBRBaseParams p)
+{
+    return p.geometryThinWalled && p.subsurfaceWeight > 0.0 && p.subsurfaceScatterAnisotropy > -1.0;
+}
+
+// Thin-walled subsurface: what of S's albedo goes to each side, spec equations for f^R and f^T.
+float SubsurfaceReflectedFraction(OpenPBRBaseParams p)
+{
+    return p.geometryThinWalled ? 0.5 * (1.0 - p.subsurfaceScatterAnisotropy) : 1.0;
+}
+
+// The share of the diffuse lobe's albedo (base diffuse and subsurface) that goes to the lower
+// hemisphere, which is also the probability of sampling it there.
+float DiffuseTransmittedShare(OpenPBRBaseParams p)
+{
+    if (!HasDiffuseTransmission(p))
+        return 0.0;
+    float S = p.subsurfaceWeight;
+    float subsurface = S * Luminance(p.subsurfaceColour);
+    float transmitted = 0.5 * (1.0 + p.subsurfaceScatterAnisotropy) * subsurface;
+    float reflected = (1.0 - S) * p.baseWeight * Luminance(p.baseColour) + (subsurface - transmitted);
+    float total = transmitted + reflected;
+    return total > 0.0 ? transmitted / total : 0.0;
 }
 
 // GGX microfacet model
@@ -422,21 +454,30 @@ float3 OpenPBREvalPdfLocal(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out
 
     if (wi.z < 0.0)
     {
+        // Thin-walled subsurface seen from the other side, never inside.
+        float3 fDiffuseT = float3(0.0, 0.0, 0.0);
+        if (HasDiffuseTransmission(p))
+        {
+            float cosI = -wi.z;
+            fDiffuseT = (1.0 - M) * (1.0 - T) * S * 0.5 * (1.0 + p.subsurfaceScatterAnisotropy) * (1.0 - c.E) *
+                        p.subsurfaceColour * (cosI / PI);
+            pdf = c.probDiffuse * DiffuseTransmittedShare(p) * cosI / PI;
+        }
         if (c.deltaTransmission)
-            return float3(0.0, 0.0, 0.0);
+            return fDiffuseT;
         float transmissionPdf;
         float fT = (p.geometryThinWalled ? EvalPdfGGXThinTransmission(wi, c, transmissionPdf)
                                         : EvalPdfGGXTransmission(wi, c, transmissionPdf)) * abs(wi.z);
-        pdf = c.probSpecT * transmissionPdf;
+        pdf += c.probSpecT * transmissionPdf;
         if (c.inside)
             return fT.xxx;
-        return (1.0 - M) * T * TransmissionTint(p) * fT;
+        return (1.0 - M) * T * TransmissionTint(p) * fT + fDiffuseT;
     }
 
     float3 h = normalize(wi + wo);
     float ndf = GGXD(h, c.alpha);
 
-    pdf = c.probSpecR * ndf * c.reflPdfScale + c.probDiffuse * wi.z / PI;
+    pdf = c.probSpecR * ndf * c.reflPdfScale + c.probDiffuse * (1.0 - DiffuseTransmittedShare(p)) * wi.z / PI;
 
     float cosH = saturate(dot(wo, h));
     float microfacet = ndf * GGXG2(wi, c.lambdaO, c.alpha) / (4.0 * wi.z * wo.z);
@@ -451,7 +492,7 @@ float3 OpenPBREvalPdfLocal(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out
     // Albedo scaling with the untinted albedo, since specularColour does not affect transmission.
     float transmitted = 1.0 - c.E;
     float3 fDiffuse = transmitted * p.baseWeight * EvalEON(p.baseColour, p.baseDiffuseRoughness, wi, wo);
-    float3 fSubsurface = transmitted * p.subsurfaceColour / PI;
+    float3 fSubsurface = (transmitted * SubsurfaceReflectedFraction(p)) * p.subsurfaceColour / PI;
 
     // Spec mix tree. The translucent slab only contributes fSpecR in the upper hemisphere.
     float3 fOpaqueBase = fSpecR + lerp(fDiffuse, fSubsurface, S);
@@ -511,6 +552,13 @@ BSDFSample OpenPBRSample(OpenPBRBaseParams p, OpenPBRContext c, float3 u)
     {
         wi = SampleCosineHemisphere(u.yz);
         lobe = LOBE_DIFFUSE;
+        // Where u.x falls in the diffuse lobe's share picks the side.
+        float shareU = (u.x - (c.probSpecR + c.probSpecT)) / c.probDiffuse;
+        if (shareU < DiffuseTransmittedShare(p))
+        {
+            wi.z = -wi.z;
+            lobe = LOBE_DIFFUSE_TRANSMISSION;
+        }
     }
     else
     {

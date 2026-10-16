@@ -104,8 +104,8 @@ enum GpuAlphaMode
 UnscopedEnum
 enum GpuTransmissionFlags
 {
-	// Material::IsThinWalled: both sides are outside, light crosses without refracting and without
-	// entering a medium.
+	// Material::IsThinWalled (EXT_materials_thin_wall): both sides are outside, light crosses without
+	// refracting and without entering a medium.
 	TRANSMISSION_THIN_WALLED = 1,
 	// Thin-walled, transmissive and smooth (roughness factor 0, so every texel is too), which makes
 	// its transmission a delta lobe straight through. Shadow rays pass such surfaces in
@@ -136,6 +136,14 @@ struct GpuMaterial
 	// the medium. FLT_MAX: no absorption (always, while KHR_materials_volume is not loaded).
 	float3 attenuationColour;
 	float attenuationDistance;
+	// KHR_materials_diffuse_transmission, thin-walled only: the share of the diffuse base transmitted
+	// to the other side rather than reflected, and its colour (OpenPBR thin-walled subsurface).
+	float3 diffuseTransmissionColour;
+	float diffuseTransmission;
+	uint diffuseTransmissionTexture; // A multiplies diffuseTransmission
+	uint diffuseTransmissionColourTexture; // sRGB, RGB multiplies diffuseTransmissionColour
+	uint pad0;
+	uint pad1;
 };
 
 struct GpuVertex
@@ -183,7 +191,7 @@ struct TonemapConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(FrameConstants) == 448,"FrameConstants must match the HLSL cbuffer layout");
-static_assert(sizeof(GpuMaterial) == 96, "GpuMaterial must match the structured buffer stride");
+static_assert(sizeof(GpuMaterial) == 128, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
 static_assert(sizeof(GpuCameraState) == 104, "GpuCameraState must match the structured buffer stride");

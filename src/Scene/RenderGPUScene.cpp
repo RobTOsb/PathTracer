@@ -28,11 +28,6 @@ namespace
 	// large texture sets from needing all of their staging buffers alive at once.
 	constexpr uint64_t kMaxPendingUploadBytes = 256ull * 1024 * 1024;
 
-	// Temporary: every transmissive material is thin-walled, whatever the glTF loader says, so light
-	// sampling reaches the bulbs inside Intel Sponza's lanterns (open quads, not closed volumes) through
-	// their glass. Solid glass blocks shadow rays. Bump kSceneCacheVersion when changing this.
-	constexpr bool kThinWalledTransmission = true;
-
 	bool IsUsablePrimitive(const Scene::Primitive &primitive)
 	{
 		return primitive.IsValid() && primitive.HasIndices() && primitive.GetIndexCount() >= 3;
@@ -210,7 +205,9 @@ namespace
 									  &material.roughMetalTexture,
 									  &material.normalTexture,
 									  &material.transmissionTexture,
-									  &material.emissiveTexture })
+									  &material.emissiveTexture,
+									  &material.diffuseTransmissionTexture,
+									  &material.diffuseTransmissionColourTexture })
 			{
 				apply(*texture);
 			}
@@ -562,7 +559,9 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 								 material.roughMetalTexture,
 								 material.normalTexture,
 								 material.transmissionTexture,
-								 material.emissiveTexture })
+								 material.emissiveTexture,
+								 material.diffuseTransmissionTexture,
+								 material.diffuseTransmissionColourTexture })
 		{
 			if (!validTexture(texture))
 			{
@@ -978,7 +977,8 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 																		  "Material_Transmission",
 																		  batch)
 														  : INVALIDDESCRIPTORHANDLE;
-		if (material.IsThinWalled() || (kThinWalledTransmission && gpu.transmission > 0.0f))
+		// Only the file makes a material thin-walled (EXT_materials_thin_wall).
+		if (material.IsThinWalled())
 		{
 			gpu.transmissionFlags |= TRANSMISSION_THIN_WALLED;
 			if (gpu.transmission > 0.0f && gpu.roughness <= 0.0f)
@@ -986,6 +986,25 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 		}
 		gpu.attenuationColour = float3(1.0f, 1.0f, 1.0f);
 		gpu.attenuationDistance = FLT_MAX;
+		// Diffuse transmission into a solid object would need a medium, so only thin walls keep it.
+		const float *diffuseTransmissionColour = material.GetDiffuseTransmissionColour();
+		gpu.diffuseTransmission = material.IsThinWalled() ? material.GetDiffuseTransmission() : 0.0f;
+		gpu.diffuseTransmissionColour =
+				float3(diffuseTransmissionColour[0], diffuseTransmissionColour[1], diffuseTransmissionColour[2]);
+		gpu.diffuseTransmissionTexture = INVALIDDESCRIPTORHANDLE;
+		gpu.diffuseTransmissionColourTexture = INVALIDDESCRIPTORHANDLE;
+		if (gpu.diffuseTransmission > 0.0f)
+		{
+			gpu.diffuseTransmissionTexture = UploadTexture(material.GetDiffuseTransmissionTexture(),
+														   Format::R8G8B8A8_UNORM,
+														   "Material_DiffuseTransmission",
+														   batch);
+			// sRGB, so pointing it at the base colour image shares the albedo texture.
+			gpu.diffuseTransmissionColourTexture = UploadTexture(material.GetDiffuseTransmissionColourTexture(),
+																 Format::R8G8B8A8_UNORM_SRGB,
+																 "Material_DiffuseTransmissionColour",
+																 batch);
+		}
 		gpu.albedoTexture =
 				UploadTexture(material.GetAlbedoTexture(), Format::R8G8B8A8_UNORM_SRGB, "Material_Albedo", batch);
 		gpu.roughMetalTexture =
@@ -1024,6 +1043,9 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 	fallback.transmissionTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.attenuationColour = float3(1.0f, 1.0f, 1.0f);
 	fallback.attenuationDistance = FLT_MAX;
+	fallback.diffuseTransmissionColour = float3(1.0f, 1.0f, 1.0f);
+	fallback.diffuseTransmissionTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.diffuseTransmissionColourTexture = INVALIDDESCRIPTORHANDLE;
 	materials.push_back(fallback);
 }
 

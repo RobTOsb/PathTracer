@@ -15,7 +15,9 @@
 // 3: textures store their format, BC7 where they could be compressed.
 // 4: rebuilds the version 3 files, whose BC7 blocks the encoder wrote as zeros.
 // 5: transmissive materials thin-walled (kThinWalledTransmission in RenderGPUScene.cpp).
-constexpr uint32_t kSceneCacheVersion = 5;
+// 6: thin-walled from EXT_materials_thin_wall only, diffuse transmission in GpuMaterial (128 bytes).
+// 7: primitives without TEXCOORD_0 or indices load instead of being skipped.
+constexpr uint32_t kSceneCacheVersion = 7;
 
 struct SceneCacheTexture
 {

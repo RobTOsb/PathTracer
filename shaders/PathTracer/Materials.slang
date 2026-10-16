@@ -22,6 +22,7 @@ OpenPBRBaseParams OpenPBRDefaults()
     p.transmissionDepth = 0.0;
     p.subsurfaceWeight = 0.0;
     p.subsurfaceColour = float3(0.8, 0.8, 0.8);
+    p.subsurfaceScatterAnisotropy = 0.0;
     p.geometryThinWalled = false;
     p.geometryTangent = float3(1.0, 0.0, 0.0);
     p.geometryBitangent = float3(0.0, 1.0, 0.0);
@@ -56,7 +57,11 @@ void ApplyMaterialOverrides(inout OpenPBRBaseParams p)
         p.specularColour = float3(0.0, 0.0, 0.0);
     }
     if ((g_Frame.materialOverrides & MATERIAL_OVERRIDE_NO_TRANSMISSION) != 0)
+    {
         p.transmissionWeight = 0.0;
+        if (p.geometryThinWalled)
+            p.subsurfaceWeight = 0.0;
+    }
 }
 
 // Reads the material row once, samples all of its textures and applies the normal map to hit.Ns.
@@ -109,6 +114,23 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     p.baseMetalness = saturate(metallic);
     p.specularRoughness = saturate(roughness);
     SetTransmission(p, material, transmission, thinWalled);
+
+    // glTF diffuse transmission mixes the base's diffuse BRDF with a diffuse BTDF, which is OpenPBR's
+    // thin-walled subsurface with all of it transmitted (anisotropy 1). Only thin walls have it.
+    if (material.diffuseTransmission > 0.0)
+    {
+        float diffuseTransmission = material.diffuseTransmission;
+        if (material.diffuseTransmissionTexture != INVALIDDESCRIPTORHANDLE)
+            diffuseTransmission *= SampleTextureGrad(material.diffuseTransmissionTexture, uv, ddx, ddy, anisotropic).a;
+        float3 diffuseTransmissionColour = material.diffuseTransmissionColour;
+        if (material.diffuseTransmissionColourTexture != INVALIDDESCRIPTORHANDLE)
+            diffuseTransmissionColour *=
+                    SampleTextureGrad(material.diffuseTransmissionColourTexture, uv, ddx, ddy, anisotropic).rgb;
+        p.subsurfaceWeight = saturate(diffuseTransmission);
+        p.subsurfaceColour = diffuseTransmissionColour;
+        p.subsurfaceScatterAnisotropy = 1.0;
+    }
+
     ApplyMaterialOverrides(p);
     return p;
 }

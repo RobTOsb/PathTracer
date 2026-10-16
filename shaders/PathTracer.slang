@@ -155,8 +155,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             deferred.flags &= ~DEFERRED_SMOOTH_SEGMENT;
 
             // Opaque and thin-walled surfaces are treated as two-sided: face the frame towards the viewer
-            // so a back face is not mistaken for the inside of a transmissive object.
-            bool opaque = mat.transmissionWeight <= 0.0;
+            // so a back face is not mistaken for the inside of a transmissive object
+            bool opaque = mat.transmissionWeight <= 0.0 && !HasDiffuseTransmission(mat);
             if ((opaque || mat.geometryThinWalled) && dot(hit.Ng, wo) < 0.0)
             {
                 hit.Ng = -hit.Ng;
