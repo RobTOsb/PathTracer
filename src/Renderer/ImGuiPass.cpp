@@ -380,6 +380,24 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SetItemTooltip("Smooth glass in front of the camera, thin panes or solid, whose reflection is traced as "
 							  "well as what it lets through, instead of one or the other. 0 = off");
 
+		ImGui::TextUnformatted("Subsurface scattering");
+		ImGui::Checkbox("Zero##Subsurface", &settings_.subsurfaceZeroScattering);
+		ImGui::SetItemTooltip("Light straight through the medium, path traced");
+		ImGui::SameLine();
+		ImGui::Checkbox("Single##Subsurface", &settings_.subsurfaceSingleScattering);
+		ImGui::SetItemTooltip("Light scattered once in the medium, path traced");
+		ImGui::SameLine();
+		ImGui::Checkbox("Multiple##Subsurface", &settings_.subsurfaceMultipleScattering);
+		ImGui::SetItemTooltip("Light scattered more than once, from a diffusion profile with single scattering "
+							  "taken out. All three off: OpenPBR's Lambertian stand-in");
+		ImGui::SliderFloat("Subsurface radius scale",
+						   &settings_.subsurfaceRadiusScale,
+						   0.01f,
+						   10.0f,
+						   "%.2f",
+						   ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Multiplies every material's mean free path");
+
 		ImGui::Checkbox("Ray cone texture LOD", &settings_.rayConeTextureLod);
 		ImGui::SetItemTooltip("Filters textures over each ray's cone footprint instead of always sampling the top mip");
 		ImGui::BeginDisabled(!settings_.rayConeTextureLod);

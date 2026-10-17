@@ -262,6 +262,10 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 			settings_.rayConeTextureLod ? exp2f(settings_.textureLodBias + upscalerBias) : 0.0f;
 	constants.anisotropicSegments = static_cast<uint>(std::max(settings_.anisotropicSegments, 0));
 	constants.glassReflectionSplits = static_cast<uint>(std::max(settings_.glassReflectionSplits, 0));
+	constants.subsurfaceComponents = (settings_.subsurfaceZeroScattering ? SUBSURFACE_ZERO_SCATTERING : 0u) |
+									 (settings_.subsurfaceSingleScattering ? SUBSURFACE_SINGLE_SCATTERING : 0u) |
+									 (settings_.subsurfaceMultipleScattering ? SUBSURFACE_MULTIPLE_SCATTERING : 0u);
+	constants.subsurfaceRadiusScale = std::max(settings_.subsurfaceRadiusScale, 0.0f);
 
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
 

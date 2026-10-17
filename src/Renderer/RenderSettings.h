@@ -88,6 +88,13 @@ struct RenderSettings
 	bool specularMaterials = true;
 	bool transmissiveMaterials = true;
 	int glassReflectionSplits = 2;
+	// Solid subsurface materials: the orders of scattering inside the object that are rendered, light
+	// straight through and one scattering event path traced, the rest from a diffusion profile. All off
+	// falls back to OpenPBR's Lambertian stand-in. The radius scale multiplies every material's radius.
+	bool subsurfaceZeroScattering = true;
+	bool subsurfaceSingleScattering = true;
+	bool subsurfaceMultipleScattering = true;
+	float subsurfaceRadiusScale = 1.0f;
 
 	bool rayConeTextureLod = true;
 	float textureLodBias = 0.0f;

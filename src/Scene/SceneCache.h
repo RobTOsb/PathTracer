@@ -17,7 +17,9 @@
 // 5: transmissive materials thin-walled (kThinWalledTransmission in RenderGPUScene.cpp).
 // 6: thin-walled from EXT_materials_thin_wall only, diffuse transmission in GpuMaterial (128 bytes).
 // 7: primitives without TEXCOORD_0 or indices load instead of being skipped.
-constexpr uint32_t kSceneCacheVersion = 7;
+// 8: KHR_materials_anisotropy in GpuMaterial (anisotropy, anisotropyTexture in place of the pads).
+// 9: EXT_materials_subsurface, GpuMaterial 144 bytes (subsurface radius and anisotropy).
+constexpr uint32_t kSceneCacheVersion = 9;
 
 struct SceneCacheTexture
 {

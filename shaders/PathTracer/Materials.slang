@@ -1,6 +1,7 @@
 // glTF material rows to OpenPBR parameters, for the integrator and the any-hit shaders.
 import OpenPBRBaseSubstrate;
 import PathTracer.Geometry;
+import PathTracer.Math;
 import PathTracer.RayTracing;
 import PathTracer.Resources;
 
@@ -23,6 +24,7 @@ OpenPBRBaseParams OpenPBRDefaults()
     p.subsurfaceWeight = 0.0;
     p.subsurfaceColour = float3(0.8, 0.8, 0.8);
     p.subsurfaceScatterAnisotropy = 0.0;
+    p.subsurfaceRadius = float3(0.0, 0.0, 0.0);
     p.geometryThinWalled = false;
     p.geometryTangent = float3(1.0, 0.0, 0.0);
     p.geometryBitangent = float3(0.0, 1.0, 0.0);
@@ -46,6 +48,20 @@ void SetTransmission(inout OpenPBRBaseParams p, GpuMaterial material, float tran
     {
         p.transmissionColour = p.baseColour;
     }
+}
+
+// glTF anisotropic GGX in OpenPBR terms. glTF stretches alpha along the anisotropy direction to
+// mix(r^2, 1, s^2) and keeps r^2 across it. OpenPBR (GGXAlpha) has alphaT = r'^2 sqrt(2 / (1 + (1 - a)^2))
+// and alphaB = (1 - a) alphaT, so 1 - a = alphaB / alphaT and r'^2 is the RMS of the two alphas, which
+// gives the same lobe exactly. The tangent must already point along the anisotropy direction.
+void SetGltfAnisotropy(inout OpenPBRBaseParams p, float strength)
+{
+    float alphaB = p.specularRoughness * p.specularRoughness;
+    float alphaT = lerp(alphaB, 1.0, strength * strength);
+    if (alphaT <= 0.0)
+        return;
+    p.specularRoughnessAnisotropy = 1.0 - alphaB / alphaT;
+    p.specularRoughness = sqrt(sqrt(0.5 * (alphaT * alphaT + alphaB * alphaB)));
 }
 
 // The Rendering panel's debug switches (MaterialOverrideFlags), applied to every material.
@@ -102,6 +118,29 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     if (thinWalled && material.transmission > 0.0 && (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) == 0)
         roughness = max(roughness, 1.0e-4);
 
+    float anisotropyStrength = 0.0;
+    float2 anisotropy = UnpackHalf2(material.anisotropy);
+    if (any(anisotropy != 0.0))
+    {
+        float2 direction = anisotropy;
+        anisotropyStrength = length(anisotropy);
+        if (material.anisotropyTexture != INVALIDDESCRIPTORHANDLE)
+        {
+            float3 texel = SampleTextureGrad(material.anisotropyTexture, uv, ddx, ddy, anisotropic).rgb;
+            float2 texDirection = texel.rg * 2.0 - 1.0;
+            direction = float2(anisotropy.x * texDirection.x - anisotropy.y * texDirection.y,
+                               anisotropy.y * texDirection.x + anisotropy.x * texDirection.y);
+            anisotropyStrength *= texel.b;
+        }
+        // Mips average opposite directions towards zero; the rotation alone is the best guess there.
+        float lengthSq = dot(direction, direction);
+        direction = lengthSq > 1.0e-8 ? direction * rsqrt(lengthSq) : anisotropy * rsqrt(dot(anisotropy, anisotropy));
+        // The normal map's tangent space: glTF's +Y is -hit.B.
+        float3 T = hit.T * direction.x - hit.B * direction.y;
+        hit.B = hit.T * direction.y + hit.B * direction.x;
+        hit.T = T;
+    }
+
     if (any(material.emissive > 0.0))
     {
         hit.emission = material.emissive;
@@ -114,21 +153,25 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     p.baseMetalness = saturate(metallic);
     p.specularRoughness = saturate(roughness);
     SetTransmission(p, material, transmission, thinWalled);
+    if (anisotropyStrength > 0.0)
+        SetGltfAnisotropy(p, saturate(anisotropyStrength));
 
     // glTF diffuse transmission mixes the base's diffuse BRDF with a diffuse BTDF, which is OpenPBR's
-    // thin-walled subsurface with all of it transmitted (anisotropy 1). Only thin walls have it.
-    if (material.diffuseTransmission > 0.0)
+    // thin-walled subsurface with all of it transmitted (anisotropy 1). In a solid object the subsurface
+    // is a scattering medium instead, unless the Rendering panel turned all of it off.
+    if (material.subsurfaceWeight > 0.0)
     {
-        float diffuseTransmission = material.diffuseTransmission;
-        if (material.diffuseTransmissionTexture != INVALIDDESCRIPTORHANDLE)
-            diffuseTransmission *= SampleTextureGrad(material.diffuseTransmissionTexture, uv, ddx, ddy, anisotropic).a;
-        float3 diffuseTransmissionColour = material.diffuseTransmissionColour;
-        if (material.diffuseTransmissionColourTexture != INVALIDDESCRIPTORHANDLE)
-            diffuseTransmissionColour *=
-                    SampleTextureGrad(material.diffuseTransmissionColourTexture, uv, ddx, ddy, anisotropic).rgb;
-        p.subsurfaceWeight = saturate(diffuseTransmission);
-        p.subsurfaceColour = diffuseTransmissionColour;
-        p.subsurfaceScatterAnisotropy = 1.0;
+        float weight = material.subsurfaceWeight;
+        if (material.subsurfaceWeightTexture != INVALIDDESCRIPTORHANDLE)
+            weight *= SampleTextureGrad(material.subsurfaceWeightTexture, uv, ddx, ddy, anisotropic).a;
+        float3 colour = material.subsurfaceColour;
+        if (material.subsurfaceColourTexture != INVALIDDESCRIPTORHANDLE)
+            colour *= SampleTextureGrad(material.subsurfaceColourTexture, uv, ddx, ddy, anisotropic).rgb;
+        p.subsurfaceWeight = saturate(weight);
+        p.subsurfaceColour = colour;
+        p.subsurfaceScatterAnisotropy = material.subsurfaceScatterAnisotropy;
+        if (!thinWalled && g_Frame.subsurfaceComponents != 0)
+            p.subsurfaceRadius = material.subsurfaceRadius * g_Frame.subsurfaceRadiusScale;
     }
 
     ApplyMaterialOverrides(p);

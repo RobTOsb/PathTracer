@@ -21,7 +21,6 @@
 #include <stdexcept>
 #include <unordered_map>
 
-
 namespace
 {
 	// Staging memory for one upload batch is held until EndUpload, so flush every so often to keep
@@ -206,8 +205,9 @@ namespace
 									  &material.normalTexture,
 									  &material.transmissionTexture,
 									  &material.emissiveTexture,
-									  &material.diffuseTransmissionTexture,
-									  &material.diffuseTransmissionColourTexture })
+									  &material.subsurfaceWeightTexture,
+									  &material.subsurfaceColourTexture,
+									  &material.anisotropyTexture })
 			{
 				apply(*texture);
 			}
@@ -346,7 +346,11 @@ void RenderGPUScene::UpdateLights(const LightTreeBuildSettings &settings)
 	WriteLightBuffer(renderContext_, frame.nodes, frame.nodeCapacity, tree.nodes, "Scene_LightTreeNodes");
 	WriteLightBuffer(renderContext_, frame.leaves, frame.leafCapacity, tree.leafOfLight, "Scene_LightLeaves");
 	WriteLightBuffer(renderContext_, frame.parents, frame.parentCapacity, tree.parents, "Scene_LightTreeParents");
-	WriteLightBuffer(renderContext_, frame.leafLights, frame.leafLightCapacity, tree.leafLights, "Scene_LightTreeLeafLights");
+	WriteLightBuffer(renderContext_,
+					 frame.leafLights,
+					 frame.leafLightCapacity,
+					 tree.leafLights,
+					 "Scene_LightTreeLeafLights");
 }
 
 void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
@@ -560,8 +564,9 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 								 material.normalTexture,
 								 material.transmissionTexture,
 								 material.emissiveTexture,
-								 material.diffuseTransmissionTexture,
-								 material.diffuseTransmissionColourTexture })
+								 material.subsurfaceWeightTexture,
+								 material.subsurfaceColourTexture,
+								 material.anisotropyTexture })
 		{
 			if (!validTexture(texture))
 			{
@@ -945,7 +950,8 @@ uint32_t RenderGPUScene::UploadTextureMips(const TextureDesc &desc,
 	}
 
 	// The pixels go into a staging buffer here, so the levels can go out of scope after.
-	const ResourceHandle gpuTexture = renderContext_->CreateTexture(desc, ResourceViewType::ShaderResource, mips, batch);
+	const ResourceHandle gpuTexture =
+			renderContext_->CreateTexture(desc, ResourceViewType::ShaderResource, mips, batch);
 	pendingUploadBytes_ += sizeInBytes;
 	textures_.push_back(gpuTexture);
 	return renderContext_->GetResourceViewInfo(gpuTexture).descriptorIndex;
@@ -977,33 +983,68 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 																		  "Material_Transmission",
 																		  batch)
 														  : INVALIDDESCRIPTORHANDLE;
-		// Only the file makes a material thin-walled (EXT_materials_thin_wall).
+		// Strength along the rotation as one half2, which the texture's direction is rotated by.
+		const float anisotropyStrength = std::clamp(material.GetAnisotropyStrength(), 0.0f, 1.0f);
+		const float anisotropyRotation = material.GetAnisotropyRotation();
+		gpu.anisotropy = PackF16Pair(anisotropyStrength * std::cos(anisotropyRotation),
+									 anisotropyStrength * std::sin(anisotropyRotation));
+		gpu.anisotropyTexture = anisotropyStrength > 0.0f ? UploadTexture(material.GetAnisotropyTexture(),
+																		  Format::R8G8B8A8_UNORM,
+																		  "Material_Anisotropy",
+																		  batch)
+														  : INVALIDDESCRIPTORHANDLE;
+		// Only the file makes a material thin-walled (EXT_materials_thin_wall). Anisotropy stretches the
+		// lobe even at roughness 0, so such a wall is never a delta pass-through.
 		if (material.IsThinWalled())
 		{
 			gpu.transmissionFlags |= TRANSMISSION_THIN_WALLED;
-			if (gpu.transmission > 0.0f && gpu.roughness <= 0.0f)
+			if (gpu.transmission > 0.0f && gpu.roughness <= 0.0f && anisotropyStrength <= 0.0f)
 				gpu.transmissionFlags |= TRANSMISSION_PASS_THROUGH;
 		}
 		gpu.attenuationColour = float3(1.0f, 1.0f, 1.0f);
 		gpu.attenuationDistance = FLT_MAX;
-		// Diffuse transmission into a solid object would need a medium, so only thin walls keep it.
-		const float *diffuseTransmissionColour = material.GetDiffuseTransmissionColour();
-		gpu.diffuseTransmission = material.IsThinWalled() ? material.GetDiffuseTransmission() : 0.0f;
-		gpu.diffuseTransmissionColour =
-				float3(diffuseTransmissionColour[0], diffuseTransmissionColour[1], diffuseTransmissionColour[2]);
-		gpu.diffuseTransmissionTexture = INVALIDDESCRIPTORHANDLE;
-		gpu.diffuseTransmissionColourTexture = INVALIDDESCRIPTORHANDLE;
-		if (gpu.diffuseTransmission > 0.0f)
+		// OpenPBR subsurface: on a thin wall glTF's diffuse transmission, all of it transmitted; in a solid
+		// object EXT_materials_subsurface's scattering medium. Diffuse transmission into a solid object
+		// says nothing about the medium, so it is dropped there.
+		gpu.subsurfaceWeightTexture = INVALIDDESCRIPTORHANDLE;
+		gpu.subsurfaceColourTexture = INVALIDDESCRIPTORHANDLE;
+		if (material.IsThinWalled())
 		{
-			gpu.diffuseTransmissionTexture = UploadTexture(material.GetDiffuseTransmissionTexture(),
-														   Format::R8G8B8A8_UNORM,
-														   "Material_DiffuseTransmission",
-														   batch);
-			// sRGB, so pointing it at the base colour image shares the albedo texture.
-			gpu.diffuseTransmissionColourTexture = UploadTexture(material.GetDiffuseTransmissionColourTexture(),
-																 Format::R8G8B8A8_UNORM_SRGB,
-																 "Material_DiffuseTransmissionColour",
-																 batch);
+			const float *colour = material.GetDiffuseTransmissionColour();
+			gpu.subsurfaceWeight = material.GetDiffuseTransmission();
+			gpu.subsurfaceColour = float3(colour[0], colour[1], colour[2]);
+			gpu.subsurfaceScatterAnisotropy = 1.0f;
+			if (gpu.subsurfaceWeight > 0.0f)
+			{
+				gpu.subsurfaceWeightTexture = UploadTexture(material.GetDiffuseTransmissionTexture(),
+															Format::R8G8B8A8_UNORM,
+															"Material_DiffuseTransmission",
+															batch);
+				// sRGB, so pointing it at the base colour image shares the albedo texture.
+				gpu.subsurfaceColourTexture = UploadTexture(material.GetDiffuseTransmissionColourTexture(),
+															Format::R8G8B8A8_UNORM_SRGB,
+															"Material_DiffuseTransmissionColour",
+															batch);
+			}
+		}
+		else
+		{
+			const float *colour = material.GetSubsurfaceColour();
+			const float *scale = material.GetSubsurfaceRadiusScale();
+			const float radius = std::max(material.GetSubsurfaceRadius(), 0.0f);
+			gpu.subsurfaceWeight = material.GetSubsurfaceWeight();
+			gpu.subsurfaceColour = float3(colour[0], colour[1], colour[2]);
+			gpu.subsurfaceRadius = float3(radius * std::max(scale[0], 0.0f),
+										  radius * std::max(scale[1], 0.0f),
+										  radius * std::max(scale[2], 0.0f));
+			gpu.subsurfaceScatterAnisotropy = std::clamp(material.GetSubsurfaceScatterAnisotropy(), -0.99f, 0.99f);
+			if (gpu.subsurfaceWeight > 0.0f)
+			{
+				gpu.subsurfaceColourTexture = UploadTexture(material.GetSubsurfaceColourTexture(),
+															Format::R8G8B8A8_UNORM_SRGB,
+															"Material_SubsurfaceColour",
+															batch);
+			}
 		}
 		gpu.albedoTexture =
 				UploadTexture(material.GetAlbedoTexture(), Format::R8G8B8A8_UNORM_SRGB, "Material_Albedo", batch);
@@ -1043,9 +1084,10 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 	fallback.transmissionTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.attenuationColour = float3(1.0f, 1.0f, 1.0f);
 	fallback.attenuationDistance = FLT_MAX;
-	fallback.diffuseTransmissionColour = float3(1.0f, 1.0f, 1.0f);
-	fallback.diffuseTransmissionTexture = INVALIDDESCRIPTORHANDLE;
-	fallback.diffuseTransmissionColourTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.subsurfaceColour = float3(1.0f, 1.0f, 1.0f);
+	fallback.subsurfaceWeightTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.subsurfaceColourTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.anisotropyTexture = INVALIDDESCRIPTORHANDLE;
 	materials.push_back(fallback);
 }
 
@@ -1137,14 +1179,20 @@ std::vector<uint32_t> RenderGPUScene::CollectEmitters(const Scene::GLTFScene &sc
 		++emissiveInstances;
 		for (size_t t = 0; t + 2 < indices.size(); t += 3)
 		{
-			const uint32_t corners[3] = { indices[t], indices[t + (mirrored ? 2 : 1)], indices[t + (mirrored ? 1 : 2)] };
+			const uint32_t corners[3] = { indices[t],
+										  indices[t + (mirrored ? 2 : 1)],
+										  indices[t + (mirrored ? 1 : 2)] };
 			float3 p[3];
 			float2 uv[3];
 			for (int c = 0; c < 3; ++c)
 			{
 				const size_t v = corners[c];
-				p[c] = TransformPoint(instance.worldMatrix, positions[3 * v], positions[3 * v + 1], positions[3 * v + 2]);
-				uv[c] = 2 * v + 1 < texCoords.size() ? float2(texCoords[2 * v], texCoords[2 * v + 1]) : float2(0.0f, 0.0f);
+				p[c] = TransformPoint(instance.worldMatrix,
+									  positions[3 * v],
+									  positions[3 * v + 1],
+									  positions[3 * v + 2]);
+				uv[c] = 2 * v + 1 < texCoords.size() ? float2(texCoords[2 * v], texCoords[2 * v + 1])
+													 : float2(0.0f, 0.0f);
 			}
 
 			GpuLight light;

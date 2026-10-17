@@ -32,6 +32,11 @@
 //   the bounded cap is only valid for reflections.
 //   Diffuse and subsurface use cosine-weighted hemisphere sampling. On a thin wall the diffuse lobe's
 //   sample goes to the lower hemisphere with the transmitted share of its albedo (DiffuseTransmittedShare).
+//   Volumetric subsurface (solid geometry with a subsurfaceRadius) is not a BRDF: its light leaves from
+//   other points of the surface than it entered, which only the integrator can find. Eval and Pdf leave it
+//   out, and its sample (LOBE_SUBSURFACE) is the diffuse transmission into the medium, weighted by the
+//   interface's (1 - E(wo)) and scaled by 1 / its probability, for the integrator to carry on through
+//   the medium. Its pdf is that of the direction, only for ray cones.
 //   Thin-walled transmission mirrors the specular reflection lobe through the tangent plane, so it
 //   samples like the reflection. At zero roughness it is a delta lobe straight through
 //   (LOBE_DELTA_TRANSMISSION), which Eval and Pdf leave out; the sample's pdf is then the discrete
@@ -41,7 +46,7 @@
 //   No coat, fuzz or thin film, ambient IOR is 1.
 //   Thin-walled specular transmission is the single-interface lobe above (as in glTF), not a slab with
 //   two interfaces.
-//   Subsurface is approximated by a Lambertian lobe under the dielectric interface. On a thin wall it
+//   Subsurface without a radius is approximated by a Lambertian lobe under the dielectric interface. On a thin wall it
 //   splits into Lambertian reflection, (1 - g) / 2 of it, and Lambertian transmission, (1 + g) / 2, with
 //   g = subsurfaceScatterAnisotropy (spec, thin-walled mode); base_diffuse_roughness does not shape
 //   the transmission. Both carry the same (1 - E(wo)) albedo scaling, for the interface on the way in.
@@ -57,6 +62,7 @@ static const uint LOBE_SPECULAR_REFLECTION = 2;
 static const uint LOBE_SPECULAR_TRANSMISSION = 4;
 static const uint LOBE_DELTA_TRANSMISSION = 8;
 static const uint LOBE_DIFFUSE_TRANSMISSION = 16;
+static const uint LOBE_SUBSURFACE = 32;
 
 struct OpenPBRBaseParams
 {
@@ -77,7 +83,11 @@ struct OpenPBRBaseParams
 
     float subsurfaceWeight;
     float3 subsurfaceColour;
-    float subsurfaceScatterAnisotropy; // thin-walled only: -1 all reflected, 1 all transmitted
+    // Solid: the medium's Henyey-Greenstein g. Thin-walled: -1 all reflected, 1 all transmitted.
+    float subsurfaceScatterAnisotropy;
+    // Solid only: mean free path per channel (subsurface_radius * subsurface_radius_scale), which makes
+    // the subsurface a scattering medium (LOBE_SUBSURFACE). Zero keeps the Lambertian approximation.
+    float3 subsurfaceRadius;
 
     bool geometryThinWalled;
     float3 geometryTangent;
@@ -144,6 +154,24 @@ bool HasDeltaTransmission(OpenPBRBaseParams p)
 bool HasDiffuseTransmission(OpenPBRBaseParams p)
 {
     return p.geometryThinWalled && p.subsurfaceWeight > 0.0 && p.subsurfaceScatterAnisotropy > -1.0;
+}
+
+// Solid subsurface with a medium under the surface, which the integrator scatters light through.
+bool HasVolumetricSubsurface(OpenPBRBaseParams p)
+{
+    return !p.geometryThinWalled && p.subsurfaceWeight > 0.0 && any(p.subsurfaceRadius > 0.0);
+}
+
+// The share of the diffuse lobe's albedo that is volumetric subsurface, which is also the probability
+// of sampling LOBE_SUBSURFACE within it.
+float SubsurfaceShare(OpenPBRBaseParams p)
+{
+    if (!HasVolumetricSubsurface(p))
+        return 0.0;
+    float S = p.subsurfaceWeight;
+    float subsurface = S * Luminance(p.subsurfaceColour);
+    float total = subsurface + (1.0 - S) * p.baseWeight * Luminance(p.baseColour);
+    return total > 0.0 ? subsurface / total : 0.0;
 }
 
 // Thin-walled subsurface: what of S's albedo goes to each side, spec equations for f^R and f^T.
@@ -477,7 +505,8 @@ float3 OpenPBREvalPdfLocal(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out
     float3 h = normalize(wi + wo);
     float ndf = GGXD(h, c.alpha);
 
-    pdf = c.probSpecR * ndf * c.reflPdfScale + c.probDiffuse * (1.0 - DiffuseTransmittedShare(p)) * wi.z / PI;
+    // At most one of the shares is nonzero, the first only on thin walls, the second only on solid ones.
+    pdf = c.probSpecR * ndf * c.reflPdfScale + c.probDiffuse * (1.0 - DiffuseTransmittedShare(p) - SubsurfaceShare(p)) * wi.z / PI;
 
     float cosH = saturate(dot(wo, h));
     float microfacet = ndf * GGXG2(wi, c.lambdaO, c.alpha) / (4.0 * wi.z * wo.z);
@@ -492,7 +521,8 @@ float3 OpenPBREvalPdfLocal(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out
     // Albedo scaling with the untinted albedo, since specularColour does not affect transmission.
     float transmitted = 1.0 - c.E;
     float3 fDiffuse = transmitted * p.baseWeight * EvalEON(p.baseColour, p.baseDiffuseRoughness, wi, wo);
-    float3 fSubsurface = (transmitted * SubsurfaceReflectedFraction(p)) * p.subsurfaceColour / PI;
+    float3 fSubsurface = HasVolumetricSubsurface(p) ? float3(0.0, 0.0, 0.0)
+                                                    : (transmitted * SubsurfaceReflectedFraction(p)) * p.subsurfaceColour / PI;
 
     // Spec mix tree. The translucent slab only contributes fSpecR in the upper hemisphere.
     float3 fOpaqueBase = fSpecR + lerp(fDiffuse, fSubsurface, S);
@@ -558,6 +588,17 @@ BSDFSample OpenPBRSample(OpenPBRBaseParams p, OpenPBRContext c, float3 u)
         {
             wi.z = -wi.z;
             lobe = LOBE_DIFFUSE_TRANSMISSION;
+        }
+        else if (shareU >= 1.0 - SubsurfaceShare(p))
+        {
+            // Into the medium, never inside (probDiffuse is 0 there).
+            float probability = c.probDiffuse * SubsurfaceShare(p);
+            float S = (1.0 - p.baseMetalness) * (1.0 - p.transmissionWeight) * p.subsurfaceWeight;
+            s.wi = ToWorld(p, float3(wi.xy, -wi.z));
+            s.pdf = probability * wi.z / PI;
+            s.weight = (S * (1.0 - c.E) / probability).xxx;
+            s.lobe = LOBE_SUBSURFACE;
+            return s;
         }
     }
     else

@@ -60,7 +60,8 @@ struct FrameConstants
 	float atmosphereMissDistance; // air in front of the sky along rays that leave the scene, scene units
 	uint atmosphereInScatterSegments; // path segments (0 = camera ray) that gather in-scattered sunlight
 	uint atmosphereVolumetricShadows; // in-scattering traces a shadow ray towards the sun
-	uint pad2;
+	// SubsurfaceComponents traced for solid subsurface materials; 0 keeps OpenPBR's Lambertian stand-in.
+	uint subsurfaceComponents;
 
 	// DLSS-RR guides (DLSS_RR permutation only). Mirrors and glass at most psrMaxRoughness (perceptual) rough
 	// are described by the surface they reflect or refract, primary surface replacement; negative = off.
@@ -69,7 +70,17 @@ struct FrameConstants
 	float psrMaxRoughness;
 	float specularHitDistanceHoldRoughness;
 	uint glassReflectionSplits;
-	float pad3;
+	float subsurfaceRadiusScale; // multiplies every material's subsurface radius
+};
+
+// Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
+// scattering inside a solid subsurface object are rendered.
+UnscopedEnum
+enum SubsurfaceComponents
+{
+	SUBSURFACE_ZERO_SCATTERING = 1, // light straight through the medium, path traced
+	SUBSURFACE_SINGLE_SCATTERING = 2, // one scattering event, path traced
+	SUBSURFACE_MULTIPLE_SCATTERING = 4, // the rest, from the multiple-scattering diffusion profile
 };
 
 // Debug switches applied to every material as it is loaded (FrameConstants::materialOverrides).
@@ -136,14 +147,22 @@ struct GpuMaterial
 	// the medium. FLT_MAX: no absorption (always, while KHR_materials_volume is not loaded).
 	float3 attenuationColour;
 	float attenuationDistance;
-	// KHR_materials_diffuse_transmission, thin-walled only: the share of the diffuse base transmitted
-	// to the other side rather than reflected, and its colour (OpenPBR thin-walled subsurface).
-	float3 diffuseTransmissionColour;
-	float diffuseTransmission;
-	uint diffuseTransmissionTexture; // A multiplies diffuseTransmission
-	uint diffuseTransmissionColourTexture; // sRGB, RGB multiplies diffuseTransmissionColour
-	uint pad0;
-	uint pad1;
+	// OpenPBR subsurface. Thin-walled: KHR_materials_diffuse_transmission, the share of the diffuse base
+	// transmitted to the other side rather than reflected, and its colour. Solid: EXT_materials_subsurface,
+	// a scattering medium under the surface whose multiple-scattering albedo is the colour.
+	float3 subsurfaceColour;
+	float subsurfaceWeight;
+	uint subsurfaceWeightTexture; // A multiplies subsurfaceWeight
+	uint subsurfaceColourTexture; // sRGB, RGB multiplies subsurfaceColour
+	// KHR_materials_anisotropy: half2 strength * (cos, sin) of the rotation from the tangent, 0 when
+	// isotropic. The texture's RG direction (* 2 - 1) is rotated by it, B multiplies the strength.
+	uint anisotropy;
+	uint anisotropyTexture;
+	// Solid subsurface only: the medium's mean free path per channel in scene units (radius * radius
+	// scale), 0 without one.
+	float3 subsurfaceRadius;
+	// Solid: the medium's Henyey-Greenstein g. Thin-walled: 1, everything transmitted.
+	float subsurfaceScatterAnisotropy;
 };
 
 struct GpuVertex
@@ -191,7 +210,7 @@ struct TonemapConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(FrameConstants) == 448,"FrameConstants must match the HLSL cbuffer layout");
-static_assert(sizeof(GpuMaterial) == 128, "GpuMaterial must match the structured buffer stride");
+static_assert(sizeof(GpuMaterial) == 144, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
 static_assert(sizeof(GpuCameraState) == 104, "GpuCameraState must match the structured buffer stride");
