@@ -61,9 +61,6 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
     float prevBsdfPdf = 0.0;
     PackedLightSelectVertex prevVertex = (PackedLightSelectVertex)0; // where the current segment started, once a surface scattered
     RayCone cone = { 0.0, g_Frame.rayConePixelSpread };
-    // Within a subsurface event: its SUBSURFACE_STAGE_*, and above that the medium's material index.
-    uint subsurfaceState = 0;
-    float2 subsurfaceProbe = float2(0.0, 0.0); // the probe's disk radius and height, see EnterSubsurface
 
     bool fromCamera = true;
 
@@ -75,13 +72,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
     {
         for (; bounce < maxSegments; ++bounce)
         {
-            uint subsurfaceStage = subsurfaceState & SUBSURFACE_STAGE_MASK;
-            HitPayload payload;
-            if (subsurfaceStage != SUBSURFACE_STAGE_NONE)
-                payload = TraceSubsurfaceRay(origin, dir, subsurfaceStage == SUBSURFACE_STAGE_PROBE ? 2.0 * subsurfaceProbe.y : FLT_MAX,
-                                             subsurfaceState >> SUBSURFACE_STAGE_BITS);
-            else
-                payload = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, fromCamera || chainActive, rng);
+            HitPayload payload = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, fromCamera || chainActive, rng);
             // Unpacked after the in-scatter's shadow ray, so only the packed payload is held across it.
             HitInfo hit = HitDistance(payload);
 
@@ -89,12 +80,11 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             bool inMedium = any(segmentExtinction > 0.0);
             if (inMedium)
             {
-                // A subsurface event's first segment weighs its own transmittance, see SubsurfaceScatters.
-                if (hit.hit && subsurfaceStage != SUBSURFACE_STAGE_ENTERED)
+                if (hit.hit)
                     throughput *= exp(-segmentExtinction * hit.t);
             }
     #ifdef ATMOSPHERE
-            else if (subsurfaceStage != SUBSURFACE_STAGE_PROBE)
+            else
             {
                 // Otherwise it crossed the scene's air, which scatters sunlight into the path and dims
                 // whatever lies beyond. Rays that leave the scene cross atmosphereMissDistance of it.
@@ -126,8 +116,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                     cameraStateStored = true;
                 }
 
-                // A ray inside a medium that finds no way out ends there, as does a probe that finds no surface.
-                if (!inMedium && subsurfaceStage != SUBSURFACE_STAGE_PROBE)
+                // A ray inside a medium that finds no way out ends there.
+                if (!inMedium)
                 {
                     // The sky is never light sampled, so BSDF sampling gets its full contribution.
                     radiance += throughput * EnvironmentRadiance(dir);
@@ -149,39 +139,6 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             cone.width += cone.spread * hit.t;
             OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments);
             float3 wo = -dir;
-
-            if (subsurfaceStage != SUBSURFACE_STAGE_NONE)
-            {
-                // The medium's own surface ends the segment: its far side seen from inside, or for a probe
-                // its near side seen from outside.
-                if ((dot(hit.Ng, dir) < 0.0) != (subsurfaceStage == SUBSURFACE_STAGE_PROBE))
-                    break;
-                SubsurfaceMedium medium = GetSubsurfaceMedium(mat);
-                if (subsurfaceStage == SUBSURFACE_STAGE_ENTERED)
-                {
-                    float t;
-                    if (SubsurfaceScatters(medium, hit.t, Rand3(rng), throughput, t))
-                    {
-                        // Scattered once on the way: on to where that light leaves, still the same bounce.
-                        origin += dir * t;
-                        dir = SampleHenyeyGreenstein(dir, medium.anisotropy, Rand3(rng).xy);
-                        segmentExtinction = medium.sigmaT;
-                        subsurfaceState = (subsurfaceState & ~SUBSURFACE_STAGE_MASK) | SUBSURFACE_STAGE_SCATTERED;
-                        --bounce;
-                        continue;
-                    }
-                }
-                else if (subsurfaceStage == SUBSURFACE_STAGE_PROBE)
-                {
-                    throughput *= SubsurfaceProbeWeight(medium, subsurfaceProbe, hit.t, dot(hit.Ng, dir));
-                }
-                // The light enters the object here, through a white Lambertian surface facing out.
-                subsurfaceState = 0;
-                segmentExtinction = float3(0.0, 0.0, 0.0);
-                mat = SubsurfaceExitMaterial();
-                hit.emission = float3(0.0, 0.0, 0.0);
-                wo = hit.Ns;
-            }
 
             // Front-face emission found by BSDF sampling, MIS weighted against NEE at the previous vertex
             // unless the triangle has no light (degenerate or black) or light buffer NEE is off.
@@ -405,18 +362,20 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             if (continuePath)
             {
                 origin = OffsetRay(hit.position, hit.Ng, dir);
-                // Into the medium under the surface, or a diffusion profile probe of the surface around here.
+                // Through the medium under the surface: what leaves here comes in at other points of the
+                // object, and the path goes on out of one of them.
                 if (lobe == LOBE_SUBSURFACE)
                 {
-                    uint stage = SUBSURFACE_STAGE_NONE;
+                    SubsurfaceExit exit = (SubsurfaceExit)0;
                     if (dot(dir, hit.Ng) < 0.0)
-                    {
-                        float3 u0 = Rand3(rng);
-                        stage = EnterSubsurface(mat, hit.position, hit.N, u0, Rand3(rng), origin, dir, throughput, segmentExtinction,
-                                                subsurfaceProbe);
-                    }
-                    subsurfaceState = stage | (hit.materialId << SUBSURFACE_STAGE_BITS);
-                    continuePath = stage != SUBSURFACE_STAGE_NONE;
+                        radiance += SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput, rng, exit);
+                    continuePath = exit.valid;
+                    origin = exit.origin;
+                    dir = exit.dir;
+                    throughput = exit.throughput;
+                    prevBsdfPdf = exit.pdf;
+                    prevVertex = exit.vertex;
+                    segmentExtinction = float3(0.0, 0.0, 0.0);
                 }
             }
 
@@ -462,7 +421,6 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         throughput = deferred.throughput;
         cone.width = deferred.coneWidth;
         segmentExtinction = float3(0.0, 0.0, 0.0);
-        subsurfaceState = 0;
         bounce = deferred.flags >> DEFERRED_BOUNCE_SHIFT;
         hitDistancePending = false;
         if ((deferred.flags & DEFERRED_REFLECTION) != 0)

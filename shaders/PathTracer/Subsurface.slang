@@ -1,41 +1,33 @@
 // Path-traced subsurface scattering for solid OpenPBR subsurface materials, after Zhang and d'Eon, "Real-Time
 // Subsurface Scattering via Hybrid ReSTIR-Path-Tracing and Diffusion" (SIGGRAPH 2025 Advances course).
 //
-// The medium under the surface is homogeneous, set by the material where the light meets it. Light that
-// crosses it without scattering, or scattering once, is path traced; the rest comes from Burley's diffusion
-// profile with its single scattering taken out, R_n = R - R_1. Either way the path finds a point on the
-// object's surface, an exit or a probe hit near the entry, which then stands in as a white Lambertian
-// surface facing out: next event estimation there gathers the light entering the object, and the path
-// carries on outwards from it. A subsurface event counts as one bounce.
+// The medium under the surface is homogeneous, set by the material where the light enters it. A path that
+// takes LOBE_SUBSURFACE gathers three parts of the light leaving the entry, each at a point on the object's
+// surface where that light came in: crossing the medium without scattering (the far side along the
+// refracted ray), scattering once (the far side after a phase function sample) and scattering more (a
+// probe hit near the entry, weighted by Burley's diffusion profile less its single scattering, R - R_1).
+// Each of these exits takes a light sample as a white Lambertian surface facing out, and the path goes on
+// out of one of them, picked by its weight, so BSDF sampling there completes their MIS.
 //
 // Simplifications: the interface is crossed by diffuse transmission both ways, the camera side weighted by
 // OpenPBR's (1 - E(wo)) like the diffuse lobe, the other side by nothing. Probes go along the normal only
-// and the profile ignores the medium's anisotropy. The two parts are picked between per path rather than
-// both traced, and the single scattering event picks one channel's distance (the others weighted by
-// the mixture pdf).
+// and the profile ignores the medium's anisotropy. Distances are sampled in one channel, weighted by the
+// pdf of all three.
 import OpenPBRBaseSubstrate;
 import PathTracer.Geometry;
-import PathTracer.Materials;
+import PathTracer.LightSampling;
 import PathTracer.Math;
+import PathTracer.Random;
 import PathTracer.RayTracing;
 import PathTracer.Resources;
-
-// Where a path is within a subsurface event, the low bits of TracePath's subsurfaceState; the material
-// index of the medium sits above them.
-static const uint SUBSURFACE_STAGE_NONE = 0;
-static const uint SUBSURFACE_STAGE_ENTERED = 1; // first segment through the medium: crosses it, or scatters once
-static const uint SUBSURFACE_STAGE_SCATTERED = 2; // from the single scattering event to where its light leaves
-static const uint SUBSURFACE_STAGE_PROBE = 3; // diffusion profile probe, down onto the surface from outside
-static const uint SUBSURFACE_STAGE_BITS = 2;
-static const uint SUBSURFACE_STAGE_MASK = 3;
+import PathTracer.Shadows;
+import PathTracer.Sky;
 
 // Burley's single scattering profile is alpha R_1 (first order of R in the single-scattering albedo, with
-// the surface albedo fitted to it), R_1(r) = R1_SCALE (exp(-R1_SHORT r / l) + exp(-R1_LONG r / l)) / (l r),
-// which holds R1_ENERGY of the light over the plane.
+// the surface albedo fitted to it), R_1(r) = R1_SCALE (exp(-R1_SHORT r / l) + exp(-R1_LONG r / l)) / (l r).
 static const float R1_SCALE = 0.0423281;
 static const float R1_SHORT = 5.434;
 static const float R1_LONG = 1.8113;
-static const float R1_ENERGY = 0.195781;
 
 struct SubsurfaceMedium
 {
@@ -75,37 +67,6 @@ float3 BurleyScale(float3 A)
     return 1.85 - A + 7.0 * a * a * a;
 }
 
-// A light path arrives at the far side of the medium, d from where it entered. Picks whether its light
-// crossed without scattering (false: the path leaves the object here) or scattered once on the way (true:
-// at distance t), with the throughput weighted for the pick. u: pick, channel, distance.
-bool SubsurfaceScatters(SubsurfaceMedium m, float d, float3 u, inout float3 throughput, out float t)
-{
-    t = 0.0;
-    float3 crossed = exp(-m.sigmaT * d);
-    // What each part brings in expectation: the single scattering integral is albedo (1 - T(d)).
-    float3 scattered = m.albedo * OneMinusExp(m.sigmaT * d);
-    bool zero = (g_Frame.subsurfaceComponents & SUBSURFACE_ZERO_SCATTERING) != 0;
-    bool single = (g_Frame.subsurfaceComponents & SUBSURFACE_SINGLE_SCATTERING) != 0;
-    float crossedLuminance = Luminance(crossed);
-    float pCross = !single ? 1.0
-                 : !zero   ? 0.0
-                           : 0.1 + 0.8 * crossedLuminance / max(crossedLuminance + Luminance(scattered), 1.0e-8);
-    if (u.x < pCross)
-    {
-        throughput *= crossed / pCross;
-        return false;
-    }
-
-    // One channel's exponential truncated to (0, d), weighted by the pdf of picking any of the three.
-    float sigma = m.sigmaT[min(uint(u.y * 3.0), 2u)];
-    t = -log(1.0 - u.z * OneMinusExp(sigma * d).x) / sigma;
-    float3 transmittance = exp(-m.sigmaT * t);
-    float3 pdfs = m.sigmaT * transmittance / OneMinusExp(m.sigmaT * d);
-    float pdf = (pdfs.x + pdfs.y + pdfs.z) * (1.0 / 3.0);
-    throughput *= m.albedo * m.sigmaT * transmittance / (pdf * (1.0 - pCross));
-    return true;
-}
-
 // Direction after scattering off a medium particle while travelling along dir, which the Henyey-Greenstein
 // phase function of anisotropy g gives exactly, so the sample's weight is 1.
 float3 SampleHenyeyGreenstein(float3 dir, float g, float2 u)
@@ -134,51 +95,6 @@ float SubsurfaceProbeRadius(SubsurfaceMedium m)
     return 5.0 * MaxComponent(3.0 * m.meanFreePath / BurleyScale(m.colour));
 }
 
-// Carries on a path that took LOBE_SUBSURFACE at position, whose outward normal is normal, by its medium's
-// mat. Either through the medium (origin and dir left as they are, pointing into it; extinction set) or as
-// a diffusion profile probe (origin and dir replaced; probe gets its disk radius and height). Returns the
-// stage, NONE when the probe radius falls outside the reach. u0: pick, channel, radius; u1.x: angle.
-uint EnterSubsurface(OpenPBRBaseParams mat, float3 position, float3 normal, float3 u0, float3 u1, inout float3 origin,
-                     inout float3 dir, inout float3 throughput, out float3 extinction, out float2 probe)
-{
-    SubsurfaceMedium m = GetSubsurfaceMedium(mat);
-    extinction = float3(0.0, 0.0, 0.0);
-    probe = float2(0.0, 0.0);
-
-    // Picked by what each part holds over a thick flat slab: the whole profile less R_1's alpha R1_ENERGY.
-    bool traced = (g_Frame.subsurfaceComponents & (SUBSURFACE_ZERO_SCATTERING | SUBSURFACE_SINGLE_SCATTERING)) != 0;
-    bool diffusion = (g_Frame.subsurfaceComponents & SUBSURFACE_MULTIPLE_SCATTERING) != 0;
-    float multiple = Luminance(max(m.colour - R1_ENERGY * m.albedo, 0.0)) / max(Luminance(m.colour), 1.0e-6);
-    float pProbe = !diffusion ? 0.0 : !traced ? 1.0 : clamp(multiple, 0.2, 0.8);
-    if (u0.x >= pProbe)
-    {
-        throughput /= 1.0 - pProbe;
-        extinction = m.sigmaT;
-        return SUBSURFACE_STAGE_ENTERED;
-    }
-    throughput /= pProbe;
-
-    // One channel's profile, in r a mixture of exponentials with scales l / s and 3 l / s, weighted 1/4 and 3/4.
-    uint channel = min(uint(u0.y * 3.0), 2u);
-    float scale = m.meanFreePath[channel] / BurleyScale(m.colour)[channel];
-    bool shortLobe = u0.z < 0.25;
-    float v = shortLobe ? u0.z * 4.0 : (u0.z - 0.25) * (4.0 / 3.0);
-    float r = max(-log(1.0 - v) * (shortLobe ? scale : 3.0 * scale), 1.0e-6 * scale);
-    float reach = SubsurfaceProbeRadius(m);
-    if (r >= reach)
-        return SUBSURFACE_STAGE_NONE;
-
-    // Down along the normal through the point r away on the tangent disk, over the sphere of the reach.
-    float h = sqrt(reach * reach - r * r);
-    float3 t, b;
-    BuildOrthonormalBasis(normal, t, b);
-    float phi = TWO_PI * u1.x;
-    origin = position + (t * cos(phi) + b * sin(phi)) * r + normal * h;
-    dir = -normal;
-    probe = float2(r, h);
-    return SUBSURFACE_STAGE_PROBE;
-}
-
 // Weight of a probe (disk radius and height) that met the medium's surface t along it, at a cosine
 // cosProbe between the surface and the probe's axis: R_n at the distance from the entry over the area
 // pdf, the disk's projected onto the surface.
@@ -199,19 +115,17 @@ float3 SubsurfaceProbeWeight(SubsurfaceMedium m, float2 probe, float t, float co
     return max(profile - single, 0.0) * m.sigmaT * (r / (d * pdf * max(abs(cosProbe), 0.25)));
 }
 
-// The surface an exit or probe hit stands in as: white Lambertian, so what it gathers from outside is the
-// light entering the medium there, which the subsurface event's weight has already carried to its exit.
-OpenPBRBaseParams SubsurfaceExitMaterial()
+struct SubsurfaceHit
 {
-    OpenPBRBaseParams p = OpenPBRDefaults();
-    p.baseColour = float3(1.0, 1.0, 1.0);
-    p.specularWeight = 0.0;
-    return p;
-}
+    bool hit;
+    float t;
+    float3 Ng; // outwards
+    float3 N;  // interpolated vertex normal, outwards
+};
 
-// Closest hit on the medium's material along a ray, other surfaces ignored, packed as TraceClosest's is.
-// An inline query, so nothing is saved around it, and texture filtering is left at the top mip.
-HitPayload TraceSubsurfaceRay(float3 origin, float3 dir, float tMax, uint materialIndex)
+// Closest hit on the medium's material along a ray, other surfaces ignored. An inline query, so nothing is
+// saved around it.
+SubsurfaceHit TraceSubsurfaceRay(float3 origin, float3 dir, float tMax, uint materialIndex)
 {
     RayDesc ray;
     ray.Origin = origin;
@@ -227,21 +141,16 @@ HitPayload TraceSubsurfaceRay(float3 origin, float3 dir, float tMax, uint materi
             query.CommitNonOpaqueTriangleHit();
     }
 
-    HitPayload payload = (HitPayload)0;
-    payload.hitT = -1.0;
+    SubsurfaceHit hit = (SubsurfaceHit)0;
     if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
-        return payload;
+        return hit;
 
-    // As ClosestHit, less the ray cone, emitter and curvature.
-    PrimitiveDesc prim = LoadPrimitive(query.CommittedInstanceID());
-    uint3 tri = LoadTriangle(prim, query.CommittedPrimitiveIndex());
+    // The normals as ClosestHit finds them.
+    uint3 tri = LoadTriangle(LoadPrimitive(query.CommittedInstanceID()), query.CommittedPrimitiveIndex());
     float3 bary = Barycentrics(query.CommittedTriangleBarycentrics());
     GpuVertex v0 = g_Vertices[tri.x];
     GpuVertex v1 = g_Vertices[tri.y];
     GpuVertex v2 = g_Vertices[tri.z];
-    float3 objectNormal = v0.normal * bary.x + v1.normal * bary.y + v2.normal * bary.z;
-    float4 objectTangent = v0.tangent * bary.x + v1.tangent * bary.y + v2.tangent * bary.z;
-
     float3x3 linearToWorld = (float3x3)query.CommittedObjectToWorld3x4();
     float3x3 cofactor = float3x3(cross(linearToWorld[1], linearToWorld[2]),
                                  cross(linearToWorld[2], linearToWorld[0]),
@@ -249,13 +158,168 @@ HitPayload TraceSubsurfaceRay(float3 origin, float3 dir, float tMax, uint materi
     float handedness = dot(linearToWorld[0], cofactor[0]) < 0.0 ? -1.0 : 1.0;
     float3 faceCross = cross(mul(linearToWorld, v1.position - v0.position), mul(linearToWorld, v2.position - v0.position));
 
-    payload.hitT = query.CommittedRayT();
-    payload.Ng = OctEncode(normalize(faceCross * handedness));
-    payload.N = OctEncode(mul(cofactor, objectNormal) * handedness);
-    payload.T = OctEncode(mul(linearToWorld, objectTangent.xyz));
-    bool tangentNegative = (objectTangent.w < 0.0) != (handedness < 0.0);
-    payload.materialId = prim.materialIndex | (tangentNegative ? TANGENT_SIGN_BIT : 0u);
-    payload.uv = v0.texCoord * bary.x + v1.texCoord * bary.y + v2.texCoord * bary.z;
-    payload.emitter = INVALID_LIGHT_INDEX;
-    return payload;
+    hit.hit = true;
+    hit.t = query.CommittedRayT();
+    hit.Ng = normalize(faceCross * handedness);
+    hit.N = normalize(mul(cofactor, v0.normal * bary.x + v1.normal * bary.y + v2.normal * bary.z) * handedness);
+    return hit;
+}
+
+// Light selection at an exit, which reflects like a white Lambertian surface facing along normal.
+LightSelectVertex ExitLightSelectVertex(float3 position, float3 normal)
+{
+    LightSelectVertex v;
+    v.position = position;
+    v.normal = normal;
+    float3 bitangent;
+    BuildOrthonormalBasis(normal, v.tangent, bitangent);
+    v.wo = normal;
+    v.diffuseWeight = 1.0;
+    v.specularWeight = 0.0;
+    v.alpha = float2(1.0, 1.0);
+    v.tree = g_Frame.lightSampling == LIGHT_SAMPLING_TREE;
+    return v;
+}
+
+// Where the path goes on after a subsurface event: out of one of the exits, cosine distributed.
+struct SubsurfaceExit
+{
+    bool valid;
+    float3 origin;
+    float3 dir;
+    float3 throughput;
+    float pdf; // of dir, for the MIS of what it hits
+    PackedLightSelectVertex vertex; // the exit's, for the same MIS
+};
+
+// The light leaving through the surface at position (geometric normal Ng and vertex normal N facing the
+// viewer, the object's material materialIndex) by way of the medium under it, for a path that took
+// LOBE_SUBSURFACE there into dirIn with the given throughput. exit is how the path goes on.
+float3 SubsurfaceScatter(OpenPBRBaseParams mat, float3 position, float3 Ng, float3 N, uint materialIndex, float3 dirIn,
+                         float3 throughput, inout uint rng, out SubsurfaceExit exit)
+{
+    SubsurfaceMedium m = GetSubsurfaceMedium(mat);
+    uint components = g_Frame.subsurfaceComponents;
+    float3 entry = OffsetRay(position, Ng, dirIn);
+    float3 radiance = float3(0.0, 0.0, 0.0);
+
+    exit = (SubsurfaceExit)0;
+    float3 exitPosition = float3(0.0, 0.0, 0.0);
+    float3 exitNg = float3(0.0, 0.0, 0.0);
+    float3 exitN = float3(0.0, 0.0, 0.0);
+    float pickSum = 0.0; // luminance of the exits' weights so far
+
+    float d0 = -1.0; // how far the medium goes along dirIn, once the first part has found its far side
+    float3 singleWeight = float3(0.0, 0.0, 0.0);
+    float2 probe = float2(0.0, 0.0);
+
+    // 0: no scattering, 1: single scattering, 2: the diffusion profile. One loop so that the ray query,
+    // light sample and shadow ray are each inlined once.
+    [loop]
+    for (uint part = 0; part < 3; ++part)
+    {
+        float3 u = Rand3(rng);
+        float3 origin = entry;
+        float3 dir = dirIn;
+        float tMax = FLT_MAX;
+        if (part == 1)
+        {
+            if (d0 < 0.0 || (components & SUBSURFACE_SINGLE_SCATTERING) == 0)
+                continue;
+            // Somewhere in (0, d0), from one channel's exponential truncated there, weighted by the pdf of
+            // picking any of the three; then the phase function's direction.
+            float sigma = m.sigmaT[min(uint(u.x * 3.0), 2u)];
+            float t = -log(1.0 - u.y * OneMinusExp(sigma * d0).x) / sigma;
+            float3 transmittance = exp(-m.sigmaT * t);
+            float3 pdfs = m.sigmaT * transmittance / OneMinusExp(m.sigmaT * d0);
+            singleWeight = m.albedo * m.sigmaT * transmittance * (3.0 / (pdfs.x + pdfs.y + pdfs.z));
+            origin = entry + dirIn * t;
+            dir = SampleHenyeyGreenstein(dirIn, m.anisotropy, float2(u.z, Rand3(rng).x));
+        }
+        else if (part == 2)
+        {
+            if ((components & SUBSURFACE_MULTIPLE_SCATTERING) == 0)
+                continue;
+            // One channel's profile, in r a mixture of exponentials with scales l / s and 3 l / s, weighted
+            // 1/4 and 3/4, then down along the normal through that point of the tangent disk.
+            uint channel = min(uint(u.x * 3.0), 2u);
+            float scale = m.meanFreePath[channel] / BurleyScale(m.colour)[channel];
+            bool shortLobe = u.y < 0.25;
+            float v = shortLobe ? u.y * 4.0 : (u.y - 0.25) * (4.0 / 3.0);
+            float r = max(-log(1.0 - v) * (shortLobe ? scale : 3.0 * scale), 1.0e-6 * scale);
+            float reach = SubsurfaceProbeRadius(m);
+            if (r >= reach)
+                continue;
+            float h = sqrt(reach * reach - r * r);
+            float3 t, b;
+            BuildOrthonormalBasis(N, t, b);
+            float phi = TWO_PI * u.z;
+            origin = position + (t * cos(phi) + b * sin(phi)) * r + N * h;
+            dir = -N;
+            tMax = 2.0 * h;
+            probe = float2(r, h);
+        }
+
+        // The medium's far side seen from inside, or for the probe its near side seen from outside.
+        SubsurfaceHit hit = TraceSubsurfaceRay(origin, dir, tMax, materialIndex);
+        if (!hit.hit || (dot(hit.Ng, dir) < 0.0) != (part == 2))
+            continue;
+        float3 weight;
+        if (part == 0)
+        {
+            d0 = hit.t;
+            if ((components & SUBSURFACE_ZERO_SCATTERING) == 0)
+                continue;
+            weight = exp(-m.sigmaT * hit.t);
+        }
+        else if (part == 1)
+        {
+            weight = singleWeight * exp(-m.sigmaT * hit.t);
+        }
+        else
+        {
+            weight = SubsurfaceProbeWeight(m, probe, hit.t, dot(hit.Ng, dir));
+        }
+        float3 hitPosition = origin + dir * hit.t;
+        float3 normal = dot(hit.N, hit.Ng) > 0.0 ? hit.N : hit.Ng;
+
+        // The light entering here, as a white Lambertian surface would reflect it, MIS weighted against the
+        // cosine sample the path takes if it leaves through here.
+        float3 lightU = Rand3(rng);
+        PackedLightSelectVertex vertex = PackLightSelectVertex(ExitLightSelectVertex(hitPosition, normal));
+        LightSample ls = SampleLight(UnpackLightSelectVertex(vertex), lightU.xy, rng);
+        float cosLight = dot(ls.direction, normal);
+        if (ls.pdf > 0.0 && cosLight > 0.0 && dot(ls.direction, hit.Ng) > 0.0)
+        {
+            float w = ls.lightSamplingOnly ? 1.0 : PowerHeuristic(ls.pdf, cosLight / PI);
+            float3 contribution = weight * ls.radiance * AtmosphereTransmittance(ls.distance) * (cosLight / PI * w / ls.pdf);
+            radiance += contribution * CastShadowRay(hitPosition, hit.Ng, ls.direction, ls.distance);
+        }
+
+        // Weighted reservoir pick of the exit the path leaves by, in proportion to its weight's luminance.
+        float pick = Luminance(weight);
+        pickSum += pick;
+        if (pick > 0.0 && lightU.z * pickSum < pick)
+        {
+            exitPosition = hitPosition;
+            exitNg = hit.Ng;
+            exitN = normal;
+            exit.throughput = weight / pick;
+            exit.vertex = vertex;
+            exit.valid = true;
+        }
+    }
+
+    if (exit.valid)
+    {
+        float3 t, b;
+        BuildOrthonormalBasis(exitN, t, b);
+        float3 local = SampleCosineHemisphere(Rand3(rng).xy);
+        exit.dir = t * local.x + b * local.y + exitN * local.z;
+        exit.pdf = local.z / PI;
+        exit.origin = OffsetRay(exitPosition, exitNg, exit.dir);
+        exit.throughput *= throughput * pickSum;
+        exit.valid = dot(exit.dir, exitNg) > 0.0 && exit.pdf > 0.0;
+    }
+    return throughput * radiance;
 }
