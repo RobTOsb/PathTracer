@@ -5,6 +5,11 @@ ConstantBuffer<TonemapConstants> g_PushConstants : register(b0);
 RWTexture2D<float4> g_Input : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
 
+float Luma(float3 c)
+{
+    return dot(c, float3(0.2126, 0.7152, 0.0722));
+}
+
 float3 Reinhard(float3 x)
 {
     return x / (1.0 + x);
@@ -18,6 +23,7 @@ float3 RRTAndODTFit(float3 v)
     return a / b;
 }
 
+// Not saturated here so it can be used as a look that the HDR path extends.
 float3 ACESFitted(float3 colour)
 {
     // sRGB => XYZ => D65_2_D60 => AP1 => RRT_SAT
@@ -34,7 +40,7 @@ float3 ACESFitted(float3 colour)
     colour = mul(inputMat, colour);
     colour = RRTAndODTFit(colour);
     colour = mul(outputMat, colour);
-    return saturate(colour);
+    return max(colour, 0.0);
 }
 
 float3 KhronosPBRNeutral(float3 colour)
@@ -58,10 +64,95 @@ float3 KhronosPBRNeutral(float3 colour)
     return lerp(colour, newPeak.xxx, g);
 }
 
+// RenoDX's Neutwo curve: f(x) = c*p*x / sqrt(x*x*(c*c - p*p) + c*c*p*p).
+// Slope 1 at black, close to linear through the mid-tones, and f(clip) = peak exactly.
+float Neutwo(float x, float peak, float clip)
+{
+    clip = max(clip, peak);
+    float cc = clip * clip;
+    float pp = peak * peak;
+    return min(clip * peak * x * rsqrt(x * x * (cc - pp) + cc * pp), peak);
+}
+
+// Tonemaps luminance only and rescales RGB, so hue and saturation survive the curve.
+// A colour whose luminance fits but whose brightest channel does not is then desaturated
+// towards white at constant luminance, which is how bright coloured lights blow out.
+float3 ToneMapNeutral(float3 colour, float peak, float clip)
+{
+    float y = Luma(colour);
+    if (y <= 0.0)
+        return 0.0;
+
+    float yOut = Neutwo(y, peak, clip);
+    colour *= yOut / y;
+
+    float maxChannel = max(colour.r, max(colour.g, colour.b));
+    if (maxChannel > peak)
+    {
+        float t = (peak - yOut) / max(maxChannel - yOut, 1e-6);
+        colour = lerp(yOut.xxx, colour, saturate(t));
+    }
+    return colour;
+}
+
+float3 ApplySDRLook(float3 colour, ToneMappingOperator op, float clip)
+{
+    switch (op)
+    {
+        case TONEMAP_REINHARD:
+            return Reinhard(colour);
+        case TONEMAP_KHRONOS_PBR_NEUTRAL:
+            return KhronosPBRNeutral(colour);
+        case TONEMAP_ACES_FITTED:
+            return ACESFitted(colour);
+        case TONEMAP_NEUTWO:
+            return ToneMapNeutral(colour, 1.0, clip);
+        case TONEMAP_OFF:
+        default:
+            return colour;
+    }
+}
+
+// RenoDX's UpgradeToneMap bridge. Mid-tones take the SDR look's luminance and colour, the
+// luminance the neutral SDR curve compressed away is added back on top, and the result is
+// scene-referred again so the HDR curve can map it to the display.
+float3 ApplySDRLookToScene(float3 scene, float3 sdrNeutral, float3 sdrLook)
+{
+    float yLook = Luma(sdrLook);
+    if (yLook <= 0.0)
+        return 0.0;
+
+    float yNew = yLook + max(Luma(scene) - Luma(sdrNeutral), 0.0);
+    return sdrLook * (yNew / yLook);
+}
+
+// Input must be non-negative; values above 1 follow the same curve.
+float3 LinearToSRGBUnclamped(float3 c)
+{
+    return select(c <= 0.0031308, c * 12.92, 1.055 * pow(c, 1.0 / 2.4) - 0.055);
+}
+
+float SRGBToLinear(float c)
+{
+    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+}
+
 float3 LinearToSRGB(float3 c)
 {
-    c = saturate(c);
-    return select(c <= 0.0031308, c * 12.92, 1.055 * pow(c, 1.0 / 2.4) - 0.055);
+    return LinearToSRGBUnclamped(saturate(c));
+}
+
+// SDR monitors decode with a pure 2.2 power rather than the piecewise sRGB curve, so that is
+// what people are used to seeing. Re-encoding with sRGB and decoding with 2.2 reproduces it in
+// HDR; without it shadows look lifted compared with the SDR output.
+float3 GammaCorrect(float3 c)
+{
+    return pow(LinearToSRGBUnclamped(c), 2.2);
+}
+
+float GammaCorrectInverse(float c)
+{
+    return SRGBToLinear(pow(c, 1.0 / 2.2));
 }
 
 // Rec.709 primaries => Rec.2020 primaries (linear).
@@ -87,23 +178,6 @@ float3 LinearToPQ(float3 nits)
     return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
 }
 
-// Compresses only the luminance above the knee, asymptotically towards maxNits. Everything below
-// the knee passes through untouched, so diffuse white and mid-tones keep their absolute level.
-// Scaling RGB by the luminance ratio preserves hue.
-float3 HDRHighlightRolloff(float3 nits, float maxNits, float kneeFraction)
-{
-    float L = dot(nits, float3(0.2126, 0.7152, 0.0722));
-    float knee = kneeFraction * maxNits;
-    if (L > knee)
-    {
-        float range = maxNits - knee;
-        float t = (L - knee) / range;
-        float Lout = knee + range * (t / (1.0 + t));
-        nits *= Lout / L;
-    }
-    return nits;
-}
-
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -112,32 +186,41 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
 
     float3 colour = max(g_Input[id.xy].rgb, 0.0) * g_PushConstants.exposure;
+    ToneMappingOperator op = (ToneMappingOperator)g_PushConstants.toneMapOperator;
+    float clip = g_PushConstants.whiteClip;
 
     if (g_PushConstants.hdr10 != 0)
     {
-        // No SDR curve: scene 1.0 is paper white, the display's headroom carries the highlights.
-        float3 nits = colour * g_PushConstants.paperWhiteNits;
-        nits = HDRHighlightRolloff(nits, g_PushConstants.peakNits, g_PushConstants.rolloffKnee);
-        nits = max(Rec709ToRec2020(nits), 0.0);
+        // Scene 1.0 is paper white, so the peak is expressed relative to it.
+        float peak = g_PushConstants.peakNits / g_PushConstants.paperWhiteNits;
+        bool gammaCorrect = g_PushConstants.hdrGammaCorrection != 0;
+
+        // Tonemap to the value that lands exactly on peakNits once gamma correction is applied.
+        float tonemapPeak = gammaCorrect ? GammaCorrectInverse(peak) : peak;
+
+        if (op == TONEMAP_OFF)
+        {
+            colour = min(colour, tonemapPeak);
+        }
+        else
+        {
+            if (op != TONEMAP_NEUTWO)
+            {
+                float3 sdrNeutral = ToneMapNeutral(colour, 1.0, clip);
+                float3 sdrLook = ApplySDRLook(colour, op, clip);
+                colour = ApplySDRLookToScene(colour, sdrNeutral, sdrLook);
+            }
+            colour = ToneMapNeutral(colour, tonemapPeak, clip);
+        }
+
+        if (gammaCorrect)
+            colour = GammaCorrect(colour);
+
+        float3 nits = Rec709ToRec2020(colour * g_PushConstants.paperWhiteNits);
         g_Output[id.xy] = float4(LinearToPQ(nits), 1.0);
         return;
     }
 
-    switch ((ToneMappingOperator)g_PushConstants.toneMapOperator)
-    {
-        case TONEMAP_REINHARD:
-            colour = Reinhard(colour);
-            break;
-        case TONEMAP_KHRONOS_PBR_NEUTRAL:
-            colour = KhronosPBRNeutral(colour);
-            break;
-        case TONEMAP_OFF:
-            break;
-        case TONEMAP_ACES_FITTED:
-        default:
-            colour = ACESFitted(colour);
-            break;
-    }
-
+    colour = ApplySDRLook(colour, op, clip);
     g_Output[id.xy] = float4(LinearToSRGB(colour), 1.0);
 }

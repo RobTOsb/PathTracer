@@ -24,6 +24,7 @@ namespace
 		{ TONEMAP_ACES_FITTED, "ACES (fitted)" },
 		{ TONEMAP_KHRONOS_PBR_NEUTRAL, "Khronos PBR Neutral" },
 		{ TONEMAP_REINHARD, "Reinhard" },
+		{ TONEMAP_NEUTWO, "Neutwo" },
 		{ TONEMAP_OFF, "Off (clamp)" },
 	};
 
@@ -417,8 +418,9 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		{
 			ImGui::SliderFloat("Paper white", &settings_.paperWhiteNits, 80.0f, 400.0f, "%.0f nits");
 			ImGui::SliderFloat("Peak luminance", &settings_.peakNits, 400.0f, 4000.0f, "%.0f nits");
-			ImGui::SliderFloat("Roll-off knee", &settings_.rolloffKnee, 0.2f, 0.95f, "%.2f");
-			ImGui::TextDisabled("HDR10 output: the tone mapper only applies to SDR");
+			ImGui::Checkbox("Gamma correction (2.2)", &settings_.hdrGammaCorrection);
+			ImGui::SetItemTooltip("Re-encodes with sRGB and decodes with a 2.2 power, as SDR displays do, so "
+								  "shadows are not lifted compared with the SDR output");
 		}
 
 		int current = 0;
@@ -439,6 +441,18 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 				}
 			}
 			ImGui::EndCombo();
+		}
+		if (renderContext->GetUseHDR())
+		{
+			ImGui::SetItemTooltip("HDR10: applied as a grade below paper white, Neutwo maps the result to the peak");
+		}
+
+		// Neutwo is always the final curve in HDR; in SDR only when it is the selected operator.
+		if (renderContext->GetUseHDR() ? settings_.toneMapOperator != TONEMAP_OFF
+									   : settings_.toneMapOperator == TONEMAP_NEUTWO)
+		{
+			ImGui::SliderFloat("White clip", &settings_.whiteClip, 1.0f, 1000.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+			ImGui::SetItemTooltip("Scene value (1 = paper white) that the Neutwo curve maps exactly to its peak");
 		}
 	}
 

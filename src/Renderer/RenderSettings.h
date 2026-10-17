@@ -102,13 +102,13 @@ struct RenderSettings
 	int anisotropicSegments = 1;
 
 	float exposureEV = 0.0f;
-	ToneMappingOperator toneMapOperator = TONEMAP_ACES_FITTED; // SDR output only
+	ToneMappingOperator toneMapOperator = TONEMAP_NEUTWO;
+	float whiteClip = 100.0f; // scene value the Neutwo curve maps to its peak (1.0 = paper white)
 
-	// HDR10 output: no SDR curve, scene 1.0 = paperWhiteNits and only highlights above the knee
-	// are compressed towards peakNits.
+	// HDR10 output: scene 1.0 = paperWhiteNits.
 	float paperWhiteNits = 203.0f; // BT.2408 reference white
 	float peakNits = 1000.0f; // overwritten with the display's reported peak at startup
-	float rolloffKnee = 0.8f; // fraction of peakNits
+	bool hdrGammaCorrection = true; // match the 2.2 gamma SDR displays decode with
 
 	DLSSMode dlssMode = DLSSMode::MaxQuality;
 	DLSSRayReconstructionPreset rrPreset = DLSSRayReconstructionPreset::PresetF;

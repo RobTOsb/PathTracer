@@ -328,8 +328,9 @@ struct TonemapConstants
 	uint height;
 	uint hdr10; // 1: output Rec.2020 PQ (HDR10) instead of sRGB
 	float paperWhiteNits; // luminance of diffuse white (1.0) when hdr10 is set
-	float peakNits; // display peak luminance, highlights roll off towards it when hdr10 is set
-	float rolloffKnee; // fraction of peakNits where the highlight roll-off starts
+	float peakNits; // display peak luminance, the HDR curve maps whiteClip to it when hdr10 is set
+	float whiteClip; // scene value (1.0 = paper white) the Neutwo curve maps exactly to its peak
+	uint hdrGammaCorrection; // 1: re-encode sRGB and decode with 2.2 so HDR shadows match SDR displays
 };
 
 #ifdef __cplusplus
@@ -338,7 +339,7 @@ static_assert(sizeof(GpuMaterial) == 96, "GpuMaterial must match the structured 
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
 static_assert(sizeof(GpuCameraState) == 104, "GpuCameraState must match the structured buffer stride");
-static_assert(sizeof(TonemapConstants) == 32, "TonemapConstants must fit the root constants");
+static_assert(sizeof(TonemapConstants) == 36,"TonemapConstants must fit the root constants");
 #endif
 
 #endif // PATH_TRACER_INTEROP_H

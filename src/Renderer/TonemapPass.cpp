@@ -60,7 +60,8 @@ void TonemapPass::Execute(RenderContext *renderContext)
 	constants.hdr10 = renderContext->GetUseHDR() ? 1u : 0u;
 	constants.paperWhiteNits = settings_.paperWhiteNits;
 	constants.peakNits = settings_.peakNits;
-	constants.rolloffKnee = settings_.rolloffKnee;
+	constants.whiteClip = settings_.whiteClip;
+	constants.hdrGammaCorrection = settings_.hdrGammaCorrection ? 1u : 0u;
 
 	renderContext->SetComputePipeline(pipeline_);
 	renderContext->SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
