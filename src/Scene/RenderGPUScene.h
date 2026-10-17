@@ -24,7 +24,7 @@ class SceneCacheWriter;
 
 struct MaterialGeometryFlags
 {
-	explicit MaterialGeometryFlags(const GpuMaterial &material)
+	explicit MaterialGeometryFlags(const MaterialData &material)
 	{
 		const bool passThrough = (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0;
 		isOpaque = material.alphaMode == ALPHA_MODE_OPAQUE && !passThrough;

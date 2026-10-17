@@ -973,7 +973,7 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 		const Scene::Material &material = scene.GetMaterial(i);
 		const float *baseColour = material.GetBaseColour();
 
-		GpuMaterial gpu = {};
+		MaterialData gpu = {};
 		gpu.baseColour = float4(baseColour[0], baseColour[1], baseColour[2], baseColour[3]);
 		gpu.roughness = material.GetRoughness();
 		gpu.metallic = material.GetMetal();
@@ -990,8 +990,8 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 		// Strength along the rotation as one half2, which the texture's direction is rotated by.
 		const float anisotropyStrength = std::clamp(material.GetAnisotropyStrength(), 0.0f, 1.0f);
 		const float anisotropyRotation = material.GetAnisotropyRotation();
-		gpu.anisotropy = PackF16Pair(anisotropyStrength * std::cos(anisotropyRotation),
-									 anisotropyStrength * std::sin(anisotropyRotation));
+		gpu.anisotropy = float2(anisotropyStrength * std::cos(anisotropyRotation),
+								anisotropyStrength * std::sin(anisotropyRotation));
 		gpu.anisotropyTexture = anisotropyStrength > 0.0f ? UploadTexture(material.GetAnisotropyTexture(),
 																		  Format::R8G8B8A8_UNORM,
 																		  "Material_Anisotropy",
@@ -1087,12 +1087,12 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 													  "Material_Emissive",
 													  batch)
 									  : INVALIDDESCRIPTORHANDLE;
-		materials.push_back(gpu);
+		materials.push_back(PackGpuMaterial(gpu));
 	}
 
 	// Default material (glTF spec defaults would be metallic 1, which reads badly on untextured
 	// geometry, so use a plain grey dielectric instead).
-	GpuMaterial fallback = {};
+	MaterialData fallback = {};
 	fallback.baseColour = float4(0.8f, 0.8f, 0.8f, 1.0f);
 	fallback.roughness = 0.5f;
 	fallback.metallic = 0.0f;
@@ -1113,25 +1113,23 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 	fallback.subsurfaceRadiusTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.subsurfaceScaleTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.anisotropyTexture = INVALIDDESCRIPTORHANDLE;
-	materials.push_back(fallback);
+	materials.push_back(PackGpuMaterial(fallback));
 }
 
 void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMaterials, UploadBatchHandle batch)
 {
 	std::vector<GpuMaterial> materials = sourceMaterials;
-	for (GpuMaterial &material: materials)
+	materialGeometry_.clear();
+	materialGeometry_.reserve(materials.size());
+	for (GpuMaterial &packed: materials)
 	{
+		MaterialData material = UnpackGpuMaterial(packed);
 		if (material.alphaMode == ALPHA_MODE_BLEND)
 		{
 			material.alphaMode = ALPHA_MODE_MASK;
 			material.alphaCutoff = 0.5f * material.baseColour.w;
+			packed = PackGpuMaterial(material);
 		}
-	}
-
-	materialGeometry_.clear();
-	materialGeometry_.reserve(materials.size());
-	for (const GpuMaterial &material: materials)
-	{
 		materialGeometry_.push_back(MaterialGeometryFlags(material));
 	}
 
@@ -1190,7 +1188,7 @@ std::vector<uint32_t> RenderGPUScene::CollectEmitters(const Scene::GLTFScene &sc
 	{
 		const TLASInstanceRef &ref = tlasInstances[i];
 		const uint32_t materialIndex = primitiveDescs[ref.primitive].materialIndex;
-		const GpuMaterial &material = materials[materialIndex];
+		const MaterialData material = UnpackGpuMaterial(materials[materialIndex]);
 		const float3 emissive = material.emissive;
 		if (!(emissive.x > 0.0f || emissive.y > 0.0f || emissive.z > 0.0f))
 		{

@@ -595,7 +595,7 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
 void AnyHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
     PrimitiveDesc prim = LoadPrimitive(InstanceID());
-    GpuMaterial material = LoadGpuMaterial(prim.materialIndex);
+    MaterialData material = LoadGpuMaterial(prim.materialIndex);
     if (material.alphaMode != ALPHA_MODE_MASK)
         return;
     float2 uv = InterpolateTexCoord(LoadTriangle(prim, PrimitiveIndex()), Barycentrics(attr.barycentrics));

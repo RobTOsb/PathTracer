@@ -34,7 +34,7 @@ OpenPBRBaseParams OpenPBRDefaults()
 
 // glTF transmission in OpenPBR terms: the base colour tints what crosses the surface, unless a
 // volume's attenuation sets the medium instead (assets rarely use both).
-void SetTransmission(inout OpenPBRBaseParams p, GpuMaterial material, float transmission, bool thinWalled)
+void SetTransmission(inout OpenPBRBaseParams p, MaterialData material, float transmission, bool thinWalled)
 {
     p.transmissionWeight = saturate(transmission);
     p.specularIor = material.ior;
@@ -84,7 +84,7 @@ void ApplyMaterialOverrides(inout OpenPBRBaseParams p)
 // The textures are filtered over the footprint of a ray cone coneWidth wide where it meets the surface.
 OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotropic)
 {
-    GpuMaterial material = LoadGpuMaterial(hit.materialId);
+    MaterialData material = LoadGpuMaterial(hit.materialId);
     float2 uv = hit.uv;
     float2 ddx = hit.uvGradients.xy * coneWidth;
     float2 ddy = hit.uvGradients.zw * coneWidth;
@@ -119,7 +119,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
         roughness = max(roughness, 1.0e-4);
 
     float anisotropyStrength = 0.0;
-    float2 anisotropy = UnpackHalf2(material.anisotropy);
+    float2 anisotropy = material.anisotropy;
     if (any(anisotropy != 0.0))
     {
         float2 direction = anisotropy;
@@ -196,7 +196,7 @@ float3 MediumExtinction(OpenPBRBaseParams p)
 }
 
 // Base colour and alpha at a candidate hit, for the any-hit shaders and the inline shadow query.
-float4 LoadBaseColourAlpha(GpuMaterial material, float2 uv)
+float4 LoadBaseColourAlpha(MaterialData material, float2 uv)
 {
     float4 albedo = material.baseColour;
     if (material.albedoTexture != INVALIDDESCRIPTORHANDLE)
@@ -205,7 +205,7 @@ float4 LoadBaseColourAlpha(GpuMaterial material, float2 uv)
 }
 
 // What a pass-through surface lets a shadow ray through.
-float3 PassThroughTransmittance(GpuMaterial material, float2 uv, float3 baseColour, float faceCosine)
+float3 PassThroughTransmittance(MaterialData material, float2 uv, float3 baseColour, float faceCosine)
 {
     float transmission = material.transmission;
     if (material.transmissionTexture != INVALIDDESCRIPTORHANDLE)
@@ -229,7 +229,7 @@ bool ShadowCandidateTransmittance(PrimitiveDesc prim, uint primitiveIndex, float
                                   float3 dir, out float3 transmitted)
 {
     transmitted = float3(0.0, 0.0, 0.0);
-    GpuMaterial material = LoadGpuMaterial(prim.materialIndex);
+    MaterialData material = LoadGpuMaterial(prim.materialIndex);
     uint3 tri = LoadTriangle(prim, primitiveIndex);
     float2 uv = InterpolateTexCoord(tri, Barycentrics(barycentrics));
     float4 albedo = LoadBaseColourAlpha(material, uv);

@@ -22,7 +22,8 @@
 // 10: EXT_materials_subsurface in the Blender exporter's schema, GpuMaterial 160 bytes (subsurface radius
 //     and scale textures, weight and scale texture channels).
 // 11: instance world matrices include their parent nodes' transforms.
-constexpr uint32_t kSceneCacheVersion = 11;
+// 12: GpuMaterial packed to 96 bytes (half factors).
+constexpr uint32_t kSceneCacheVersion = 12;
 
 struct SceneCacheTexture
 {

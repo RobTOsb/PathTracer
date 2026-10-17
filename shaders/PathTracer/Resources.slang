@@ -74,9 +74,61 @@ PrimitiveDesc LoadPrimitive(uint index)
     return g_Primitives[index];
 }
 
-GpuMaterial LoadGpuMaterial(uint index)
+// The two float16 values of a GpuMaterial field, low half in x (Math's UnpackHalf2, which imports this).
+float2 UnpackMaterialHalves(uint bits)
 {
-    return g_Materials[index];
+    return float2(f16tof32(bits & 0xFFFF), f16tof32(bits >> 16));
+}
+
+// UnpackGpuMaterial's shader side. Fields the caller does not read are never loaded or converted.
+MaterialData LoadGpuMaterial(uint index)
+{
+    GpuMaterial p = g_Materials[index];
+    uint flags = p.emissiveFlags.y;
+    float2 baseColour0 = UnpackMaterialHalves(p.baseColour.x);
+    float2 baseColour1 = UnpackMaterialHalves(p.baseColour.y);
+    float2 roughnessMetallic = UnpackMaterialHalves(p.roughnessMetallic);
+    float2 normalScaleAlphaCutoff = UnpackMaterialHalves(p.normalScaleAlphaCutoff);
+    float2 transmissionIor = UnpackMaterialHalves(p.transmissionIor);
+    float2 emissive = UnpackMaterialHalves(p.emissiveFlags.x);
+    float2 attenuation0 = UnpackMaterialHalves(p.attenuation.x);
+    float2 attenuation1 = UnpackMaterialHalves(p.attenuation.y);
+    float2 subsurfaceColour0 = UnpackMaterialHalves(p.subsurfaceColourWeight.x);
+    float2 subsurfaceColour1 = UnpackMaterialHalves(p.subsurfaceColourWeight.y);
+    float2 subsurfaceRadius0 = UnpackMaterialHalves(p.subsurfaceRadiusAnisotropy.x);
+    float2 subsurfaceRadius1 = UnpackMaterialHalves(p.subsurfaceRadiusAnisotropy.y);
+
+    MaterialData m;
+    m.baseColour = float4(baseColour0, baseColour1);
+    m.roughness = roughnessMetallic.x;
+    m.metallic = roughnessMetallic.y;
+    m.normalScale = normalScaleAlphaCutoff.x;
+    m.alphaCutoff = normalScaleAlphaCutoff.y;
+    m.albedoTexture = p.albedoTexture;
+    m.roughMetalTexture = p.roughMetalTexture;
+    m.normalTexture = p.normalTexture;
+    m.alphaMode = (flags >> GPU_MATERIAL_ALPHA_MODE_SHIFT) & 3;
+    m.transmission = transmissionIor.x;
+    m.ior = transmissionIor.y;
+    m.transmissionFlags = (flags >> GPU_MATERIAL_TRANSMISSION_FLAGS_SHIFT) & 3;
+    m.transmissionTexture = p.transmissionTexture;
+    m.emissive = float3(emissive, f16tof32(flags & 0xFFFF));
+    m.emissiveTexture = p.emissiveTexture;
+    m.attenuationColour = float3(attenuation0, attenuation1.x);
+    m.attenuationDistance = attenuation1.y;
+    m.subsurfaceColour = float3(subsurfaceColour0, subsurfaceColour1.x);
+    m.subsurfaceWeight = subsurfaceColour1.y;
+    m.subsurfaceWeightTexture = p.subsurfaceWeightTexture;
+    m.subsurfaceColourTexture = p.subsurfaceColourTexture;
+    m.anisotropy = UnpackMaterialHalves(p.anisotropy);
+    m.anisotropyTexture = p.anisotropyTexture;
+    m.subsurfaceRadius = float3(subsurfaceRadius0, subsurfaceRadius1.x);
+    m.subsurfaceScatterAnisotropy = subsurfaceRadius1.y;
+    m.subsurfaceRadiusTexture = p.subsurfaceRadiusTexture;
+    m.subsurfaceScaleTexture = p.subsurfaceScaleTexture;
+    m.subsurfaceWeightChannel = (flags >> GPU_MATERIAL_WEIGHT_CHANNEL_SHIFT) & 3;
+    m.subsurfaceScaleChannel = (flags >> GPU_MATERIAL_SCALE_CHANNEL_SHIFT) & 3;
+    return m;
 }
 
 float4 SampleTexture(uint textureIndex, float2 uv)

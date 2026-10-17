@@ -124,9 +124,10 @@ enum GpuTransmissionFlags
 	TRANSMISSION_PASS_THROUGH = 2,
 };
 
-// One row per glTF material in a StructuredBuffer. Texture fields are bindless descriptor-heap
-// indices, INVALIDDESCRIPTORHANDLE when the material has no such map.
-struct GpuMaterial
+// A glTF material as the CPU builds it and the shaders read it, unpacked from its GpuMaterial row.
+// Texture fields are bindless descriptor-heap indices, INVALIDDESCRIPTORHANDLE when the material has
+// no such map.
+struct MaterialData
 {
 	float4 baseColour; // base colour factor, .a = alpha
 	float roughness;
@@ -144,7 +145,7 @@ struct GpuMaterial
 	float3 emissive; // emissiveFactor * KHR_materials_emissive_strength, linear, front faces only
 	uint emissiveTexture; // sRGB, multiplies emissive
 	// Not thin-walled only: white light comes out as attenuationColour after attenuationDistance in
-	// the medium. FLT_MAX: no absorption (always, while KHR_materials_volume is not loaded).
+	// the medium. FLT_MAX or more: no absorption (always, while KHR_materials_volume is not loaded).
 	float3 attenuationColour;
 	float attenuationDistance;
 	// OpenPBR subsurface. Thin-walled: KHR_materials_diffuse_transmission, the share of the diffuse base
@@ -154,9 +155,9 @@ struct GpuMaterial
 	float subsurfaceWeight;
 	uint subsurfaceWeightTexture; // channel subsurfaceWeightChannel multiplies subsurfaceWeight
 	uint subsurfaceColourTexture; // sRGB, RGB multiplies subsurfaceColour
-	// KHR_materials_anisotropy: half2 strength * (cos, sin) of the rotation from the tangent, 0 when
+	// KHR_materials_anisotropy: strength * (cos, sin) of the rotation from the tangent, 0 when
 	// isotropic. The texture's RG direction (* 2 - 1) is rotated by it, B multiplies the strength.
-	uint anisotropy;
+	float2 anisotropy;
 	uint anisotropyTexture;
 	// Solid subsurface only: the medium's mean free path per channel in scene units (radius * radius
 	// scale), 0 without one.
@@ -171,6 +172,122 @@ struct GpuMaterial
 	uint subsurfaceWeightChannel;
 	uint subsurfaceScaleChannel;
 };
+
+// GpuMaterial::emissiveFlags bits above the half emissive blue.
+#define GPU_MATERIAL_ALPHA_MODE_SHIFT 16 // GpuAlphaMode, 2 bits
+#define GPU_MATERIAL_TRANSMISSION_FLAGS_SHIFT 18 // GpuTransmissionFlags, 2 bits
+#define GPU_MATERIAL_WEIGHT_CHANNEL_SHIFT 20 // subsurfaceWeightChannel, 2 bits
+#define GPU_MATERIAL_SCALE_CHANNEL_SHIFT 22 // subsurfaceScaleChannel, 2 bits
+
+// One MaterialData per row of a StructuredBuffer, packed to 96 bytes (three 32 byte sectors): the
+// factors as halves (x in the low 16 bits), the texture indices whole, since the descriptor heap
+// holds up to a million of them. The fields are MaterialData's; PackGpuMaterial and LoadGpuMaterial
+// (Resources.slang) convert.
+struct GpuMaterial
+{
+	uint2 baseColour; // half4
+	uint roughnessMetallic; // half2
+	uint normalScaleAlphaCutoff; // half2
+	uint albedoTexture;
+	uint roughMetalTexture;
+	uint normalTexture;
+	uint transmissionIor; // half2
+	uint2 emissiveFlags; // half3 emissive, then the GPU_MATERIAL_* bits
+	uint transmissionTexture;
+	uint emissiveTexture;
+	uint anisotropy; // half2
+	uint anisotropyTexture;
+	uint subsurfaceWeightTexture;
+	uint subsurfaceColourTexture;
+	uint2 subsurfaceColourWeight; // half4
+	uint2 subsurfaceRadiusAnisotropy; // half4: radius, then scatter anisotropy
+	uint2 attenuation; // half4: colour, then distance, infinite for no absorption
+	uint subsurfaceRadiusTexture;
+	uint subsurfaceScaleTexture;
+};
+
+#ifdef __cplusplus
+// Halves clamped to the finite range, except that an attenuation distance beyond it becomes infinity.
+inline GpuMaterial PackGpuMaterial(const MaterialData &m)
+{
+	using namespace DirectX::PackedVector;
+	auto half = [](float v) { return static_cast<uint32_t>(XMConvertFloatToHalf(std::clamp(v, -65504.0f, 65504.0f))); };
+	auto pair = [&](float lo, float hi) { return half(lo) | (half(hi) << 16); };
+	const uint32_t infinity = 0x7C00;
+	const uint32_t flags = (m.alphaMode << GPU_MATERIAL_ALPHA_MODE_SHIFT) |
+						   (m.transmissionFlags << GPU_MATERIAL_TRANSMISSION_FLAGS_SHIFT) |
+						   (m.subsurfaceWeightChannel << GPU_MATERIAL_WEIGHT_CHANNEL_SHIFT) |
+						   (m.subsurfaceScaleChannel << GPU_MATERIAL_SCALE_CHANNEL_SHIFT);
+
+	GpuMaterial p = {};
+	p.baseColour = uint2(pair(m.baseColour.x, m.baseColour.y), pair(m.baseColour.z, m.baseColour.w));
+	p.roughnessMetallic = pair(m.roughness, m.metallic);
+	p.normalScaleAlphaCutoff = pair(m.normalScale, m.alphaCutoff);
+	p.albedoTexture = m.albedoTexture;
+	p.roughMetalTexture = m.roughMetalTexture;
+	p.normalTexture = m.normalTexture;
+	p.transmissionIor = pair(m.transmission, m.ior);
+	p.emissiveFlags = uint2(pair(m.emissive.x, m.emissive.y), half(m.emissive.z) | flags);
+	p.transmissionTexture = m.transmissionTexture;
+	p.emissiveTexture = m.emissiveTexture;
+	p.anisotropy = pair(m.anisotropy.x, m.anisotropy.y);
+	p.anisotropyTexture = m.anisotropyTexture;
+	p.subsurfaceWeightTexture = m.subsurfaceWeightTexture;
+	p.subsurfaceColourTexture = m.subsurfaceColourTexture;
+	p.subsurfaceColourWeight = uint2(pair(m.subsurfaceColour.x, m.subsurfaceColour.y),
+									 pair(m.subsurfaceColour.z, m.subsurfaceWeight));
+	p.subsurfaceRadiusAnisotropy = uint2(pair(m.subsurfaceRadius.x, m.subsurfaceRadius.y),
+										 pair(m.subsurfaceRadius.z, m.subsurfaceScatterAnisotropy));
+	p.attenuation = uint2(pair(m.attenuationColour.x, m.attenuationColour.y),
+						  half(m.attenuationColour.z) |
+								  ((m.attenuationDistance > 65504.0f ? infinity : half(m.attenuationDistance)) << 16));
+	p.subsurfaceRadiusTexture = m.subsurfaceRadiusTexture;
+	p.subsurfaceScaleTexture = m.subsurfaceScaleTexture;
+	return p;
+}
+
+inline MaterialData UnpackGpuMaterial(const GpuMaterial &p)
+{
+	using namespace DirectX::PackedVector;
+	auto lo = [](uint32_t bits) { return XMConvertHalfToFloat(static_cast<HALF>(bits & 0xFFFF)); };
+	auto hi = [](uint32_t bits) { return XMConvertHalfToFloat(static_cast<HALF>(bits >> 16)); };
+	const uint32_t flags = p.emissiveFlags.y;
+
+	MaterialData m = {};
+	m.baseColour = float4(lo(p.baseColour.x), hi(p.baseColour.x), lo(p.baseColour.y), hi(p.baseColour.y));
+	m.roughness = lo(p.roughnessMetallic);
+	m.metallic = hi(p.roughnessMetallic);
+	m.normalScale = lo(p.normalScaleAlphaCutoff);
+	m.alphaCutoff = hi(p.normalScaleAlphaCutoff);
+	m.albedoTexture = p.albedoTexture;
+	m.roughMetalTexture = p.roughMetalTexture;
+	m.normalTexture = p.normalTexture;
+	m.alphaMode = (flags >> GPU_MATERIAL_ALPHA_MODE_SHIFT) & 3;
+	m.transmission = lo(p.transmissionIor);
+	m.ior = hi(p.transmissionIor);
+	m.transmissionFlags = (flags >> GPU_MATERIAL_TRANSMISSION_FLAGS_SHIFT) & 3;
+	m.transmissionTexture = p.transmissionTexture;
+	m.emissive = float3(lo(p.emissiveFlags.x), hi(p.emissiveFlags.x), lo(flags));
+	m.emissiveTexture = p.emissiveTexture;
+	m.attenuationColour = float3(lo(p.attenuation.x), hi(p.attenuation.x), lo(p.attenuation.y));
+	m.attenuationDistance = hi(p.attenuation.y);
+	m.subsurfaceColour = float3(lo(p.subsurfaceColourWeight.x), hi(p.subsurfaceColourWeight.x),
+								lo(p.subsurfaceColourWeight.y));
+	m.subsurfaceWeight = hi(p.subsurfaceColourWeight.y);
+	m.subsurfaceWeightTexture = p.subsurfaceWeightTexture;
+	m.subsurfaceColourTexture = p.subsurfaceColourTexture;
+	m.anisotropy = float2(lo(p.anisotropy), hi(p.anisotropy));
+	m.anisotropyTexture = p.anisotropyTexture;
+	m.subsurfaceRadius = float3(lo(p.subsurfaceRadiusAnisotropy.x), hi(p.subsurfaceRadiusAnisotropy.x),
+								lo(p.subsurfaceRadiusAnisotropy.y));
+	m.subsurfaceScatterAnisotropy = hi(p.subsurfaceRadiusAnisotropy.y);
+	m.subsurfaceRadiusTexture = p.subsurfaceRadiusTexture;
+	m.subsurfaceScaleTexture = p.subsurfaceScaleTexture;
+	m.subsurfaceWeightChannel = (flags >> GPU_MATERIAL_WEIGHT_CHANNEL_SHIFT) & 3;
+	m.subsurfaceScaleChannel = (flags >> GPU_MATERIAL_SCALE_CHANNEL_SHIFT) & 3;
+	return m;
+}
+#endif
 
 struct GpuVertex
 {
@@ -217,7 +334,7 @@ struct TonemapConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(FrameConstants) == 448,"FrameConstants must match the HLSL cbuffer layout");
-static_assert(sizeof(GpuMaterial) == 160, "GpuMaterial must match the structured buffer stride");
+static_assert(sizeof(GpuMaterial) == 96, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
 static_assert(sizeof(GpuCameraState) == 104, "GpuCameraState must match the structured buffer stride");
