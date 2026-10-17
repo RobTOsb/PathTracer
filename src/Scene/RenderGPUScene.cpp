@@ -207,6 +207,8 @@ namespace
 									  &material.emissiveTexture,
 									  &material.subsurfaceWeightTexture,
 									  &material.subsurfaceColourTexture,
+									  &material.subsurfaceRadiusTexture,
+									  &material.subsurfaceScaleTexture,
 									  &material.anisotropyTexture })
 			{
 				apply(*texture);
@@ -566,6 +568,8 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 								 material.emissiveTexture,
 								 material.subsurfaceWeightTexture,
 								 material.subsurfaceColourTexture,
+								 material.subsurfaceRadiusTexture,
+								 material.subsurfaceScaleTexture,
 								 material.anisotropyTexture })
 		{
 			if (!validTexture(texture))
@@ -1008,8 +1012,12 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 		// says nothing about the medium, so it is dropped there.
 		gpu.subsurfaceWeightTexture = INVALIDDESCRIPTORHANDLE;
 		gpu.subsurfaceColourTexture = INVALIDDESCRIPTORHANDLE;
+		gpu.subsurfaceRadiusTexture = INVALIDDESCRIPTORHANDLE;
+		gpu.subsurfaceScaleTexture = INVALIDDESCRIPTORHANDLE;
 		if (material.IsThinWalled())
 		{
+			// KHR_materials_diffuse_transmission keeps its factor in A.
+			gpu.subsurfaceWeightChannel = 3;
 			const float *colour = material.GetDiffuseTransmissionColour();
 			gpu.subsurfaceWeight = material.GetDiffuseTransmission();
 			gpu.subsurfaceColour = float3(colour[0], colour[1], colour[2]);
@@ -1029,21 +1037,36 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 		}
 		else
 		{
-			const float *colour = material.GetSubsurfaceColour();
-			const float *scale = material.GetSubsurfaceRadiusScale();
-			const float radius = std::max(material.GetSubsurfaceRadius(), 0.0f);
+			// Like Blender, the medium's colour is the base colour and its mean free path radius * scale.
+			const float *radius = material.GetSubsurfaceRadius();
+			const float scale = std::max(material.GetSubsurfaceScale(), 0.0f);
 			gpu.subsurfaceWeight = material.GetSubsurfaceWeight();
-			gpu.subsurfaceColour = float3(colour[0], colour[1], colour[2]);
-			gpu.subsurfaceRadius = float3(radius * std::max(scale[0], 0.0f),
-										  radius * std::max(scale[1], 0.0f),
-										  radius * std::max(scale[2], 0.0f));
+			gpu.subsurfaceColour = float3(baseColour[0], baseColour[1], baseColour[2]);
+			gpu.subsurfaceRadius = float3(std::max(radius[0], 0.0f) * scale,
+										  std::max(radius[1], 0.0f) * scale,
+										  std::max(radius[2], 0.0f) * scale);
 			gpu.subsurfaceScatterAnisotropy = std::clamp(material.GetSubsurfaceScatterAnisotropy(), -0.99f, 0.99f);
+			gpu.subsurfaceWeightChannel = std::min(material.GetSubsurfaceWeightChannel(), 3u);
+			gpu.subsurfaceScaleChannel = std::min(material.GetSubsurfaceScaleChannel(), 3u);
 			if (gpu.subsurfaceWeight > 0.0f)
 			{
-				gpu.subsurfaceColourTexture = UploadTexture(material.GetSubsurfaceColourTexture(),
-															Format::R8G8B8A8_UNORM_SRGB,
-															"Material_SubsurfaceColour",
+				gpu.subsurfaceWeightTexture = UploadTexture(material.GetSubsurfaceWeightTexture(),
+															Format::R8G8B8A8_UNORM,
+															"Material_SubsurfaceWeight",
 															batch);
+				// sRGB, so it shares the albedo texture.
+				gpu.subsurfaceColourTexture = UploadTexture(material.GetAlbedoTexture(),
+															Format::R8G8B8A8_UNORM_SRGB,
+															"Material_Albedo",
+															batch);
+				gpu.subsurfaceRadiusTexture = UploadTexture(material.GetSubsurfaceRadiusTexture(),
+															Format::R8G8B8A8_UNORM,
+															"Material_SubsurfaceRadius",
+															batch);
+				gpu.subsurfaceScaleTexture = UploadTexture(material.GetSubsurfaceScaleTexture(),
+														   Format::R8G8B8A8_UNORM,
+														   "Material_SubsurfaceScale",
+														   batch);
 			}
 		}
 		gpu.albedoTexture =
@@ -1087,12 +1110,24 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 	fallback.subsurfaceColour = float3(1.0f, 1.0f, 1.0f);
 	fallback.subsurfaceWeightTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.subsurfaceColourTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.subsurfaceRadiusTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.subsurfaceScaleTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.anisotropyTexture = INVALIDDESCRIPTORHANDLE;
 	materials.push_back(fallback);
 }
 
-void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &materials, UploadBatchHandle batch)
+void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMaterials, UploadBatchHandle batch)
 {
+	std::vector<GpuMaterial> materials = sourceMaterials;
+	for (GpuMaterial &material: materials)
+	{
+		if (material.alphaMode == ALPHA_MODE_BLEND)
+		{
+			material.alphaMode = ALPHA_MODE_MASK;
+			material.alphaCutoff = 0.5f * material.baseColour.w;
+		}
+	}
+
 	materialGeometry_.clear();
 	materialGeometry_.reserve(materials.size());
 	for (const GpuMaterial &material: materials)

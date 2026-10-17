@@ -99,14 +99,15 @@ def emissive(name, colour, strength):
 
 materials = [
     {'name': 'Studio', 'pbrMetallicRoughness': {'baseColorFactor': [0.2, 0.2, 0.21, 1], 'metallicFactor': 0.0, 'roughnessFactor': 0.9}},
-    # Polished marble: nearly white, faintly warm deep down. Its colour texture is the multiple-scattering albedo.
+    # Polished marble: nearly white, faintly warm deep down. As in Blender, the base colour (here its
+    # texture) is the medium's multiple-scattering albedo, and radius * scale its mean free path.
     {'name': 'Marble', 'pbrMetallicRoughness': {'baseColorTexture': {'index': 0}, 'metallicFactor': 0.0, 'roughnessFactor': 0.12},
-     'extensions': {'EXT_materials_subsurface': {'subsurfaceWeight': 1.0, 'subsurfaceColor': [1.0, 1.0, 1.0], 'subsurfaceColorTexture': {'index': 0},
-                                                 'subsurfaceRadius': 0.25, 'subsurfaceRadiusScale': [1.0, 0.8, 0.6], 'subsurfaceScatterAnisotropy': 0.0}}},
+     'extensions': {'EXT_materials_subsurface': {'subsurfaceFactor': 1.0, 'subsurfaceRadius': [1.0, 0.8, 0.6], 'subsurfaceScale': 0.25,
+                                                 'subsurfaceIor': 1.4, 'subsurfaceAnisotropy': 0.0, 'subsurfaceMethod': 'RANDOM_WALK'}}},
     # Candle wax: red light travels far further than blue, and scatters a little forwards.
     {'name': 'Wax', 'pbrMetallicRoughness': {'baseColorFactor': [0.98, 0.72, 0.38, 1], 'metallicFactor': 0.0, 'roughnessFactor': 0.35},
-     'extensions': {'EXT_materials_subsurface': {'subsurfaceWeight': 1.0, 'subsurfaceColor': [0.98, 0.72, 0.38],
-                                                 'subsurfaceRadius': 0.35, 'subsurfaceRadiusScale': [1.0, 0.45, 0.2], 'subsurfaceScatterAnisotropy': 0.2}}},
+     'extensions': {'EXT_materials_subsurface': {'subsurfaceFactor': 1.0, 'subsurfaceRadius': [1.0, 0.45, 0.2], 'subsurfaceScale': 0.35,
+                                                 'subsurfaceIor': 1.4, 'subsurfaceAnisotropy': 0.2, 'subsurfaceMethod': 'RANDOM_WALK'}}},
     emissive('KeyLight', [1.0, 0.97, 0.92], 5.0),
     emissive('BackLight', [1.0, 0.98, 0.95], 30.0),
     emissive('Flame', [1.0, 0.55, 0.18], 80.0),

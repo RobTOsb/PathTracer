@@ -367,22 +367,16 @@
    },
    "extensions": {
     "EXT_materials_subsurface": {
-     "subsurfaceWeight": 1.0,
-     "subsurfaceColor": [
-      1.0,
-      1.0,
-      1.0
-     ],
-     "subsurfaceColorTexture": {
-      "index": 0
-     },
-     "subsurfaceRadius": 0.25,
-     "subsurfaceRadiusScale": [
+     "subsurfaceFactor": 1.0,
+     "subsurfaceRadius": [
       1.0,
       0.8,
       0.6
      ],
-     "subsurfaceScatterAnisotropy": 0.0
+     "subsurfaceScale": 0.25,
+     "subsurfaceIor": 1.4,
+     "subsurfaceAnisotropy": 0.0,
+     "subsurfaceMethod": "RANDOM_WALK"
     }
    }
   },
@@ -400,19 +394,16 @@
    },
    "extensions": {
     "EXT_materials_subsurface": {
-     "subsurfaceWeight": 1.0,
-     "subsurfaceColor": [
-      0.98,
-      0.72,
-      0.38
-     ],
-     "subsurfaceRadius": 0.35,
-     "subsurfaceRadiusScale": [
+     "subsurfaceFactor": 1.0,
+     "subsurfaceRadius": [
       1.0,
       0.45,
       0.2
      ],
-     "subsurfaceScatterAnisotropy": 0.2
+     "subsurfaceScale": 0.35,
+     "subsurfaceIor": 1.4,
+     "subsurfaceAnisotropy": 0.2,
+     "subsurfaceMethod": "RANDOM_WALK"
     }
    }
   },

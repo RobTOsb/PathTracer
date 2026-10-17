@@ -28,7 +28,7 @@ struct MaterialGeometryFlags
 	{
 		const bool passThrough = (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0;
 		isOpaque = material.alphaMode == ALPHA_MODE_OPAQUE && !passThrough;
-		noDuplicateAnyHit = material.alphaMode == ALPHA_MODE_BLEND || passThrough;
+		noDuplicateAnyHit = passThrough;
 	}
 
 	bool isOpaque;

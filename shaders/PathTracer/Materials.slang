@@ -163,7 +163,8 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     {
         float weight = material.subsurfaceWeight;
         if (material.subsurfaceWeightTexture != INVALIDDESCRIPTORHANDLE)
-            weight *= SampleTextureGrad(material.subsurfaceWeightTexture, uv, ddx, ddy, anisotropic).a;
+            weight *= SampleTextureGrad(material.subsurfaceWeightTexture, uv, ddx, ddy, anisotropic)
+                          [material.subsurfaceWeightChannel];
         float3 colour = material.subsurfaceColour;
         if (material.subsurfaceColourTexture != INVALIDDESCRIPTORHANDLE)
             colour *= SampleTextureGrad(material.subsurfaceColourTexture, uv, ddx, ddy, anisotropic).rgb;
@@ -171,7 +172,15 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
         p.subsurfaceColour = colour;
         p.subsurfaceScatterAnisotropy = material.subsurfaceScatterAnisotropy;
         if (!thinWalled && g_Frame.subsurfaceComponents != 0)
-            p.subsurfaceRadius = material.subsurfaceRadius * g_Frame.subsurfaceRadiusScale;
+        {
+            float3 radius = material.subsurfaceRadius;
+            if (material.subsurfaceRadiusTexture != INVALIDDESCRIPTORHANDLE)
+                radius *= SampleTextureGrad(material.subsurfaceRadiusTexture, uv, ddx, ddy, anisotropic).rgb;
+            if (material.subsurfaceScaleTexture != INVALIDDESCRIPTORHANDLE)
+                radius *= SampleTextureGrad(material.subsurfaceScaleTexture, uv, ddx, ddy, anisotropic)
+                              [material.subsurfaceScaleChannel];
+            p.subsurfaceRadius = radius * g_Frame.subsurfaceRadiusScale;
+        }
     }
 
     ApplyMaterialOverrides(p);
@@ -214,8 +223,8 @@ float3 PassThroughTransmittance(GpuMaterial material, float2 uv, float3 baseColo
     return ThinDeltaTransmittance(p, faceCosine);
 }
 
-// What a candidate triangle lets a shadow ray along dir through: blended (1 - alpha) and pass-through
-// surfaces some, anything else nothing. False for a cut-out, which the ray ignores.
+// What a candidate triangle lets a shadow ray along dir through: pass-through surfaces some, anything
+// else nothing. False for a cut-out, which the ray ignores.
 bool ShadowCandidateTransmittance(PrimitiveDesc prim, uint primitiveIndex, float2 barycentrics, float3x3 linearToWorld,
                                   float3 dir, out float3 transmitted)
 {
@@ -225,15 +234,10 @@ bool ShadowCandidateTransmittance(PrimitiveDesc prim, uint primitiveIndex, float
     float2 uv = InterpolateTexCoord(tri, Barycentrics(barycentrics));
     float4 albedo = LoadBaseColourAlpha(material, uv);
 
-    // Of the light reaching the surface, the share that meets it rather than passing a cut-out or blend.
-    float coverage = 1.0;
     if (material.alphaMode == ALPHA_MODE_MASK && albedo.a < material.alphaCutoff)
         return false;
-    if (material.alphaMode == ALPHA_MODE_BLEND)
-        coverage = albedo.a;
 
-    transmitted = float3(1.0 - coverage, 1.0 - coverage, 1.0 - coverage);
     if ((material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
-        transmitted += coverage * PassThroughTransmittance(material, uv, albedo.rgb, FaceCosine(tri, linearToWorld, dir));
+        transmitted = PassThroughTransmittance(material, uv, albedo.rgb, FaceCosine(tri, linearToWorld, dir));
     return true;
 }

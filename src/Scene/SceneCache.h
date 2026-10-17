@@ -19,7 +19,10 @@
 // 7: primitives without TEXCOORD_0 or indices load instead of being skipped.
 // 8: KHR_materials_anisotropy in GpuMaterial (anisotropy, anisotropyTexture in place of the pads).
 // 9: EXT_materials_subsurface, GpuMaterial 144 bytes (subsurface radius and anisotropy).
-constexpr uint32_t kSceneCacheVersion = 9;
+// 10: EXT_materials_subsurface in the Blender exporter's schema, GpuMaterial 160 bytes (subsurface radius
+//     and scale textures, weight and scale texture channels).
+// 11: instance world matrices include their parent nodes' transforms.
+constexpr uint32_t kSceneCacheVersion = 11;
 
 struct SceneCacheTexture
 {

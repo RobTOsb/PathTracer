@@ -152,7 +152,7 @@ struct GpuMaterial
 	// a scattering medium under the surface whose multiple-scattering albedo is the colour.
 	float3 subsurfaceColour;
 	float subsurfaceWeight;
-	uint subsurfaceWeightTexture; // A multiplies subsurfaceWeight
+	uint subsurfaceWeightTexture; // channel subsurfaceWeightChannel multiplies subsurfaceWeight
 	uint subsurfaceColourTexture; // sRGB, RGB multiplies subsurfaceColour
 	// KHR_materials_anisotropy: half2 strength * (cos, sin) of the rotation from the tangent, 0 when
 	// isotropic. The texture's RG direction (* 2 - 1) is rotated by it, B multiplies the strength.
@@ -163,6 +163,13 @@ struct GpuMaterial
 	float3 subsurfaceRadius;
 	// Solid: the medium's Henyey-Greenstein g. Thin-walled: 1, everything transmitted.
 	float subsurfaceScatterAnisotropy;
+	// Solid subsurface only, linear: RGB multiplies subsurfaceRadius, and so does the scale texture's
+	// channel subsurfaceScaleChannel.
+	uint subsurfaceRadiusTexture;
+	uint subsurfaceScaleTexture;
+	// The channel, 0 to 3 for R to A, of the weight and scale textures that holds the scalar.
+	uint subsurfaceWeightChannel;
+	uint subsurfaceScaleChannel;
 };
 
 struct GpuVertex
@@ -210,7 +217,7 @@ struct TonemapConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(FrameConstants) == 448,"FrameConstants must match the HLSL cbuffer layout");
-static_assert(sizeof(GpuMaterial) == 144, "GpuMaterial must match the structured buffer stride");
+static_assert(sizeof(GpuMaterial) == 160, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
 static_assert(sizeof(GpuCameraState) == 104, "GpuCameraState must match the structured buffer stride");

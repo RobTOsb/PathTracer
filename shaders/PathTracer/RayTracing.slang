@@ -35,7 +35,7 @@ struct ShadowRayPayload
 struct HitPayload
 {
     float hitT;
-    uint materialId; // on the way in, the seed AnyHit draws its blend decisions from; bit 31 is the tangent sign
+    uint materialId; // bit 31 is the tangent sign
     uint emitter;
     uint Ng; // octahedral snorm16x2
     uint N;  // octahedral snorm16x2
@@ -68,7 +68,7 @@ void GenerateCameraRay(uint2 pixel, float2 u, out float3 origin, out float3 dir)
 
 // needCurvature: the hit feeds the DLSS-RR guides, the only users of its curvature. Returns the
 // payload still packed (see HitDistance and UnpackHit), the smaller form to keep across other rays.
-HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvature, inout uint rng)
+HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvature)
 {
     RayDesc ray;
     ray.Origin = origin;
@@ -78,9 +78,8 @@ HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvat
 
     HitPayload payload = (HitPayload)0;
     payload.hitT = -1.0;
-    payload.materialId = rng++;
     payload.curvature = needCurvature ? 1u : 0u;
-    // Masked and blended geometry runs AnyHit; everything else is flagged opaque in its BLAS.
+    // Masked and pass-through geometry runs AnyHit; everything else is flagged opaque in its BLAS.
 #ifdef SER
     // DXR 1.2 SER: traverse, regroup threads by hit/miss and material, then shade. The threads stay in
     // the new order for the shading in TracePath, which is where the material divergence is.

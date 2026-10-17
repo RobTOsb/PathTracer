@@ -72,7 +72,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
     {
         for (; bounce < maxSegments; ++bounce)
         {
-            HitPayload payload = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, fromCamera || chainActive, rng);
+            HitPayload payload = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, fromCamera || chainActive);
             // Unpacked after the in-scatter's shadow ray, so only the packed payload is held across it.
             HitInfo hit = HitDistance(payload);
 
@@ -590,21 +590,16 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
 #endif
 }
 
-// Alpha for camera and bounce rays: masked surfaces are cut at alphaCutoff, blended ones use
-// stochastic transparency, stopping the ray with probability alpha.
+// Alpha for camera and bounce rays: masked surfaces are cut at alphaCutoff.
 [shader("anyhit")]
 void AnyHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
     PrimitiveDesc prim = LoadPrimitive(InstanceID());
     GpuMaterial material = LoadGpuMaterial(prim.materialIndex);
-    if (material.alphaMode == ALPHA_MODE_OPAQUE)
+    if (material.alphaMode != ALPHA_MODE_MASK)
         return;
     float2 uv = InterpolateTexCoord(LoadTriangle(prim, PrimitiveIndex()), Barycentrics(attr.barycentrics));
-    float alpha = LoadBaseColourAlpha(material, uv).a;
-
-    bool cutOut = material.alphaMode == ALPHA_MODE_MASK ? alpha < material.alphaCutoff
-                                                        : SurfaceRandom(payload.materialId) >= alpha;
-    if (cutOut)
+    if (LoadBaseColourAlpha(material, uv).a < material.alphaCutoff)
         IgnoreHit();
 }
 
@@ -622,8 +617,8 @@ void ShadowClosestHit(inout ShadowRayPayload payload, in BuiltInTriangleIntersec
     payload.visibility = float3(0.0, 0.0, 0.0);
 }
 
-// Shadow rays stop at the first surface that blocks them, multiplying in what the blended (1 - alpha)
-// and pass-through surfaces before it let through.
+// Shadow rays stop at the first surface that blocks them, multiplying in what the pass-through
+// surfaces before it let through.
 [shader("anyhit")]
 void ShadowAnyHit(inout ShadowRayPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
