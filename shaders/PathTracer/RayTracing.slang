@@ -51,6 +51,36 @@ static const uint TANGENT_SIGN_BIT = 0x80000000u;
 // their hits are already about as coherent as reordering would make them.
 static const uint SER_START_BOUNCE = 1;
 
+#ifdef OPACITY_MICROMAPS
+// Ray queries that may meet opacity micromaps need RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS, which Slang's
+// RayQuery has no template parameter for. Calling this (anywhere in the program) puts a prelude in the
+// generated HLSL that turns every RayQuery<flags> into RayQuery<flags, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS>.
+// Shader model 6.9.
+void AllowOpacityMicromapsInRayQueries()
+{
+    __target_switch
+    {
+    case hlsl:
+        __requirePrelude(R"(
+template<uint RayFlags> using RayQueryAllowingOpacityMicromaps = RayQuery<RayFlags, RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS>;
+#define RayQuery RayQueryAllowingOpacityMicromaps
+)");
+        __intrinsic_asm "";
+    }
+}
+#endif
+
+// Flags for the rays from a path vertex at this bounce: past g_Frame.opacityMicromap2StateBounce they
+// read the micromaps in 2-state mode and skip the alpha test.
+uint OpacityMicromapRayFlags(uint bounce)
+{
+#ifdef OPACITY_MICROMAPS
+    return bounce >= g_Frame.opacityMicromap2StateBounce ? RAY_FLAG_FORCE_OMM_2_STATE : RAY_FLAG_NONE;
+#else
+    return RAY_FLAG_NONE;
+#endif
+}
+
 void GenerateCameraRay(uint2 pixel, float2 u, out float3 origin, out float3 dir)
 {
     uint2 dims = DispatchRaysDimensions().xy;
@@ -68,7 +98,7 @@ void GenerateCameraRay(uint2 pixel, float2 u, out float3 origin, out float3 dir)
 
 // needCurvature: the hit feeds the DLSS-RR guides, the only users of its curvature. Returns the
 // payload still packed (see HitDistance and UnpackHit), the smaller form to keep across other rays.
-HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvature)
+HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvature, uint rayFlags)
 {
     RayDesc ray;
     ray.Origin = origin;
@@ -84,7 +114,7 @@ HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvat
     // DXR 1.2 SER: traverse, regroup threads by hit/miss and material, then shade. The threads stay in
     // the new order for the shading in TracePath, which is where the material divergence is.
     HitObject hitObject =
-        HitObject::TraceRay(g_Scene, RAY_FLAG_NONE, 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
+        HitObject::TraceRay(g_Scene, rayFlags, 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
     if (reorder)
     {
         uint materialHint = hitObject.IsHit() ? LoadPrimitive(hitObject.GetInstanceID()).materialIndex : 0;
@@ -96,7 +126,7 @@ HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvat
     payload.curvature = needCurvature ? 1u : 0u;
     HitObject::Invoke(hitObject, payload);
 #else
-    TraceRay(g_Scene, RAY_FLAG_NONE, 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
+    TraceRay(g_Scene, rayFlags, 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
 #endif
     return payload;
 }

@@ -72,7 +72,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
     {
         for (; bounce < maxSegments; ++bounce)
         {
-            HitPayload payload = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, fromCamera || chainActive);
+            const uint rayFlags = OpacityMicromapRayFlags(bounce);
+            HitPayload payload = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, fromCamera || chainActive, rayFlags);
             // Unpacked after the in-scatter's shadow ray, so only the packed payload is held across it.
             HitInfo hit = HitDistance(payload);
 
@@ -90,7 +91,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 // whatever lies beyond. Rays that leave the scene cross atmosphereMissDistance of it.
                 float segmentLength = hit.hit ? hit.t : g_Frame.atmosphereMissDistance;
                 if (bounce < g_Frame.atmosphereInScatterSegments)
-                    radiance += throughput * AtmosphereInScattering(origin, dir, segmentLength, rng);
+                    radiance += throughput * AtmosphereInScattering(origin, dir, segmentLength, rayFlags, rng);
                 throughput *= AtmosphereTransmittance(segmentLength);
             }
     #endif
@@ -368,7 +369,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 {
                     SubsurfaceExit exit = (SubsurfaceExit)0;
                     if (dot(dir, hit.Ng) < 0.0)
-                        radiance += SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput, rng, exit);
+                        radiance += SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput, rayFlags, rng, exit);
                     continuePath = exit.valid;
                     origin = exit.origin;
                     dir = exit.dir;
@@ -380,7 +381,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             }
 
             if (traceShadowRay)
-                radiance += neeContribution * CastShadowRay(hit.position, hit.Ng, ls.direction, ls.distance);
+                radiance += neeContribution * CastShadowRay(hit.position, hit.Ng, ls.direction, ls.distance, rayFlags);
 
             if (!continuePath)
                 break;
@@ -454,6 +455,10 @@ void RayGen()
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 dims = DispatchRaysDimensions().xy;
     uint rng = RngInit(g_Frame.frameIndex);
+#ifdef OPACITY_MICROMAPS
+    // The shadow and subsurface ray queries meet the alpha-tested geometry's micromaps.
+    AllowOpacityMicromapsInRayQueries();
+#endif
 
 #ifdef DLSS_RR
     // Every pixel shares this frame's jitter, which DLSS is told about separately.

@@ -71,6 +71,14 @@ struct FrameConstants
 	float specularHitDistanceHoldRoughness;
 	uint glassReflectionSplits;
 	float subsurfaceRadiusScale; // multiplies every material's subsurface radius
+
+	// Opacity micromaps (OPACITY_MICROMAPS permutation only): path vertices from this bounce on (0 = the
+	// camera ray) trace with RAY_FLAG_FORCE_OMM_2_STATE, taking the micromaps' unknown micro-triangles as
+	// opaque or transparent instead of running the alpha test. UINT_MAX = never.
+	uint opacityMicromap2StateBounce;
+	uint pad0;
+	uint pad1;
+	uint pad2;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -339,7 +347,7 @@ struct TonemapConstants
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(FrameConstants) == 448,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 464,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuMaterial) == 96, "GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");

@@ -6,6 +6,7 @@
 #include "SceneCache.h"
 
 #include "fmtlog.h"
+#include "meshoptimizer.h"
 
 #include <algorithm>
 #include <array>
@@ -26,10 +27,26 @@ namespace
 	// Staging memory for one upload batch is held until EndUpload, so flush every so often to keep
 	// large texture sets from needing all of their staging buffers alive at once.
 	constexpr uint64_t kMaxPendingUploadBytes = 256ull * 1024 * 1024;
+	constexpr int kOpacityMicromapStates = 4;
+	constexpr int kOpacityMicromapMaxLevel = 6;
+	constexpr float kOpacityMicromapTargetEdge = 3.0f;
+	constexpr uint32_t kNoOpacityMicromaps = UINT32_MAX;
 
 	bool IsUsablePrimitive(const Scene::Primitive &primitive)
 	{
 		return primitive.IsValid() && primitive.HasIndices() && primitive.GetIndexCount() >= 3;
+	}
+
+	// The material as the shaders see it: blended surfaces are traced as masked at half their opacity.
+	MaterialData UnpackTracedMaterial(const GpuMaterial &packed)
+	{
+		MaterialData material = UnpackGpuMaterial(packed);
+		if (material.alphaMode == ALPHA_MODE_BLEND)
+		{
+			material.alphaMode = ALPHA_MODE_MASK;
+			material.alphaCutoff = 0.5f * material.baseColour.w;
+		}
+		return material;
 	}
 
 	// Transforms a point by the scene's row-major 3x4 layout (3x3 for row vectors, translation in
@@ -256,16 +273,27 @@ RenderGPUScene::RenderGPUScene(RenderContext *renderContext) : renderContext_(re
 
 RenderGPUScene::~RenderGPUScene()
 {
-	if (tlas_ != InvalidAccelerationStructureHandle)
+	for (AccelerationStructureHandle tlas: { tlas_, ommTlas_ })
 	{
-		renderContext_->DestroyAccelerationStructure(tlas_);
-	}
-	for (AccelerationStructureHandle blas: blases_)
-	{
-		if (blas != InvalidAccelerationStructureHandle)
+		if (tlas != InvalidAccelerationStructureHandle)
 		{
-			renderContext_->DestroyAccelerationStructure(blas);
+			renderContext_->DestroyAccelerationStructure(tlas);
 		}
+	}
+	for (const std::vector<AccelerationStructureHandle> *list: { &blases_, &ommBlases_ })
+	{
+		for (AccelerationStructureHandle blas: *list)
+		{
+			if (blas != InvalidAccelerationStructureHandle)
+			{
+				renderContext_->DestroyAccelerationStructure(blas);
+			}
+		}
+	}
+	// After the BLASes that link it.
+	if (ommArray_ != InvalidAccelerationStructureHandle)
+	{
+		renderContext_->DestroyAccelerationStructure(ommArray_);
 	}
 	for (ResourceHandle texture: textures_)
 	{
@@ -278,7 +306,8 @@ RenderGPUScene::~RenderGPUScene()
 			renderContext_->DestroyResource(buffer);
 		}
 	}
-	for (ResourceHandle buffer: { vertexBuffer_, primitiveBuffer_, materialBuffer_, instanceBuffer_, emitterBuffer_ })
+	for (ResourceHandle buffer:
+		 { vertexBuffer_, primitiveBuffer_, materialBuffer_, instanceBuffer_, emitterBuffer_, ommIndexBuffer_ })
 	{
 		if (buffer != InvalidResourceHandle)
 		{
@@ -476,6 +505,8 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene, const std::fil
 	UploadMaterials(materials, batch);
 	std::vector<uint32_t> emitters = CollectEmitters(scene, materials);
 	UploadEmitters(emitters, batch);
+	BakeOpacityMicromaps(scene, materials);
+	UploadOpacityMicromapIndices(batch);
 
 	renderContext_->EndUpload(batch);
 	uploadedTextures_.clear();
@@ -511,6 +542,7 @@ void RenderGPUScene::ReleaseStaging()
 	{
 		std::vector<uint32_t>().swap(*stream);
 	}
+	std::vector<int32_t>().swap(ommIndices_);
 }
 
 template<typename Archive>
@@ -531,6 +563,10 @@ void RenderGPUScene::SerialiseTables(Archive &archive,
 	archive.Table(emitters);
 	archive.Table(lights);
 	archive.Table(emissiveFluxScales_);
+	archive.Table(ommData_);
+	archive.Table(ommMicromaps_);
+	archive.Table(ommIndices_);
+	archive.Table(ommIndexOffsets_);
 	archive.Value(boundsMin_);
 	archive.Value(boundsMax_);
 }
@@ -608,6 +644,34 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 			return false;
 		}
 	}
+	if (ommIndexOffsets_.size() != primitiveDescs.size())
+	{
+		return false;
+	}
+	for (size_t i = 0; i < primitiveDescs.size(); ++i)
+	{
+		if (ommIndexOffsets_[i] != kNoOpacityMicromaps &&
+			static_cast<uint64_t>(ommIndexOffsets_[i]) + primitiveDescs[i].indexCount / 3 > ommIndices_.size())
+		{
+			return false;
+		}
+	}
+	for (const OpacityMicromap &micromap: ommMicromaps_)
+	{
+		if (micromap.subdivisionLevel > kOpacityMicromapMaxLevel || micromap.states != kOpacityMicromapStates ||
+			micromap.byteOffset + meshopt_opacityMapEntrySize(micromap.subdivisionLevel, micromap.states) >
+					ommData_.size())
+		{
+			return false;
+		}
+	}
+	for (int32_t index: ommIndices_)
+	{
+		if (index < OpacityMicromapFullyUnknownOpaque || index >= static_cast<int64_t>(ommMicromaps_.size()))
+		{
+			return false;
+		}
+	}
 	return !materials.empty() && emissiveLights_.size() == emissiveFluxScales_.size();
 }
 
@@ -631,6 +695,9 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 		instances.clear();
 		emissiveLights_.clear();
 		emissiveFluxScales_.clear();
+		ommData_.clear();
+		ommMicromaps_.clear();
+		ommIndexOffsets_.clear();
 		ReleaseStaging();
 		return false;
 	}
@@ -691,6 +758,7 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 	RemapTextures(materials, emissiveLights_, [&](uint32_t slot) { return descriptorOfSlot[slot]; });
 	UploadMaterials(materials, batch);
 	UploadEmitters(emitters, batch);
+	UploadOpacityMicromapIndices(batch);
 	lightTreeBuilt_ = false;
 
 	renderContext_->EndUpload(batch);
@@ -1123,11 +1191,9 @@ void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMater
 	materialGeometry_.reserve(materials.size());
 	for (GpuMaterial &packed: materials)
 	{
-		MaterialData material = UnpackGpuMaterial(packed);
-		if (material.alphaMode == ALPHA_MODE_BLEND)
+		const MaterialData material = UnpackTracedMaterial(packed);
+		if (UnpackGpuMaterial(packed).alphaMode == ALPHA_MODE_BLEND)
 		{
-			material.alphaMode = ALPHA_MODE_MASK;
-			material.alphaCutoff = 0.5f * material.baseColour.w;
 			packed = PackGpuMaterial(material);
 		}
 		materialGeometry_.push_back(MaterialGeometryFlags(material));
@@ -1280,6 +1346,222 @@ void RenderGPUScene::UploadEmitters(const std::vector<uint32_t> &emitters, Uploa
 								  batch);
 }
 
+void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const std::vector<GpuMaterial> &materials)
+{
+	const auto start = std::chrono::steady_clock::now();
+	ommData_.clear();
+	ommMicromaps_.clear();
+	ommIndices_.clear();
+	ommIndexOffsets_.assign(primitiveDescs.size(), kNoOpacityMicromaps);
+
+	// meshopt_opacityMapRasterize cuts at alpha 0.5 of the plane it reads.
+	struct AlphaPlane
+	{
+		const uint8_t *data;
+		size_t stride;
+		size_t pitch;
+		uint32_t width;
+		uint32_t height;
+	};
+	// The texture's own alpha where the material cuts at half of it, otherwise a copy remapped to put
+	// the cut there, kept per material.
+	std::map<uint32_t, std::vector<uint8_t>> remappedAlpha;
+	std::map<uint32_t, AlphaPlane> planes;
+
+	// Each micromap before compaction: its level and offset, and the triangle and plane it comes from.
+	struct Entry
+	{
+		float uv[3][2];
+		const AlphaPlane *plane;
+	};
+	std::vector<uint8_t> levels;
+	std::vector<uint32_t> offsets;
+	std::vector<Entry> entries;
+	size_t dataSize = 0;
+	uint32_t ommPrimitives = 0;
+	uint32_t uniformPrimitives = 0;
+
+	for (size_t p = 0; p < primitiveDescs.size(); ++p)
+	{
+		const PrimitiveGPUDesc &desc = primitiveDescs[p];
+		if (desc.indexCount == 0)
+		{
+			continue;
+		}
+		const MaterialData material = UnpackTracedMaterial(materials[desc.materialIndex]);
+		// Pass-through surfaces always need the shadow any-hit shader for what they let through.
+		if (material.alphaMode != ALPHA_MODE_MASK || (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
+		{
+			continue;
+		}
+
+		// The any-hit shader cuts where baseColour.w * texture alpha < alphaCutoff.
+		const Scene::Texture *texture = desc.materialIndex < scene.GetMaterialCount() &&
+												scene.GetMaterial(desc.materialIndex).GetAlbedoTexture().IsValid()
+										? &scene.GetMaterial(desc.materialIndex).GetAlbedoTexture()
+										: nullptr;
+		const float factor = material.baseColour.w;
+		const float cutoff = material.alphaCutoff;
+		const uint32_t triangleCount = desc.indexCount / 3;
+		ommIndexOffsets_[p] = static_cast<uint32_t>(ommIndices_.size());
+
+		const bool neverCut = cutoff <= 0.0f;
+		const bool alwaysCut = !neverCut && (texture == nullptr ? factor < cutoff : !(factor >= cutoff));
+		if (neverCut || alwaysCut || texture == nullptr)
+		{
+			// One alpha over the whole primitive.
+			const bool opaque = neverCut || (texture == nullptr && !alwaysCut);
+			ommIndices_.insert(ommIndices_.end(),
+							   triangleCount,
+							   opaque ? OpacityMicromapFullyOpaque : OpacityMicromapFullyTransparent);
+			++uniformPrimitives;
+			continue;
+		}
+
+		auto [plane, isNew] = planes.try_emplace(desc.materialIndex);
+		if (isNew)
+		{
+			const uint32_t width = static_cast<uint32_t>(texture->GetWidth());
+			const uint32_t height = static_cast<uint32_t>(texture->GetHeight());
+			const float threshold = cutoff / factor; // in texture alpha, in (0, 1]
+			if (std::fabs(threshold - 0.5f) < 0.5f / 255.0f)
+			{
+				plane->second = { texture->GetPixels() + 3, 4, static_cast<size_t>(width) * 4, width, height };
+			}
+			else
+			{
+				// Piecewise linear, threshold to 0.5, so the same texels pass.
+				std::array<uint8_t, 256> remap;
+				for (int v = 0; v < 256; ++v)
+				{
+					const float a = static_cast<float>(v) / 255.0f;
+					const float mapped = a < threshold ? 0.5f * a / threshold
+													   : (threshold < 1.0f ? 0.5f + 0.5f * (a - threshold) / (1.0f - threshold) : 1.0f);
+					remap[v] = static_cast<uint8_t>(std::clamp(mapped * 255.0f + 0.5f, 0.0f, 255.0f));
+				}
+				std::vector<uint8_t> &alpha = remappedAlpha[desc.materialIndex];
+				alpha.resize(static_cast<size_t>(width) * height);
+				const uint8_t *pixels = texture->GetPixels();
+				for (size_t i = 0; i < alpha.size(); ++i)
+				{
+					alpha[i] = remap[pixels[4 * i + 3]];
+				}
+				plane->second = { alpha.data(), 1, width, width, height };
+			}
+		}
+
+		// One micromap per distinct UV triangle, at a level for its texel area.
+		const GpuVertex *vertices = &vertices_[desc.vertexOffset];
+		const uint32_t *indices = &indices_[desc.indexOffset];
+		std::vector<uint8_t> primitiveLevels(triangleCount);
+		std::vector<uint32_t> sources(triangleCount);
+		std::vector<int> primitiveIndices(triangleCount);
+		const size_t count = meshopt_opacityMapMeasure(primitiveLevels.data(),
+													   sources.data(),
+													   primitiveIndices.data(),
+													   indices,
+													   desc.indexCount,
+													   &vertices[0].texCoord.x,
+													   desc.vertexCount,
+													   sizeof(GpuVertex),
+													   plane->second.width,
+													   plane->second.height,
+													   kOpacityMicromapMaxLevel,
+													   kOpacityMicromapTargetEdge);
+
+		const int32_t base = static_cast<int32_t>(levels.size());
+		for (size_t e = 0; e < count; ++e)
+		{
+			levels.push_back(primitiveLevels[e]);
+			offsets.push_back(static_cast<uint32_t>(dataSize));
+			dataSize += meshopt_opacityMapEntrySize(primitiveLevels[e], kOpacityMicromapStates);
+			Entry &entry = entries.emplace_back();
+			for (int c = 0; c < 3; ++c)
+			{
+				const float2 &uv = vertices[indices[3 * sources[e] + c]].texCoord;
+				entry.uv[c][0] = uv.x;
+				entry.uv[c][1] = uv.y;
+			}
+			entry.plane = &plane->second;
+		}
+		for (int index: primitiveIndices)
+		{
+			ommIndices_.push_back(base + index);
+		}
+		++ommPrimitives;
+	}
+
+	if (ommIndices_.empty())
+	{
+		return;
+	}
+
+	std::vector<uint8_t> data(dataSize);
+	std::vector<uint32_t> order(entries.size());
+	std::iota(order.begin(), order.end(), 0u);
+	std::for_each(std::execution::par,
+				  order.begin(),
+				  order.end(),
+				  [&](uint32_t e)
+				  {
+					  const Entry &entry = entries[e];
+					  meshopt_opacityMapRasterize(&data[offsets[e]],
+												  levels[e],
+												  kOpacityMicromapStates,
+												  entry.uv[0],
+												  entry.uv[1],
+												  entry.uv[2],
+												  entry.plane->data,
+												  entry.plane->stride,
+												  entry.plane->pitch,
+												  entry.plane->width,
+												  entry.plane->height);
+				  });
+
+	// Across the whole scene: one copy of each distinct micromap, and special indices for those in one state.
+	const size_t rasterised = levels.size();
+	static_assert(sizeof(int) == sizeof(int32_t));
+	const size_t count = meshopt_opacityMapCompact(data.data(),
+												   data.size(),
+												   levels.data(),
+												   offsets.data(),
+												   levels.size(),
+												   reinterpret_cast<int *>(ommIndices_.data()),
+												   ommIndices_.size(),
+												   kOpacityMicromapStates);
+	data.resize(count == 0 ? 0 : offsets[count - 1] + meshopt_opacityMapEntrySize(levels[count - 1], kOpacityMicromapStates));
+	ommData_ = std::move(data);
+	ommMicromaps_.resize(count);
+	for (size_t i = 0; i < count; ++i)
+	{
+		ommMicromaps_[i] = { offsets[i], levels[i], static_cast<uint16_t>(kOpacityMicromapStates) };
+	}
+
+	const size_t special = std::count_if(ommIndices_.begin(), ommIndices_.end(), [](int32_t i) { return i < 0; });
+	logi("GPUScene: opacity micromaps for {} alpha-tested primitive(s) ({} of one alpha): {} triangles, {:.0f}% "
+		 "in one state, {} micromaps ({} before compaction), {:.2f} MB, in {:.0f} ms",
+		 ommPrimitives + uniformPrimitives,
+		 uniformPrimitives,
+		 ommIndices_.size(),
+		 100.0 * static_cast<double>(special) / static_cast<double>(ommIndices_.size()),
+		 count,
+		 rasterised,
+		 ommData_.size() / (1024.0 * 1024.0),
+		 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+}
+
+void RenderGPUScene::UploadOpacityMicromapIndices(UploadBatchHandle batch)
+{
+	if (!ommIndices_.empty())
+	{
+		ommIndexBuffer_ = UploadStream(ommIndices_.data(),
+									   ommIndices_.size() * sizeof(int32_t),
+									   sizeof(int32_t),
+									   "Scene_OpacityMicromapIndices",
+									   batch);
+	}
+}
+
 void RenderGPUScene::BuildAccelerationStructures()
 {
 	// Textures come off the copy queue in COMMON; move them to SHADER_RESOURCE for sampling.
@@ -1293,7 +1575,17 @@ void RenderGPUScene::BuildAccelerationStructures()
 
 	const ResourceHandle indexBuffer = streamBuffers_[(uint32_t) GPUStream::Index];
 
+	// The micromaps are built first, as the BLASes that link them read them.
+	const bool micromaps = renderContext_->SupportsOpacityMicromaps() && ommIndexBuffer_ != InvalidResourceHandle;
+	if (micromaps && !ommMicromaps_.empty())
+	{
+		ommArray_ = renderContext_->CreateOpacityMicromapArray(ommData_, ommMicromaps_);
+	}
+	std::vector<uint8_t>().swap(ommData_);
+	std::vector<OpacityMicromap>().swap(ommMicromaps_);
+
 	blases_.assign(primitiveDescs.size(), InvalidAccelerationStructureHandle);
+	ommBlases_.assign(primitiveDescs.size(), InvalidAccelerationStructureHandle);
 	for (size_t i = 0; i < primitiveDescs.size(); ++i)
 	{
 		const PrimitiveGPUDesc &desc = primitiveDescs[i];
@@ -1316,20 +1608,33 @@ void RenderGPUScene::BuildAccelerationStructures()
 		geometry.noDuplicateAnyHit = flags.noDuplicateAnyHit;
 
 		blases_[i] = renderContext_->CreateBLAS(geometry);
+
+		if (micromaps && ommIndexOffsets_[i] != kNoOpacityMicromaps)
+		{
+			geometry.opacityMicromapArray = ommArray_;
+			geometry.opacityMicromapIndexBuffer = ommIndexBuffer_;
+			geometry.opacityMicromapIndexBufferOffset = static_cast<uint64_t>(ommIndexOffsets_[i]) * sizeof(int32_t);
+			ommBlases_[i] = renderContext_->CreateBLAS(geometry);
+		}
 	}
 
 	// Built and compacted in submissions of their own, which leaves them none of the build's memory.
 	std::vector<AccelerationStructureHandle> builtBlases;
-	std::copy_if(blases_.begin(),
-				 blases_.end(),
-				 std::back_inserter(builtBlases),
-				 [](AccelerationStructureHandle h) { return h != InvalidAccelerationStructureHandle; });
+	for (const std::vector<AccelerationStructureHandle> *list: { &blases_, &ommBlases_ })
+	{
+		std::copy_if(list->begin(),
+					 list->end(),
+					 std::back_inserter(builtBlases),
+					 [](AccelerationStructureHandle h) { return h != InvalidAccelerationStructureHandle; });
+	}
 	renderContext_->BuildCompactedBLASes(builtBlases);
 
 	// One TLAS instance per (node, primitive). InstanceID is the primitive's row in the
 	// PrimitiveGPUDesc table, which is all the hit shader needs to find its data. The order must
 	// match the emitter buffer, which is indexed by InstanceIndex().
 	std::vector<TLASInstance> tlasInstances;
+	std::vector<TLASInstance> ommTlasInstances;
+	bool anyMicromaps = false;
 	for (const TLASInstanceRef &ref: EnumerateTLASInstances())
 	{
 		// The scene stores row-vector matrices; DXR wants the 3x4 for column vectors.
@@ -1343,6 +1648,13 @@ void RenderGPUScene::BuildAccelerationStructures()
 		tlasInstance.instanceMask = 0xFF;
 		tlasInstance.hitGroupIndex = 0;
 		tlasInstances.push_back(tlasInstance);
+
+		if (ommBlases_[ref.primitive] != InvalidAccelerationStructureHandle)
+		{
+			tlasInstance.blas = ommBlases_[ref.primitive];
+			anyMicromaps = true;
+		}
+		ommTlasInstances.push_back(tlasInstance);
 	}
 
 	if (tlasInstances.empty())
@@ -1353,12 +1665,23 @@ void RenderGPUScene::BuildAccelerationStructures()
 
 	tlas_ = renderContext_->CreateTLAS(tlasInstances);
 	renderContext_->BuildAccelerationStructure(tlas_);
+	if (anyMicromaps)
+	{
+		ommTlas_ = renderContext_->CreateTLAS(ommTlasInstances);
+		renderContext_->BuildAccelerationStructure(ommTlas_);
+	}
 	renderContext_->UAVBarrierForAccelerationStructures();
 	tlasSRV_ = renderContext_->GetAccelerationStructureSRV(tlas_);
+	if (anyMicromaps)
+	{
+		ommTlasSRV_ = renderContext_->GetAccelerationStructureSRV(ommTlas_);
+	}
 
-	logi("GPUScene: built {} BLAS(es) and a TLAS with {} instance(s)",
-		 std::count_if(blases_.begin(),
-					   blases_.end(),
+	logi("GPUScene: built {} BLAS(es) ({} with opacity micromaps) and {} TLAS(es) with {} instance(s)",
+		 builtBlases.size(),
+		 std::count_if(ommBlases_.begin(),
+					   ommBlases_.end(),
 					   [](AccelerationStructureHandle h) { return h != InvalidAccelerationStructureHandle; }),
+		 anyMicromaps ? 2 : 1,
 		 tlasInstances.size());
 }

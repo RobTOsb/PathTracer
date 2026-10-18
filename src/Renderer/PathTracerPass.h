@@ -31,6 +31,8 @@ struct PathTracerGuides
 // randomly. With RenderSettings::shaderExecutionReordering on a device with DXR 1.2 it traces with
 // the SER pipeline instead. While the sky atmosphere is on, it traces with the ATMOSPHERE permutation,
 // which takes its sky and sunlight from the atmosphere's LUTs and scatters sunlight in the scene's air.
+// With RenderSettings::opacityMicromaps on a scene that has them, it traces the micromap TLAS with the
+// OPACITY_MICROMAPS permutation.
 // Leaves the output and the guides in the UnorderedAccess layout.
 class PathTracerPass final : public RenderPass
 {
@@ -77,11 +79,12 @@ private:
 	{
 		PipelineHandle pipeline = InvalidPipelineHandle;
 		ShaderTableHandle shaderTable = InvalidShaderTableHandle;
+		bool opacityMicromaps = false; // traces the scene's micromap TLAS
 	};
 
 	const Pipeline *SelectPipeline();
-	const Pipeline *GetPipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows);
-	Pipeline CreatePipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows) const;
+	const Pipeline *GetPipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps);
+	Pipeline CreatePipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps) const;
 	ResourceHandle CreateTarget(Format format, const char *debugName) const;
 
 	RenderContext *renderContext_ = nullptr;
@@ -91,9 +94,10 @@ private:
 	const SkyAtmospherePass &atmosphere_;
 	const bool rayReconstruction_;
 
-	Pipeline pipelines_[2][2][2]; // indexed by shaderExecutionReordering, atmosphere, then inline shadows
+	Pipeline pipelines_[2][2][2][2]; // indexed by shaderExecutionReordering, atmosphere, inline shadows, then opacity micromaps
 	bool serSupported_ = false;
 	bool serFailed_ = false; // the SER pipeline did not compile, so stay on the plain one
+	bool ommFailed_ = false; // the opacity micromap pipeline did not compile, so trace without them
 	ResourceHandle output_ = InvalidResourceHandle;
 	PathTracerGuides guides_;
 	ResourceHandle cameraState_ = InvalidResourceHandle; // GpuCameraState per pixel, DLSS-RR only

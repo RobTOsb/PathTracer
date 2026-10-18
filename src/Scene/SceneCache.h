@@ -23,7 +23,8 @@
 //     and scale textures, weight and scale texture channels).
 // 11: instance world matrices include their parent nodes' transforms.
 // 12: GpuMaterial packed to 96 bytes (half factors).
-constexpr uint32_t kSceneCacheVersion = 12;
+// 13: opacity micromaps of the alpha-tested primitives (kOpacityMicromap* in RenderGPUScene.cpp).
+constexpr uint32_t kSceneCacheVersion = 13;
 
 struct SceneCacheTexture
 {

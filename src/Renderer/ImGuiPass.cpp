@@ -372,6 +372,27 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SetItemTooltip("Shadow rays as inline ray queries, keeping the path's state in registers instead of "
 							  "saving it around a TraceRay");
 
+		const bool micromaps = scene_.HasOpacityMicromaps();
+		ImGui::BeginDisabled(!micromaps);
+		ImGui::Checkbox("Opacity micromaps", &settings_.opacityMicromaps);
+		ImGui::SetItemTooltip("DXR 1.2 opacity micromaps on the alpha-tested geometry: the alpha test only runs "
+							  "where an alpha edge crosses a micro-triangle");
+		ImGui::BeginDisabled(!settings_.opacityMicromaps);
+		ImGui::SliderInt("OMM 2-state from bounce",
+						 &settings_.opacityMicromap2StateBounce,
+						 -1,
+						 8,
+						 settings_.opacityMicromap2StateBounce < 0 ? "never" : "%d");
+		ImGui::SetItemTooltip("Rays from path vertices at this bounce on (0 = camera rays) read the micromaps in "
+							  "2-state mode and skip the alpha test entirely");
+		ImGui::EndDisabled();
+		ImGui::EndDisabled();
+		if (!micromaps)
+		{
+			ImGui::TextDisabled(renderContext->SupportsOpacityMicromaps() ? "The scene has no alpha-tested geometry"
+																		  : "Needs shader model 6.9 and raytracing tier 1.2");
+		}
+
 		ImGui::Checkbox("Specular", &settings_.specularMaterials);
 		ImGui::SetItemTooltip("Off: no specular reflection, metals turn diffuse and glass only refracts");
 		ImGui::SameLine();

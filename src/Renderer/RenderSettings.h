@@ -85,6 +85,8 @@ struct RenderSettings
 	bool shaderExecutionReordering = true;
 	// Shadow rays as inline ray queries (INLINE_SHADOWS) instead of TraceRay with the shadow hit group.
 	bool inlineShadowRays = true;
+	bool opacityMicromaps = true;
+	int opacityMicromap2StateBounce = 1;
 	bool specularMaterials = true;
 	bool transmissiveMaterials = true;
 	int glassReflectionSplits = 2;

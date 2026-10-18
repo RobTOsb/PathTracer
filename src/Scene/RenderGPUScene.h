@@ -64,9 +64,15 @@ public:
 		return tlas_ != InvalidAccelerationStructureHandle;
 	}
 
-	ResourceHandle GetTLASSRV() const
+	ResourceHandle GetTLASSRV(bool opacityMicromaps = false) const
 	{
-		return tlasSRV_;
+		return opacityMicromaps && HasOpacityMicromaps() ? ommTlasSRV_ : tlasSRV_;
+	}
+
+	// Some primitive has opacity micromaps and the device can trace them.
+	bool HasOpacityMicromaps() const
+	{
+		return ommTlas_ != InvalidAccelerationStructureHandle;
 	}
 
 	// Bindless indices of the material table (GpuMaterial) and primitive table (PrimitiveGPUDesc).
@@ -193,6 +199,9 @@ private:
 	// Fills the emissive lights and returns the emitter buffer's contents.
 	std::vector<uint32_t> CollectEmitters(const Scene::GLTFScene &scene, const std::vector<GpuMaterial> &materials);
 	void UploadEmitters(const std::vector<uint32_t> &emitters, UploadBatchHandle batch);
+	// Fills the opacity micromap tables from the base colour alpha of the alpha-tested primitives.
+	void BakeOpacityMicromaps(const Scene::GLTFScene &scene, const std::vector<GpuMaterial> &materials);
+	void UploadOpacityMicromapIndices(UploadBatchHandle batch);
 	uint32_t UploadTexture(const Scene::Texture &texture,
 						   Format format,
 						   const char *debugName,
@@ -287,6 +296,22 @@ private:
 	std::vector<AccelerationStructureHandle> blases_; // one per primitive desc, invalid for skipped primitives
 	AccelerationStructureHandle tlas_ = InvalidAccelerationStructureHandle;
 	ResourceHandle tlasSRV_ = InvalidResourceHandle;
+
+	// DXR 1.2 opacity micromaps of the alpha-tested primitives (BakeOpacityMicromaps). The micromaps and
+	// their states only stay on the CPU until BuildAccelerationStructures has built the array.
+	std::vector<uint8_t> ommData_;
+	std::vector<OpacityMicromap> ommMicromaps_;
+	// Per triangle of the primitives with micromaps, an index into ommMicromaps_ or an
+	// OpacityMicromapSpecialIndex; released once uploaded.
+	std::vector<int32_t> ommIndices_;
+	std::vector<uint32_t> ommIndexOffsets_; // per primitive desc, its first triangle in ommIndices_, or UINT32_MAX
+	ResourceHandle ommIndexBuffer_ = InvalidResourceHandle;
+	AccelerationStructureHandle ommArray_ = InvalidAccelerationStructureHandle;
+	// The alpha-tested primitives' BLASes again, with the micromaps linked, and a TLAS that uses them
+	// in place of the plain ones, so the micromaps can be switched on and off at run time.
+	std::vector<AccelerationStructureHandle> ommBlases_;
+	AccelerationStructureHandle ommTlas_ = InvalidAccelerationStructureHandle;
+	ResourceHandle ommTlasSRV_ = InvalidResourceHandle;
 
 	float3 boundsMin_ = { 0.0f, 0.0f, 0.0f };
 	float3 boundsMax_ = { 0.0f, 0.0f, 0.0f };

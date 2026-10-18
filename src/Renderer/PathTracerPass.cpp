@@ -98,10 +98,21 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 	const bool atmosphere = atmosphere_.IsEnabled();
 	const bool inlineShadows = settings_.inlineShadowRays;
 
-	// A failed SER compile is logged once and the plain pipeline takes over.
+	// A failed opacity micromap or SER compile is logged once, and the pipeline without them takes over.
+	if (settings_.opacityMicromaps && scene_.HasOpacityMicromaps() && !ommFailed_)
+	{
+		const bool ser = settings_.shaderExecutionReordering && serSupported_ && !serFailed_;
+		if (const Pipeline *pipeline = GetPipeline(ser, atmosphere, inlineShadows, true))
+		{
+			return pipeline;
+		}
+		loge("Failed to create the opacity micromap pipeline, tracing without them");
+		ommFailed_ = true;
+	}
+
 	if (settings_.shaderExecutionReordering && serSupported_ && !serFailed_)
 	{
-		if (const Pipeline *pipeline = GetPipeline(true, atmosphere, inlineShadows))
+		if (const Pipeline *pipeline = GetPipeline(true, atmosphere, inlineShadows, false))
 		{
 			return pipeline;
 		}
@@ -109,7 +120,7 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 		serFailed_ = true;
 	}
 
-	const Pipeline *pipeline = GetPipeline(false, atmosphere, inlineShadows);
+	const Pipeline *pipeline = GetPipeline(false, atmosphere, inlineShadows, false);
 	if (pipeline == nullptr)
 	{
 		throw std::runtime_error("Failed to create the path tracing pipeline (see the shader log above).");
@@ -118,18 +129,19 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 }
 
 const PathTracerPass::Pipeline *PathTracerPass::GetPipeline(bool shaderExecutionReordering, bool atmosphere,
-															bool inlineShadows)
+															bool inlineShadows, bool opacityMicromaps)
 {
-	Pipeline &pipeline = pipelines_[shaderExecutionReordering ? 1 : 0][atmosphere ? 1 : 0][inlineShadows ? 1 : 0];
+	Pipeline &pipeline = pipelines_[shaderExecutionReordering ? 1 : 0][atmosphere ? 1 : 0][inlineShadows ? 1 : 0]
+								   [opacityMicromaps ? 1 : 0];
 	if (pipeline.pipeline == InvalidPipelineHandle)
 	{
-		pipeline = CreatePipeline(shaderExecutionReordering, atmosphere, inlineShadows);
+		pipeline = CreatePipeline(shaderExecutionReordering, atmosphere, inlineShadows, opacityMicromaps);
 	}
 	return pipeline.pipeline != InvalidPipelineHandle ? &pipeline : nullptr;
 }
 
 PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReordering, bool atmosphere,
-														 bool inlineShadows) const
+														 bool inlineShadows, bool opacityMicromaps) const
 {
 	RaytracingPipelineDesc desc = {};
 	desc.exports = { "RayGen", "Miss", "ClosestHit", "AnyHit" };
@@ -161,8 +173,16 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 		desc.defines.push_back("SER");
 		desc.profile = "lib_6_9";
 	}
+	if (opacityMicromaps)
+	{
+		// So are the ray query flags that let the inline rays meet micromaps.
+		desc.defines.push_back("OPACITY_MICROMAPS");
+		desc.profile = "lib_6_9";
+		desc.allowOpacityMicromaps = true;
+	}
 
 	Pipeline result;
+	result.opacityMicromaps = opacityMicromaps;
 	result.pipeline = renderContext_->CreateRaytracingPipeline(PATHTRACER_SHADER_DIR "PathTracer.slang", desc);
 	if (result.pipeline == InvalidPipelineHandle)
 	{
@@ -266,6 +286,9 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 									 (settings_.subsurfaceSingleScattering ? SUBSURFACE_SINGLE_SCATTERING : 0u) |
 									 (settings_.subsurfaceMultipleScattering ? SUBSURFACE_MULTIPLE_SCATTERING : 0u);
 	constants.subsurfaceRadiusScale = std::max(settings_.subsurfaceRadiusScale, 0.0f);
+	constants.opacityMicromap2StateBounce = settings_.opacityMicromap2StateBounce >= 0
+													? static_cast<uint>(settings_.opacityMicromap2StateBounce)
+													: UINT32_MAX;
 
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
 
@@ -323,7 +346,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 
 	renderContext->SetRaytracingPipeline(pipeline->pipeline);
 	renderContext->SetRaytracingConstantBuffer(0, constantBuffer);
-	renderContext->SetRaytracingSRV(0, scene_.GetTLASSRV());
+	renderContext->SetRaytracingSRV(0, scene_.GetTLASSRV(pipeline->opacityMicromaps));
 	// Scene buffers are root SRVs, registers must match PathTracer/Resources.slang.
 	renderContext->SetRaytracingSRV(1, scene_.GetPrimitiveBuffer());
 	renderContext->SetRaytracingSRV(2, scene_.GetStreamBuffer(GPUStream::Index));
