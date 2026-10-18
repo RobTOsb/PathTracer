@@ -41,9 +41,12 @@
 //   samples like the reflection. At zero roughness it is a delta lobe straight through
 //   (LOBE_DELTA_TRANSMISSION), which Eval and Pdf leave out; the sample's pdf is then the discrete
 //   probability of picking it, and its weight ThinDeltaTransmittance / pdf.
+//   Fuzz samples its LTC exactly (SampleFuzz), see the Fuzz section.
 //
 // Simplifications
-//   No coat, fuzz or thin film, ambient IOR is 1.
+//   No coat or thin film, ambient IOR is 1.
+//   Fuzz sits directly on the base substrate and, like the spec, scales everything under it by
+//   1 - fuzzWeight * E_F(wo) only, not by the albedo towards wi as well.
 //   Thin-walled specular transmission is the single-interface lobe above (as in glTF), not a slab with
 //   two interfaces.
 //   Subsurface without a radius is approximated by a Lambertian lobe under the dielectric interface. On a thin wall it
@@ -63,6 +66,7 @@ static const uint LOBE_SPECULAR_TRANSMISSION = 4;
 static const uint LOBE_DELTA_TRANSMISSION = 8;
 static const uint LOBE_DIFFUSE_TRANSMISSION = 16;
 static const uint LOBE_SUBSURFACE = 32;
+static const uint LOBE_FUZZ = 64;
 
 struct OpenPBRBaseParams
 {
@@ -89,6 +93,10 @@ struct OpenPBRBaseParams
     // the subsurface a scattering medium (LOBE_SUBSURFACE). Zero keeps the Lambertian approximation.
     float3 subsurfaceRadius;
 
+    float fuzzWeight;
+    float3 fuzzColour;
+    float fuzzRoughness;
+
     bool geometryThinWalled;
     float3 geometryTangent;
     float3 geometryBitangent;
@@ -114,8 +122,13 @@ struct OpenPBRContext
     float probSpecR;
     float probSpecT;
     float probDiffuse;
+    float probFuzz;
 
-    float lambdaO;      // GGXLambda(wo, alpha)
+    float fuzzE;    // white fuzz's directional albedo E_F(wo), 0 without fuzz or inside
+    float fuzzAInv; // the fuzz LTC's inverse matrix at wo, see FuzzD
+    float fuzzBInv;
+
+    float lambdaO;     // GGXLambda(wo, alpha)
     float boundedB;     // lower bound of the bounded cap, b in Eto and Tokuyoshi 2023, Listing 1
     float reflPdfScale; // bounded VNDF reflection PDF divided by D(h), Listing 2
     float vndfPdfScale; // spherical cap VNDF PDF divided by D(m) * dot(wo, m), equation 7
@@ -318,6 +331,69 @@ float3 EvalEON(float3 rho, float r, float3 wi, float3 wo)
     return fSS + fMS;
 }
 
+// Fuzz: Zeltner, Burley and Chiang 2022, "Practical Multiple-Scattering Sheen Using Linearly Transformed
+// Cosines", with the fits MaterialX uses (mx_microfacet_sheen.glsl, from tizian/ltc-sheen). Its f * cos
+// is fuzzColour * E_F(wo) * D(wi), where D is a clamped cosine under the linear transform
+// M = [1/aInv 0 -bInv/aInv; 0 1/aInv 0; 0 0 1] in the frame whose +X is wo's azimuth. M keeps z, so
+// D stays in the upper hemisphere, and D is both the lobe's shape and the pdf of sampling it.
+
+// The fits' range.
+float FuzzRoughness(OpenPBRBaseParams p)
+{
+    return clamp(p.fuzzRoughness, 0.01, 1.0);
+}
+
+// Gaussian fit to the directional albedo of white fuzz, mu = cos(theta_o), r = roughness.
+float FuzzAlbedo(float mu, float r)
+{
+    float s = r * (0.0206607 + 1.58491 * r) / (0.0379424 + r * (1.32227 + r));
+    float m = r * (-0.193854 + r * (-1.14885 + r * (1.7932 - 0.95943 * r * r))) / (0.046391 + r);
+    float o = r * (0.000654023 + (-0.0207818 + 0.119681 * r) * r) / (1.26264 + r * (-1.92021 + r));
+    float t = (mu - m) / s;
+    return saturate(exp(-0.5 * t * t) / (s * sqrt(2.0 * PI)) + o);
+}
+
+// Rational fits to the inverse LTC matrix's coefficients.
+float FuzzAInv(float mu, float r)
+{
+    return (2.58126 * mu + 0.813703 * r) * r / (1.0 + 0.310327 * mu * mu + 2.60994 * mu * r);
+}
+
+float FuzzBInv(float mu, float r)
+{
+    return sqrt(1.0 - mu) * (r - 1.0) * r * r * r / (0.0000254053 + 1.71228 * mu - 1.71506 * mu * r + 1.34174 * r * r);
+}
+
+// What the fuzz lets through to the layers under it, for light leaving at cos(theta) mu.
+float FuzzThroughput(OpenPBRBaseParams p, float mu)
+{
+    return p.fuzzWeight > 0.0 ? 1.0 - p.fuzzWeight * FuzzAlbedo(saturate(mu), FuzzRoughness(p)) : 1.0;
+}
+
+// Unit +X of the LTC frame: wo's azimuth, any when wo is the normal.
+float2 FuzzAzimuth(float3 wo)
+{
+    float lengthSq = dot(wo.xy, wo.xy);
+    return lengthSq > 1.0e-14 ? wo.xy * rsqrt(lengthSq) : float2(1.0, 0.0);
+}
+
+// D(wi) = Do(M^-1 wi / |M^-1 wi|) |M^-1| / |M^-1 wi|^3 with Do the clamped cosine and |M^-1| = aInv^2.
+float FuzzD(float3 wo, float3 wi, float aInv, float bInv)
+{
+    float2 X = FuzzAzimuth(wo);
+    float3 w = float3(dot(wi.xy, X), wi.y * X.x - wi.x * X.y, wi.z);
+    float3 o = float3(aInv * w.x + bInv * w.z, aInv * w.y, w.z);
+    float k = aInv / dot(o, o);
+    return max(o.z, 0.0) / PI * k * k;
+}
+
+float3 SampleFuzz(float3 wo, float aInv, float bInv, float3 o)
+{
+    float3 w = normalize(float3((o.x - bInv * o.z) / aInv, o.y / aInv, o.z));
+    float2 X = FuzzAzimuth(wo);
+    return float3(w.x * X.x - w.y * X.y, w.x * X.y + w.y * X.x, w.z);
+}
+
 // Sampling routines
 
 float BoundedCapK(float3 v, float2 alpha)
@@ -413,7 +489,7 @@ float3 ThinDeltaTransmittance(OpenPBRBaseParams p, float cosTheta)
 {
     float eta = ModulatedIORRatio(p.specularIor, p.specularWeight);
     float F = FresnelDielectric(saturate(cosTheta), eta);
-    return (1.0 - p.baseMetalness) * p.transmissionWeight * (1.0 - F) * TransmissionTint(p);
+    return FuzzThroughput(p, cosTheta) * (1.0 - p.baseMetalness) * p.transmissionWeight * (1.0 - F) * TransmissionTint(p);
 }
 
 OpenPBRContext OpenPBRSetup(OpenPBRBaseParams p, float3 woWorld)
@@ -435,6 +511,10 @@ OpenPBRContext OpenPBRSetup(OpenPBRBaseParams p, float3 woWorld)
     c.reflPdfScale = 1.0 / (2.0 * (k * c.wo.z + t));
     c.vndfPdfScale = 2.0 / (c.wo.z + t);
 
+    c.fuzzE = 0.0;
+    c.fuzzAInv = 1.0;
+    c.fuzzBInv = 0.0;
+    c.probFuzz = 0.0;
     if (c.inside)
     {
         c.E = 0.0;
@@ -442,6 +522,15 @@ OpenPBRContext OpenPBRSetup(OpenPBRBaseParams p, float3 woWorld)
         c.probSpecT = 1.0 - c.probSpecR;
         c.probDiffuse = 0.0;
         return c;
+    }
+
+    if (p.fuzzWeight > 0.0)
+    {
+        float r = FuzzRoughness(p);
+        float mu = saturate(c.wo.z);
+        c.fuzzE = FuzzAlbedo(mu, r);
+        c.fuzzAInv = FuzzAInv(mu, r);
+        c.fuzzBInv = FuzzBInv(mu, r);
     }
 
     float F0 = (1.0 - etaS) / (1.0 + etaS);
@@ -459,11 +548,17 @@ OpenPBRContext OpenPBRSetup(OpenPBRBaseParams p, float3 woWorld)
     float wSpecT = (1.0 - M) * T * (1.0 - c.E) * Luminance(TransmissionTint(p));
     float wDiffuse = (1.0 - M) * (1.0 - T) * (1.0 - c.E) * Luminance(diffuseAlbedo);
 
-    float total = wSpecR + wSpecT + wDiffuse;
+    // The fuzz on top, with what it lets through to the rest.
+    float wFuzz = p.fuzzWeight * c.fuzzE * Luminance(p.fuzzColour);
+    float fuzzThroughput = 1.0 - p.fuzzWeight * c.fuzzE;
+
+    float total = fuzzThroughput * (wSpecR + wSpecT + wDiffuse) + wFuzz;
     float invTotal = total > 0.0 ? 1.0 / total : 0.0;
-    c.probSpecR = wSpecR * invTotal;
-    c.probSpecT = wSpecT * invTotal;
-    c.probDiffuse = wDiffuse * invTotal;
+    float baseScale = fuzzThroughput * invTotal;
+    c.probSpecR = wSpecR * baseScale;
+    c.probSpecT = wSpecT * baseScale;
+    c.probDiffuse = wDiffuse * baseScale;
+    c.probFuzz = wFuzz * invTotal;
     return c;
 }
 
@@ -479,6 +574,8 @@ float3 OpenPBREvalPdfLocal(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out
     float M = p.baseMetalness;
     float T = p.transmissionWeight;
     float S = p.subsurfaceWeight;
+    // 1 inside, where there is no fuzz.
+    float fuzzThroughput = 1.0 - p.fuzzWeight * c.fuzzE;
 
     if (wi.z < 0.0)
     {
@@ -492,14 +589,14 @@ float3 OpenPBREvalPdfLocal(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out
             pdf = c.probDiffuse * DiffuseTransmittedShare(p) * cosI / PI;
         }
         if (c.deltaTransmission)
-            return fDiffuseT;
+            return fuzzThroughput * fDiffuseT;
         float transmissionPdf;
         float fT = (p.geometryThinWalled ? EvalPdfGGXThinTransmission(wi, c, transmissionPdf)
                                         : EvalPdfGGXTransmission(wi, c, transmissionPdf)) * abs(wi.z);
         pdf += c.probSpecT * transmissionPdf;
         if (c.inside)
             return fT.xxx;
-        return (1.0 - M) * T * TransmissionTint(p) * fT + fDiffuseT;
+        return fuzzThroughput * ((1.0 - M) * T * TransmissionTint(p) * fT + fDiffuseT);
     }
 
     float3 h = normalize(wi + wo);
@@ -527,7 +624,16 @@ float3 OpenPBREvalPdfLocal(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out
     // Spec mix tree. The translucent slab only contributes fSpecR in the upper hemisphere.
     float3 fOpaqueBase = fSpecR + lerp(fDiffuse, fSubsurface, S);
     float3 fDielectricBase = lerp(fOpaqueBase, fSpecR, T);
-    return lerp(fDielectricBase, fMetal, M) * wi.z;
+    float3 fCos = fuzzThroughput * lerp(fDielectricBase, fMetal, M) * wi.z;
+
+    // The fuzz lobe already includes the cosine.
+    if (c.probFuzz > 0.0)
+    {
+        float fuzzD = FuzzD(wo, wi, c.fuzzAInv, c.fuzzBInv);
+        pdf += c.probFuzz * fuzzD;
+        fCos += (p.fuzzWeight * c.fuzzE * fuzzD) * p.fuzzColour;
+    }
+    return fCos;
 }
 
 BSDFSample OpenPBRSample(OpenPBRBaseParams p, OpenPBRContext c, float3 u)
@@ -578,6 +684,12 @@ BSDFSample OpenPBRSample(OpenPBRBaseParams p, OpenPBRContext c, float3 u)
         wi = normalize(wi);
         lobe = LOBE_SPECULAR_TRANSMISSION;
     }
+    else if (u.x >= 1.0 - c.probFuzz)
+    {
+        // The last share, so the splits in PathTracer that aim u.x at the specular lobes never land here.
+        wi = SampleFuzz(wo, c.fuzzAInv, c.fuzzBInv, SampleCosineHemisphere(u.yz));
+        lobe = LOBE_FUZZ;
+    }
     else if (c.probDiffuse > 0.0)
     {
         wi = SampleCosineHemisphere(u.yz);
@@ -596,7 +708,7 @@ BSDFSample OpenPBRSample(OpenPBRBaseParams p, OpenPBRContext c, float3 u)
             float S = (1.0 - p.baseMetalness) * (1.0 - p.transmissionWeight) * p.subsurfaceWeight;
             s.wi = ToWorld(p, float3(wi.xy, -wi.z));
             s.pdf = probability * wi.z / PI;
-            s.weight = (S * (1.0 - c.E) / probability).xxx;
+            s.weight = ((1.0 - p.fuzzWeight * c.fuzzE) * S * (1.0 - c.E) / probability).xxx;
             s.lobe = LOBE_SUBSURFACE;
             return s;
         }

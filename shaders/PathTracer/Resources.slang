@@ -97,6 +97,8 @@ MaterialData LoadGpuMaterial(uint index)
     float2 subsurfaceColour1 = UnpackMaterialHalves(p.subsurfaceColourWeight.y);
     float2 subsurfaceRadius0 = UnpackMaterialHalves(p.subsurfaceRadiusAnisotropy.x);
     float2 subsurfaceRadius1 = UnpackMaterialHalves(p.subsurfaceRadiusAnisotropy.y);
+    float2 sheenColourRoughness0 = UnpackMaterialHalves(p.sheenColourRoughness.x);
+    float2 sheenColourRoughness1 = UnpackMaterialHalves(p.sheenColourRoughness.y);
 
     MaterialData m;
     m.baseColour = float4(baseColour0, baseColour1);
@@ -128,6 +130,10 @@ MaterialData LoadGpuMaterial(uint index)
     m.subsurfaceScaleTexture = p.subsurfaceScaleTexture;
     m.subsurfaceWeightChannel = (flags >> GPU_MATERIAL_WEIGHT_CHANNEL_SHIFT) & 3;
     m.subsurfaceScaleChannel = (flags >> GPU_MATERIAL_SCALE_CHANNEL_SHIFT) & 3;
+    m.sheenColour = float3(sheenColourRoughness0, sheenColourRoughness1.x);
+    m.sheenRoughness = sheenColourRoughness1.y;
+    m.sheenColourTexture = p.sheenColourTexture;
+    m.sheenRoughnessTexture = p.sheenRoughnessTexture;
     return m;
 }
 

@@ -21,7 +21,11 @@ float2 SpecularFractions(OpenPBRBaseParams p)
     float specular = (1.0 - M) * F0 * Luminance(p.specularColour) + M * p.specularWeight * Luminance(baseColour);
     float diffuse = (1.0 - M) * (1.0 - F0) * (1.0 - T) * Luminance(lerp(baseColour, p.subsurfaceColour, p.subsurfaceWeight));
     float transmission = (1.0 - M) * (1.0 - F0) * T * Luminance(TransmissionTint(p));
-    return float2(specular, transmission) / max(specular + transmission + diffuse, 1.0e-4);
+    // Head-on fuzz over all of it.
+    float fuzzAlbedo = p.fuzzWeight > 0.0 ? p.fuzzWeight * FuzzAlbedo(1.0, FuzzRoughness(p)) : 0.0;
+    float fuzz = fuzzAlbedo * Luminance(p.fuzzColour);
+    float under = 1.0 - fuzzAlbedo;
+    return under * float2(specular, transmission) / max(under * (specular + transmission + diffuse) + fuzz, 1.0e-4);
 }
 
 bool IsPsrEvent(OpenPBRBaseParams p, OpenPBRContext ctx, uint lobe, out float fraction)
@@ -51,7 +55,8 @@ float3 PsrEventThroughput(OpenPBRBaseParams p, OpenPBRContext ctx, float3 wo, bo
         ReflectanceGuides(p, wo, reflectance);
         return reflectance.specularAlbedo;
     }
-    return (1.0 - p.baseMetalness) * p.transmissionWeight * (1.0 - ctx.E) * TransmissionTint(p);
+    return (1.0 - p.fuzzWeight * ctx.fuzzE) * (1.0 - p.baseMetalness) * p.transmissionWeight * (1.0 - ctx.E) *
+           TransmissionTint(p);
 }
 
 // A chain of mirrors and glass in front of the camera, primary first, while the path follows it.

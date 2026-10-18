@@ -156,9 +156,9 @@ struct MaterialData
 	// the medium. FLT_MAX or more: no absorption (always, while KHR_materials_volume is not loaded).
 	float3 attenuationColour;
 	float attenuationDistance;
-	// OpenPBR subsurface. Thin-walled: KHR_materials_diffuse_transmission, the share of the diffuse base
-	// transmitted to the other side rather than reflected, and its colour. Solid: EXT_materials_subsurface,
-	// a scattering medium under the surface whose multiple-scattering albedo is the colour.
+	// OpenPBR subsurface from EXT_materials_subsurface, coloured by the base colour. Thin-walled: split
+	// between reflection and diffuse transmission to the other side by subsurfaceScatterAnisotropy.
+	// Solid: a scattering medium under the surface whose multiple-scattering albedo is the colour.
 	float3 subsurfaceColour;
 	float subsurfaceWeight;
 	uint subsurfaceWeightTexture; // channel subsurfaceWeightChannel multiplies subsurfaceWeight
@@ -170,7 +170,7 @@ struct MaterialData
 	// Solid subsurface only: the medium's mean free path per channel in scene units (radius * radius
 	// scale), 0 without one.
 	float3 subsurfaceRadius;
-	// Solid: the medium's Henyey-Greenstein g. Thin-walled: 1, everything transmitted.
+	// Solid: the medium's Henyey-Greenstein g. Thin-walled: -1 all reflected, 1 all transmitted.
 	float subsurfaceScatterAnisotropy;
 	// Solid subsurface only, linear: RGB multiplies subsurfaceRadius, and so does the scale texture's
 	// channel subsurfaceScaleChannel.
@@ -179,6 +179,12 @@ struct MaterialData
 	// The channel, 0 to 3 for R to A, of the weight and scale textures that holds the scalar.
 	uint subsurfaceWeightChannel;
 	uint subsurfaceScaleChannel;
+	// KHR_materials_sheen, which the shader turns into OpenPBR fuzz: linear colour (black for none) and
+	// roughness factors.
+	float3 sheenColour;
+	float sheenRoughness;
+	uint sheenColourTexture; // sRGB, RGB multiplies sheenColour
+	uint sheenRoughnessTexture; // A multiplies sheenRoughness, the colour texture when it is the same image
 };
 
 // GpuMaterial::emissiveFlags bits above the half emissive blue.
@@ -187,8 +193,8 @@ struct MaterialData
 #define GPU_MATERIAL_WEIGHT_CHANNEL_SHIFT 20 // subsurfaceWeightChannel, 2 bits
 #define GPU_MATERIAL_SCALE_CHANNEL_SHIFT 22 // subsurfaceScaleChannel, 2 bits
 
-// One MaterialData per row of a StructuredBuffer, packed to 96 bytes (three 32 byte sectors): the
-// factors as halves (x in the low 16 bits), the texture indices whole, since the descriptor heap
+// One MaterialData per row of a StructuredBuffer, packed to 128 bytes (one aligned cache line, four
+// spare dwords at the end): the factors as halves (x in the low 16 bits), the texture indices whole, since the descriptor heap
 // holds up to a million of them. The fields are MaterialData's; PackGpuMaterial and LoadGpuMaterial
 // (Resources.slang) convert.
 struct GpuMaterial
@@ -212,6 +218,10 @@ struct GpuMaterial
 	uint2 attenuation; // half4: colour, then distance, infinite for no absorption
 	uint subsurfaceRadiusTexture;
 	uint subsurfaceScaleTexture;
+	uint2 sheenColourRoughness; // half4: colour, then roughness
+	uint sheenColourTexture;
+	uint sheenRoughnessTexture;
+	uint4 reserved;
 };
 
 #ifdef __cplusplus
@@ -251,6 +261,9 @@ inline GpuMaterial PackGpuMaterial(const MaterialData &m)
 								  ((m.attenuationDistance > 65504.0f ? infinity : half(m.attenuationDistance)) << 16));
 	p.subsurfaceRadiusTexture = m.subsurfaceRadiusTexture;
 	p.subsurfaceScaleTexture = m.subsurfaceScaleTexture;
+	p.sheenColourRoughness = uint2(pair(m.sheenColour.x, m.sheenColour.y), pair(m.sheenColour.z, m.sheenRoughness));
+	p.sheenColourTexture = m.sheenColourTexture;
+	p.sheenRoughnessTexture = m.sheenRoughnessTexture;
 	return p;
 }
 
@@ -293,6 +306,10 @@ inline MaterialData UnpackGpuMaterial(const GpuMaterial &p)
 	m.subsurfaceScaleTexture = p.subsurfaceScaleTexture;
 	m.subsurfaceWeightChannel = (flags >> GPU_MATERIAL_WEIGHT_CHANNEL_SHIFT) & 3;
 	m.subsurfaceScaleChannel = (flags >> GPU_MATERIAL_SCALE_CHANNEL_SHIFT) & 3;
+	m.sheenColour = float3(lo(p.sheenColourRoughness.x), hi(p.sheenColourRoughness.x), lo(p.sheenColourRoughness.y));
+	m.sheenRoughness = hi(p.sheenColourRoughness.y);
+	m.sheenColourTexture = p.sheenColourTexture;
+	m.sheenRoughnessTexture = p.sheenRoughnessTexture;
 	return m;
 }
 #endif
@@ -348,7 +365,7 @@ struct TonemapConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(FrameConstants) == 464,"FrameConstants must match the HLSL cbuffer layout");
-static_assert(sizeof(GpuMaterial) == 96, "GpuMaterial must match the structured buffer stride");
+static_assert(sizeof(GpuMaterial) == 128,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
 static_assert(sizeof(GpuCameraState) == 104, "GpuCameraState must match the structured buffer stride");

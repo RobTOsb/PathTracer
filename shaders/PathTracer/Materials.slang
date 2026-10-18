@@ -25,6 +25,9 @@ OpenPBRBaseParams OpenPBRDefaults()
     p.subsurfaceColour = float3(0.8, 0.8, 0.8);
     p.subsurfaceScatterAnisotropy = 0.0;
     p.subsurfaceRadius = float3(0.0, 0.0, 0.0);
+    p.fuzzWeight = 0.0;
+    p.fuzzColour = float3(1.0, 1.0, 1.0);
+    p.fuzzRoughness = 0.5;
     p.geometryThinWalled = false;
     p.geometryTangent = float3(1.0, 0.0, 0.0);
     p.geometryBitangent = float3(0.0, 1.0, 0.0);
@@ -62,6 +65,17 @@ void SetGltfAnisotropy(inout OpenPBRBaseParams p, float strength)
         return;
     p.specularRoughnessAnisotropy = 1.0 - alphaB / alphaT;
     p.specularRoughness = sqrt(sqrt(0.5 * (alphaT * alphaT + alphaB * alphaB)));
+}
+
+// glTF sheen as OpenPBR fuzz: fuzzWeight * fuzzColour is the sheen colour, which makes the lobe the
+// sheen colour times the LTC and leaves 1 - max(sheen colour) E_F(wo) to the layers below, as in
+// KHR_materials_sheen's albedo scaling. Only the lobe's shape differs, Zeltner's LTC in place of Charlie.
+void SetGltfSheen(inout OpenPBRBaseParams p, float3 sheen, float roughness)
+{
+    sheen = saturate(sheen);
+    p.fuzzWeight = MaxComponent(sheen);
+    p.fuzzColour = p.fuzzWeight > 0.0 ? sheen / p.fuzzWeight : float3(1.0, 1.0, 1.0);
+    p.fuzzRoughness = saturate(roughness);
 }
 
 // The Rendering panel's debug switches (MaterialOverrideFlags), applied to every material.
@@ -155,10 +169,20 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     SetTransmission(p, material, transmission, thinWalled);
     if (anisotropyStrength > 0.0)
         SetGltfAnisotropy(p, saturate(anisotropyStrength));
+    if (any(material.sheenColour > 0.0))
+    {
+        float3 sheen = material.sheenColour;
+        if (material.sheenColourTexture != INVALIDDESCRIPTORHANDLE)
+            sheen *= SampleTextureGrad(material.sheenColourTexture, uv, ddx, ddy, anisotropic).rgb;
+        float sheenRoughness = material.sheenRoughness;
+        if (material.sheenRoughnessTexture != INVALIDDESCRIPTORHANDLE)
+            sheenRoughness *= SampleTextureGrad(material.sheenRoughnessTexture, uv, ddx, ddy, anisotropic).a;
+        SetGltfSheen(p, sheen, sheenRoughness);
+    }
 
-    // glTF diffuse transmission mixes the base's diffuse BRDF with a diffuse BTDF, which is OpenPBR's
-    // thin-walled subsurface with all of it transmitted (anisotropy 1). In a solid object the subsurface
-    // is a scattering medium instead, unless the Rendering panel turned all of it off.
+    // On a thin wall the subsurface is split between diffuse reflection and diffuse transmission by its
+    // anisotropy. In a solid object it is a scattering medium instead, unless the Rendering panel
+    // turned all of it off.
     if (material.subsurfaceWeight > 0.0)
     {
         float weight = material.subsurfaceWeight;
@@ -219,6 +243,17 @@ float3 PassThroughTransmittance(MaterialData material, float2 uv, float3 baseCol
     p.baseMetalness = saturate(metallic);
     p.specularRoughness = 0.0;
     SetTransmission(p, material, transmission, true);
+    // The fuzz on top keeps some of it back too.
+    if (any(material.sheenColour > 0.0))
+    {
+        float3 sheen = material.sheenColour;
+        if (material.sheenColourTexture != INVALIDDESCRIPTORHANDLE)
+            sheen *= SampleTexture(material.sheenColourTexture, uv).rgb;
+        float sheenRoughness = material.sheenRoughness;
+        if (material.sheenRoughnessTexture != INVALIDDESCRIPTORHANDLE)
+            sheenRoughness *= SampleTexture(material.sheenRoughnessTexture, uv).a;
+        SetGltfSheen(p, sheen, sheenRoughness);
+    }
     ApplyMaterialOverrides(p);
     return ThinDeltaTransmittance(p, faceCosine);
 }

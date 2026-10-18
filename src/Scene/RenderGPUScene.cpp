@@ -226,7 +226,9 @@ namespace
 									  &material.subsurfaceColourTexture,
 									  &material.subsurfaceRadiusTexture,
 									  &material.subsurfaceScaleTexture,
-									  &material.anisotropyTexture })
+									  &material.anisotropyTexture,
+									  &material.sheenColourTexture,
+									  &material.sheenRoughnessTexture })
 			{
 				apply(*texture);
 			}
@@ -606,7 +608,9 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 								 material.subsurfaceColourTexture,
 								 material.subsurfaceRadiusTexture,
 								 material.subsurfaceScaleTexture,
-								 material.anisotropyTexture })
+								 material.anisotropyTexture,
+								 material.sheenColourTexture,
+								 material.sheenRoughnessTexture })
 		{
 			if (!validTexture(texture))
 			{
@@ -1075,58 +1079,44 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 		}
 		gpu.attenuationColour = float3(1.0f, 1.0f, 1.0f);
 		gpu.attenuationDistance = FLT_MAX;
-		// OpenPBR subsurface: on a thin wall glTF's diffuse transmission, all of it transmitted; in a solid
-		// object EXT_materials_subsurface's scattering medium. Diffuse transmission into a solid object
-		// says nothing about the medium, so it is dropped there.
+		// OpenPBR subsurface from EXT_materials_subsurface. Like Blender, its colour is the base colour. On a
+		// thin wall it is split between reflection and diffuse transmission to the other side by the
+		// anisotropy; in a solid object it is a scattering medium whose mean free path is radius * scale.
 		gpu.subsurfaceWeightTexture = INVALIDDESCRIPTORHANDLE;
 		gpu.subsurfaceColourTexture = INVALIDDESCRIPTORHANDLE;
 		gpu.subsurfaceRadiusTexture = INVALIDDESCRIPTORHANDLE;
 		gpu.subsurfaceScaleTexture = INVALIDDESCRIPTORHANDLE;
+		gpu.subsurfaceWeight = material.GetSubsurfaceWeight();
+		gpu.subsurfaceColour = float3(baseColour[0], baseColour[1], baseColour[2]);
+		gpu.subsurfaceWeightChannel = std::min(material.GetSubsurfaceWeightChannel(), 3u);
+		if (gpu.subsurfaceWeight > 0.0f)
+		{
+			gpu.subsurfaceWeightTexture = UploadTexture(material.GetSubsurfaceWeightTexture(),
+														Format::R8G8B8A8_UNORM,
+														"Material_SubsurfaceWeight",
+														batch);
+			// sRGB, so it shares the albedo texture.
+			gpu.subsurfaceColourTexture = UploadTexture(material.GetAlbedoTexture(),
+														Format::R8G8B8A8_UNORM_SRGB,
+														"Material_Albedo",
+														batch);
+		}
 		if (material.IsThinWalled())
 		{
-			// KHR_materials_diffuse_transmission keeps its factor in A.
-			gpu.subsurfaceWeightChannel = 3;
-			const float *colour = material.GetDiffuseTransmissionColour();
-			gpu.subsurfaceWeight = material.GetDiffuseTransmission();
-			gpu.subsurfaceColour = float3(colour[0], colour[1], colour[2]);
-			gpu.subsurfaceScatterAnisotropy = 1.0f;
-			if (gpu.subsurfaceWeight > 0.0f)
-			{
-				gpu.subsurfaceWeightTexture = UploadTexture(material.GetDiffuseTransmissionTexture(),
-															Format::R8G8B8A8_UNORM,
-															"Material_DiffuseTransmission",
-															batch);
-				// sRGB, so pointing it at the base colour image shares the albedo texture.
-				gpu.subsurfaceColourTexture = UploadTexture(material.GetDiffuseTransmissionColourTexture(),
-															Format::R8G8B8A8_UNORM_SRGB,
-															"Material_DiffuseTransmissionColour",
-															batch);
-			}
+			// -1 all reflected, 1 all transmitted.
+			gpu.subsurfaceScatterAnisotropy = std::clamp(material.GetSubsurfaceScatterAnisotropy(), -1.0f, 1.0f);
 		}
 		else
 		{
-			// Like Blender, the medium's colour is the base colour and its mean free path radius * scale.
 			const float *radius = material.GetSubsurfaceRadius();
 			const float scale = std::max(material.GetSubsurfaceScale(), 0.0f);
-			gpu.subsurfaceWeight = material.GetSubsurfaceWeight();
-			gpu.subsurfaceColour = float3(baseColour[0], baseColour[1], baseColour[2]);
 			gpu.subsurfaceRadius = float3(std::max(radius[0], 0.0f) * scale,
 										  std::max(radius[1], 0.0f) * scale,
 										  std::max(radius[2], 0.0f) * scale);
 			gpu.subsurfaceScatterAnisotropy = std::clamp(material.GetSubsurfaceScatterAnisotropy(), -0.99f, 0.99f);
-			gpu.subsurfaceWeightChannel = std::min(material.GetSubsurfaceWeightChannel(), 3u);
 			gpu.subsurfaceScaleChannel = std::min(material.GetSubsurfaceScaleChannel(), 3u);
 			if (gpu.subsurfaceWeight > 0.0f)
 			{
-				gpu.subsurfaceWeightTexture = UploadTexture(material.GetSubsurfaceWeightTexture(),
-															Format::R8G8B8A8_UNORM,
-															"Material_SubsurfaceWeight",
-															batch);
-				// sRGB, so it shares the albedo texture.
-				gpu.subsurfaceColourTexture = UploadTexture(material.GetAlbedoTexture(),
-															Format::R8G8B8A8_UNORM_SRGB,
-															"Material_Albedo",
-															batch);
 				gpu.subsurfaceRadiusTexture = UploadTexture(material.GetSubsurfaceRadiusTexture(),
 															Format::R8G8B8A8_UNORM,
 															"Material_SubsurfaceRadius",
@@ -1136,6 +1126,28 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 														   "Material_SubsurfaceScale",
 														   batch);
 			}
+		}
+		// KHR_materials_sheen, which the shader turns into OpenPBR fuzz. sRGB leaves alpha linear, so a
+		// roughness texture that is the colour texture's image shares its upload.
+		gpu.sheenColourTexture = INVALIDDESCRIPTORHANDLE;
+		gpu.sheenRoughnessTexture = INVALIDDESCRIPTORHANDLE;
+		if (material.HasSheen())
+		{
+			const float *sheenColour = material.GetSheenColour();
+			gpu.sheenColour = float3(std::clamp(sheenColour[0], 0.0f, 1.0f),
+									 std::clamp(sheenColour[1], 0.0f, 1.0f),
+									 std::clamp(sheenColour[2], 0.0f, 1.0f));
+			gpu.sheenRoughness = std::clamp(material.GetSheenRoughness(), 0.0f, 1.0f);
+			const Scene::Texture &colourTexture = material.GetSheenColourTexture();
+			const Scene::Texture &roughnessTexture = material.GetSheenRoughnessTexture();
+			const bool shared = colourTexture.IsValid() && roughnessTexture.IsValid() &&
+								colourTexture.GetPixels() == roughnessTexture.GetPixels();
+			gpu.sheenColourTexture =
+					UploadTexture(colourTexture, Format::R8G8B8A8_UNORM_SRGB, "Material_SheenColour", batch);
+			gpu.sheenRoughnessTexture = UploadTexture(roughnessTexture,
+													  shared ? Format::R8G8B8A8_UNORM_SRGB : Format::R8G8B8A8_UNORM,
+													  "Material_SheenRoughness",
+													  batch);
 		}
 		gpu.albedoTexture =
 				UploadTexture(material.GetAlbedoTexture(), Format::R8G8B8A8_UNORM_SRGB, "Material_Albedo", batch);
@@ -1181,6 +1193,8 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 	fallback.subsurfaceRadiusTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.subsurfaceScaleTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.anisotropyTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.sheenColourTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.sheenRoughnessTexture = INVALIDDESCRIPTORHANDLE;
 	materials.push_back(PackGpuMaterial(fallback));
 }
 

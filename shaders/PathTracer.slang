@@ -207,8 +207,9 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             uint lobe = LOBE_NONE;
             const float3 dirIn = dir;
             float3 passTransmittance = float3(1.0, 1.0, 1.0);
+            // The two branches cover the specular lobes only, so nothing with a diffuse or fuzz lobe splits.
             bool splittable = fromCamera && !lastSegment && splits < g_Frame.glassReflectionSplits && ctx.probDiffuse <= 0.0 &&
-                              ctx.probSpecR > 0.0 && ctx.probSpecR < 1.0;
+                              ctx.probFuzz <= 0.0 && ctx.probSpecR > 0.0 && ctx.probSpecR < 1.0;
             // A thin pane: its reflection now, what is behind it deferred.
             bool paneSplit = splittable && deltaTransmission;
             // Solid glass: the refraction now, which the guides' chain follows, its reflection deferred.

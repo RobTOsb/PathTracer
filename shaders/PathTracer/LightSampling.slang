@@ -90,7 +90,8 @@ LightSelectVertex MakeLightSelectVertex(float3 position, OpenPBRBaseParams mat, 
     v.normal = mat.geometryNormal;
     v.tangent = mat.geometryTangent;
     v.wo = wo;
-    v.diffuseWeight = ctx.probDiffuse;
+    // Fuzz is broad enough to count as diffuse.
+    v.diffuseWeight = ctx.probDiffuse + ctx.probFuzz;
     v.specularWeight = ctx.probSpecR;
     if (bounce >= g_Frame.lightTreeGlossyBounces)
     {

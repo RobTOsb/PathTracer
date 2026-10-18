@@ -59,7 +59,8 @@ float4 SpecularVirtualPosition(PrimaryGuides g, float3 viewDir, float hitDistanc
     return float4(g.reflector.xyz * inverseImageDistance + viewDir * dominantFactor, inverseImageDistance);
 }
 
-// Directional reflectance of an OpenPBR base, split into its diffuse and specular parts.
+// Directional reflectance of an OpenPBR base, split into its diffuse and specular parts. Fuzz is broad
+// enough to count as diffuse.
 void ReflectanceGuides(OpenPBRBaseParams p, float3 wo, inout PrimaryGuides g)
 {
     float M = p.baseMetalness;
@@ -74,6 +75,12 @@ void ReflectanceGuides(OpenPBRBaseParams p, float3 wo, inout PrimaryGuides g)
     float roughness = p.specularRoughness;
     g.specularAlbedo = EnvBRDFApprox2(F0, roughness * roughness, NdotV);
     g.diffuseAlbedo = (1.0 - M) * (1.0 - p.transmissionWeight) * lerp(baseColour, p.subsurfaceColour, p.subsurfaceWeight);
+    if (p.fuzzWeight > 0.0)
+    {
+        float fuzzAlbedo = p.fuzzWeight * FuzzAlbedo(saturate(NdotV), FuzzRoughness(p));
+        g.specularAlbedo *= 1.0 - fuzzAlbedo;
+        g.diffuseAlbedo = (1.0 - fuzzAlbedo) * g.diffuseAlbedo + fuzzAlbedo * p.fuzzColour;
+    }
 }
 
 float InitialSpecularHitDistance(float roughness)
