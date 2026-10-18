@@ -110,6 +110,14 @@ struct RenderSettings
 	float peakNits = 1000.0f; // overwritten with the display's reported peak at startup
 	bool hdrGammaCorrection = true; // match the 2.2 gamma SDR displays decode with
 
+	// Film grain, added after tone mapping in display-encoded space.
+	bool filmGrain = true;
+	float filmGrainStrength = 0.008f; // standard deviation in sRGB-encoded units at mid-grey
+	float filmGrainSize = 1.0f; // output pixels
+	float filmGrainColour = 1.0f; // 0 = monochrome, 1 = independent per channel
+	float filmGrainResponse = 1.0f; // mid-tone emphasis, 0 = the same grain at every level
+	float filmGrainFps = 60.0f; // how often the grain pattern changes, 0 = static
+
 	DLSSMode dlssMode = DLSSMode::MaxQuality;
 	DLSSRayReconstructionPreset rrPreset = DLSSRayReconstructionPreset::PresetF;
 	// Primary surface replacement: the guides of a mirror or pane of glass (at most this rough, and

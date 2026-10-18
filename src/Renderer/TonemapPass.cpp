@@ -2,6 +2,7 @@
 
 #include "RenderSettings.h"
 
+#include <chrono>
 #include <math.h>
 #include <stdexcept>
 
@@ -62,6 +63,16 @@ void TonemapPass::Execute(RenderContext *renderContext)
 	constants.peakNits = settings_.peakNits;
 	constants.whiteClip = settings_.whiteClip;
 	constants.hdrGammaCorrection = settings_.hdrGammaCorrection ? 1u : 0u;
+	constants.grainStrength = settings_.filmGrain ? settings_.filmGrainStrength : 0.0f;
+	constants.grainSize = settings_.filmGrainSize;
+	constants.grainColour = settings_.filmGrainColour;
+	constants.grainResponse = settings_.filmGrainResponse;
+	if (settings_.filmGrainFps > 0.0f)
+	{
+		// Wall-clock time so the grain changes at the chosen rate whatever the frame rate.
+		const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime_).count();
+		constants.grainSeed = static_cast<uint>(static_cast<uint64_t>(seconds * settings_.filmGrainFps));
+	}
 
 	renderContext->SetComputePipeline(pipeline_);
 	renderContext->SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));

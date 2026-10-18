@@ -137,19 +137,106 @@ float SRGBToLinear(float c)
     return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
 }
 
+float3 SRGBToLinearUnclamped(float3 c)
+{
+    return select(c <= 0.04045, c / 12.92, pow((c + 0.055) / 1.055, 2.4));
+}
+
 float3 LinearToSRGB(float3 c)
 {
     return LinearToSRGBUnclamped(saturate(c));
 }
 
-// SDR monitors decode with a pure 2.2 power rather than the piecewise sRGB curve, so that is
-// what people are used to seeing. Re-encoding with sRGB and decoding with 2.2 reproduces it in
-// HDR; without it shadows look lifted compared with the SDR output.
-float3 GammaCorrect(float3 c)
+// Jarzynski and Olano, "Hash Functions for GPU Rendering".
+uint3 Pcg3d(uint3 v)
 {
-    return pow(LinearToSRGBUnclamped(c), 2.2);
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z;
+    v.y += v.z * v.x;
+    v.z += v.x * v.y;
+    return v;
 }
 
+// Zero-mean, unit-variance uniform value per channel at a lattice point.
+float3 GrainLattice(int2 cell, uint seed)
+{
+    uint3 h = Pcg3d(uint3(asuint(cell), seed));
+    return (float3(h >> 8u) * (2.0 / 16777216.0) - 1.0) * 1.7320508;
+}
+
+float4 CubicBSplineWeights(float t)
+{
+    float t2 = t * t;
+    float t3 = t2 * t;
+    float s = 1.0 - t;
+    return float4(s * s * s, 3.0 * t3 - 6.0 * t2 + 4.0, -3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0, t3) / 6.0;
+}
+
+// White noise on a lattice, smoothed with a cubic B-spline into soft, round grains about one
+// lattice cell across. The weighted sum of 16 uniforms is close to Gaussian.
+float3 GrainOctave(float2 p, uint seed)
+{
+    float2 cell = floor(p);
+    float4 wx = CubicBSplineWeights(p.x - cell.x);
+    float4 wy = CubicBSplineWeights(p.y - cell.y);
+    int2 base = int2(cell) - 1;
+
+    float3 sum = 0.0;
+    [unroll]
+    for (int y = 0; y < 4; ++y)
+    {
+        [unroll]
+        for (int x = 0; x < 4; ++x)
+            sum += (wx[x] * wy[y]) * GrainLattice(base + int2(x, y), seed);
+    }
+    // The variance of the sum depends on where p sits in its cell; dividing it out stops the grain
+    // strength from following the lattice.
+    return sum * rsqrt(dot(wx, wx) * dot(wy, wy));
+}
+
+// Unit-variance grain per channel. Fine grain plus a coarser clumping octave, each on a rotated
+// lattice so neither shows the screen axes.
+float3 FilmGrain(uint2 pixel)
+{
+    const float2x2 rotateFine = float2x2(0.8776, -0.4794, 0.4794, 0.8776); // 0.5 rad
+    const float2x2 rotateCoarse = float2x2(-0.3233, -0.9463, 0.9463, -0.3233); // 1.9 rad
+    float2 p = float2(pixel) + 0.5;
+    float size = max(g_PushConstants.grainSize, 1.0);
+    uint seed = g_PushConstants.grainSeed;
+
+    // 0.8^2 + 0.6^2 = 1 keeps unit variance.
+    float3 n = 0.8 * GrainOctave(mul(rotateFine, p) / size, seed) +
+               0.6 * GrainOctave(mul(rotateCoarse, p) / (size * 2.3), seed ^ 0x9E3779B9u);
+
+    // Blend from one shared (luminance) grain to independent dye-layer grain, then renormalise:
+    // the channels are correlated with the shared grain by 1/sqrt(3).
+    float c = saturate(g_PushConstants.grainColour);
+    float mono = (n.r + n.g + n.b) * 0.57735027;
+    float variance = (1.0 - c) * (1.0 - c) + c * c + 2.0 * c * (1.0 - c) * 0.57735027;
+    return lerp(mono.xxx, n, c) * rsqrt(variance);
+}
+
+// Added to the display-encoded value, where equal steps look equally strong, as grain in a print
+// does. The mid-tone bell fades it out at black and white so blacks are not lifted and whites stay
+// clean; values above paper white (HDR) get none.
+float3 ApplyFilmGrain(float3 encoded, uint2 pixel)
+{
+    if (g_PushConstants.grainStrength <= 0.0)
+        return encoded;
+
+    float v = saturate(Luma(encoded));
+    float weight = pow(max(4.0 * v * (1.0 - v), 1e-6), g_PushConstants.grainResponse);
+    return max(encoded + FilmGrain(pixel) * (g_PushConstants.grainStrength * weight), 0.0);
+}
+
+// SDR monitors decode with a pure 2.2 power rather than the piecewise sRGB curve, so that is
+// what people are used to seeing. Re-encoding with sRGB and decoding with 2.2 reproduces it in
+// HDR; without it shadows look lifted compared with the SDR output. This is the inverse of that
+// re-encode and decode.
 float GammaCorrectInverse(float c)
 {
     return SRGBToLinear(pow(c, 1.0 / 2.2));
@@ -213,8 +300,10 @@ void main(uint3 id : SV_DispatchThreadID)
             colour = ToneMapNeutral(colour, tonemapPeak, clip);
         }
 
-        if (gammaCorrect)
-            colour = GammaCorrect(colour);
+        // The sRGB encoding of the HDR colour is what SDR would have output below paper white,
+        // so the grain matches SDR there.
+        float3 encoded = ApplyFilmGrain(LinearToSRGBUnclamped(colour), id.xy);
+        colour = gammaCorrect ? pow(encoded, 2.2) : SRGBToLinearUnclamped(encoded);
 
         float3 nits = Rec709ToRec2020(colour * g_PushConstants.paperWhiteNits);
         g_Output[id.xy] = float4(LinearToPQ(nits), 1.0);
@@ -222,5 +311,6 @@ void main(uint3 id : SV_DispatchThreadID)
     }
 
     colour = ApplySDRLook(colour, op, clip);
-    g_Output[id.xy] = float4(LinearToSRGB(colour), 1.0);
+    float3 encoded = ApplyFilmGrain(LinearToSRGB(colour), id.xy);
+    g_Output[id.xy] = float4(saturate(encoded), 1.0);
 }

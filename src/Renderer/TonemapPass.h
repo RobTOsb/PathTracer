@@ -4,6 +4,8 @@
 
 #include "RenderContext.h"
 
+#include <chrono>
+
 struct RenderSettings;
 
 // Exposes, tone maps and sRGB-encodes the HDR radiance into an LDR target in a compute pass, then
@@ -25,4 +27,6 @@ private:
 	ResourceHandle ldrOutput_ = InvalidResourceHandle;
 	uint width_ = 0;
 	uint height_ = 0;
+
+	std::chrono::steady_clock::time_point startTime_ = std::chrono::steady_clock::now(); // animates the film grain
 };

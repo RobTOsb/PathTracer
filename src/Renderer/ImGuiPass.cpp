@@ -454,6 +454,19 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 			ImGui::SliderFloat("White clip", &settings_.whiteClip, 1.0f, 1000.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
 			ImGui::SetItemTooltip("Scene value (1 = paper white) that the Neutwo curve maps exactly to its peak");
 		}
+
+		ImGui::Checkbox("Film grain", &settings_.filmGrain);
+		ImGui::BeginDisabled(!settings_.filmGrain);
+		ImGui::SliderFloat("Grain strength", &settings_.filmGrainStrength, 0.0f, 0.2f, "%.3f");
+		ImGui::SetItemTooltip("Standard deviation of the grain in sRGB-encoded units at mid-grey");
+		ImGui::SliderFloat("Grain size", &settings_.filmGrainSize, 1.0f, 4.0f, "%.2f px");
+		ImGui::SliderFloat("Grain colour", &settings_.filmGrainColour, 0.0f, 1.0f, "%.2f");
+		ImGui::SetItemTooltip("0 = monochrome (luminance) grain, 1 = independent grain per colour channel");
+		ImGui::SliderFloat("Grain mid-tone bias", &settings_.filmGrainResponse, 0.0f, 4.0f, "%.2f");
+		ImGui::SetItemTooltip("How strongly the grain fades out towards black and white, 0 = the same grain everywhere");
+		ImGui::SliderFloat("Grain frame rate", &settings_.filmGrainFps, 0.0f, 60.0f, "%.0f fps");
+		ImGui::SetItemTooltip("How often the grain pattern changes, 0 = static");
+		ImGui::EndDisabled();
 	}
 
 	if (ImGui::CollapsingHeader("Memory"))
