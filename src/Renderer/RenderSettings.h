@@ -79,7 +79,7 @@ struct RenderSettings
 	float3 skyColour = { 0.45f, 0.65f, 1.0f };
 	float skyIntensity = 1.0f;
 
-	int maxBounces = 4;
+	int maxBounces = 8;
 	// DXR 1.2 shader execution reordering: switches to the path tracing pipeline that reorders
 	// threads by material before shading each hit. Ignored where the device has no SER.
 	bool shaderExecutionReordering = true;

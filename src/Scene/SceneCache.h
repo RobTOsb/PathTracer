@@ -26,7 +26,8 @@
 // 13: opacity micromaps of the alpha-tested primitives (kOpacityMicromap* in RenderGPUScene.cpp).
 // 14: thin-walled subsurface from EXT_materials_subsurface, KHR_materials_diffuse_transmission dropped.
 // 15: KHR_materials_sheen, GpuMaterial 128 bytes.
-constexpr uint32_t kSceneCacheVersion = 15;
+// 16: KHR_texture_transform and the textures' UV set baked into the vertex UVs.
+constexpr uint32_t kSceneCacheVersion = 16;
 
 struct SceneCacheTexture
 {

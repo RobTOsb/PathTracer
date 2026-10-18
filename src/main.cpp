@@ -71,7 +71,9 @@ static float QueryDisplayPeakNits(void *hwnd)
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\SubsurfaceScene\\scene.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\SphereRoom\\SphereRoom.glb";
 //constexpr const char *kDefaultScenePath = "h:\\SubwayInterior\\glTF\\SubwayInterior.gltf";
-constexpr const char *kDefaultScenePath = "h:\\SanMiguel.glb";
+//constexpr const char *kDefaultScenePath = "h:\\SanMiguel.glb";
+constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\SheenCloth\\glTF\\SheenCloth.gltf";
+
 
 
 constexpr uint kFramesInFlight = 2;
