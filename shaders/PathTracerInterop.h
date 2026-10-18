@@ -192,6 +192,14 @@ struct MaterialData
 	float sheenRoughness;
 	uint sheenColourTexture; // sRGB, RGB multiplies sheenColour
 	uint sheenRoughnessTexture; // A multiplies sheenRoughness, the colour texture when it is the same image
+	// KHR_materials_clearcoat, which the shader turns into a white OpenPBR coat of IOR 1.5: weight (0 for
+	// none) and roughness factors in [0, 1], and the coat normal map's scale.
+	float coatWeight;
+	float coatRoughness;
+	float coatNormalScale;
+	uint coatWeightTexture; // R multiplies coatWeight
+	uint coatRoughnessTexture; // G multiplies coatRoughness
+	uint coatNormalTexture; // tangent space like normalTexture; without one the coat follows the vertex normal
 };
 
 // GpuMaterial::emissiveFlags bits above the half emissive blue.
@@ -200,9 +208,9 @@ struct MaterialData
 #define GPU_MATERIAL_WEIGHT_CHANNEL_SHIFT 20 // subsurfaceWeightChannel, 2 bits
 #define GPU_MATERIAL_SCALE_CHANNEL_SHIFT 22 // subsurfaceScaleChannel, 2 bits
 
-// One MaterialData per row of a StructuredBuffer, packed to 128 bytes (one aligned cache line, four
-// spare dwords at the end): the factors as halves (x in the low 16 bits), the texture indices whole, since the descriptor heap
-// holds up to a million of them. The fields are MaterialData's; PackGpuMaterial and LoadGpuMaterial
+// One MaterialData per row of a StructuredBuffer, packed to 128 bytes (one aligned cache line): the
+// factors as halves (x in the low 16 bits), the coat's [0, 1] weight and roughness as unorm8, the texture
+// indices whole, since the descriptor heap holds up to a million of them. The fields are MaterialData's; PackGpuMaterial and LoadGpuMaterial
 // (Resources.slang) convert.
 struct GpuMaterial
 {
@@ -228,7 +236,10 @@ struct GpuMaterial
 	uint2 sheenColourRoughness; // half4: colour, then roughness
 	uint sheenColourTexture;
 	uint sheenRoughnessTexture;
-	uint4 reserved;
+	uint coatWeightRoughnessNormalScale; // unorm8 weight, unorm8 roughness, then half normal scale
+	uint coatWeightTexture;
+	uint coatRoughnessTexture;
+	uint coatNormalTexture;
 };
 
 #ifdef __cplusplus
@@ -238,6 +249,7 @@ inline GpuMaterial PackGpuMaterial(const MaterialData &m)
 	using namespace DirectX::PackedVector;
 	auto half = [](float v) { return static_cast<uint32_t>(XMConvertFloatToHalf(std::clamp(v, -65504.0f, 65504.0f))); };
 	auto pair = [&](float lo, float hi) { return half(lo) | (half(hi) << 16); };
+	auto unorm8 = [](float v) { return static_cast<uint32_t>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); };
 	const uint32_t infinity = 0x7C00;
 	const uint32_t flags = (m.alphaMode << GPU_MATERIAL_ALPHA_MODE_SHIFT) |
 						   (m.transmissionFlags << GPU_MATERIAL_TRANSMISSION_FLAGS_SHIFT) |
@@ -271,6 +283,10 @@ inline GpuMaterial PackGpuMaterial(const MaterialData &m)
 	p.sheenColourRoughness = uint2(pair(m.sheenColour.x, m.sheenColour.y), pair(m.sheenColour.z, m.sheenRoughness));
 	p.sheenColourTexture = m.sheenColourTexture;
 	p.sheenRoughnessTexture = m.sheenRoughnessTexture;
+	p.coatWeightRoughnessNormalScale = unorm8(m.coatWeight) | (unorm8(m.coatRoughness) << 8) | (half(m.coatNormalScale) << 16);
+	p.coatWeightTexture = m.coatWeightTexture;
+	p.coatRoughnessTexture = m.coatRoughnessTexture;
+	p.coatNormalTexture = m.coatNormalTexture;
 	return p;
 }
 
@@ -317,6 +333,12 @@ inline MaterialData UnpackGpuMaterial(const GpuMaterial &p)
 	m.sheenRoughness = hi(p.sheenColourRoughness.y);
 	m.sheenColourTexture = p.sheenColourTexture;
 	m.sheenRoughnessTexture = p.sheenRoughnessTexture;
+	m.coatWeight = (p.coatWeightRoughnessNormalScale & 0xFF) / 255.0f;
+	m.coatRoughness = ((p.coatWeightRoughnessNormalScale >> 8) & 0xFF) / 255.0f;
+	m.coatNormalScale = hi(p.coatWeightRoughnessNormalScale);
+	m.coatWeightTexture = p.coatWeightTexture;
+	m.coatRoughnessTexture = p.coatRoughnessTexture;
+	m.coatNormalTexture = p.coatNormalTexture;
 	return m;
 }
 #endif

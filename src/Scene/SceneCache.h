@@ -27,7 +27,8 @@
 // 14: thin-walled subsurface from EXT_materials_subsurface, KHR_materials_diffuse_transmission dropped.
 // 15: KHR_materials_sheen, GpuMaterial 128 bytes.
 // 16: KHR_texture_transform and the textures' UV set baked into the vertex UVs.
-constexpr uint32_t kSceneCacheVersion = 16;
+// 17: KHR_materials_clearcoat in GpuMaterial's last four dwords.
+constexpr uint32_t kSceneCacheVersion = 17;
 
 struct SceneCacheTexture
 {

@@ -1,5 +1,5 @@
 // Triangle attribute fetches and ray cone texture filtering for the hit shaders.
-import OpenPBRBaseSubstrate;
+import OpenPBRBSDF;
 import PathTracer.Resources;
 
 // A ray's cone: its width where it last met a surface (0 at a pinhole camera) and its full apex

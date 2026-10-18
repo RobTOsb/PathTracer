@@ -6,7 +6,7 @@
 import LightTree;
 
 // Macros do not cross module boundaries, so the ones other modules use become exported constants
-// (PI comes from OpenPBRBaseSubstrate).
+// (PI comes from OpenPBRBSDF).
 static const float kTwoPi = TWO_PI;
 static const float kFltMax = FLT_MAX;
 static const uint kInvalidDescriptorHandle = INVALIDDESCRIPTORHANDLE;
@@ -134,6 +134,12 @@ MaterialData LoadGpuMaterial(uint index)
     m.sheenRoughness = sheenColourRoughness1.y;
     m.sheenColourTexture = p.sheenColourTexture;
     m.sheenRoughnessTexture = p.sheenRoughnessTexture;
+    m.coatWeight = (p.coatWeightRoughnessNormalScale & 0xFF) / 255.0;
+    m.coatRoughness = ((p.coatWeightRoughnessNormalScale >> 8) & 0xFF) / 255.0;
+    m.coatNormalScale = f16tof32(p.coatWeightRoughnessNormalScale >> 16);
+    m.coatWeightTexture = p.coatWeightTexture;
+    m.coatRoughnessTexture = p.coatRoughnessTexture;
+    m.coatNormalTexture = p.coatNormalTexture;
     return m;
 }
 

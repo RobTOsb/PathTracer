@@ -1,6 +1,6 @@
 // Next event estimation: light selection (light tree or uniform), sun and emissive triangle sampling.
 import LightTree;
-import OpenPBRBaseSubstrate;
+import OpenPBRBSDF;
 import PathTracer.Math;
 import PathTracer.Random;
 import PathTracer.RayTracing;
@@ -90,15 +90,16 @@ LightSelectVertex MakeLightSelectVertex(float3 position, OpenPBRBaseParams mat, 
     v.normal = mat.geometryNormal;
     v.tangent = mat.geometryTangent;
     v.wo = wo;
-    // Fuzz is broad enough to count as diffuse.
+    // Fuzz is broad enough to count as diffuse. The coat joins the specular lobe, which takes the
+    // roughness of whichever of the two reflects more.
     v.diffuseWeight = ctx.probDiffuse + ctx.probFuzz;
-    v.specularWeight = ctx.probSpecR;
+    v.specularWeight = ctx.probSpecR + ctx.probCoat;
     if (bounce >= g_Frame.lightTreeGlossyBounces)
     {
         v.diffuseWeight += dot(wo, v.normal) > 0.0 ? v.specularWeight : 0.0;
         v.specularWeight = 0.0;
     }
-    v.alpha = ctx.alpha;
+    v.alpha = ctx.probCoat > ctx.probSpecR ? ctx.coatAlpha.xx : ctx.alpha;
     v.tree = g_Frame.lightSampling == LIGHT_SAMPLING_TREE && reflectOnly;
     return v;
 }

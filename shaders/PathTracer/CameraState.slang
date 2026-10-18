@@ -2,7 +2,7 @@
 // camera sees through touch it, so between them it waits in g_CameraState rather than in registers,
 // where it would be saved and restored around every TraceRay of the path. Without DLSS_RR nothing
 // reads it, so it is neither stored nor loaded.
-import OpenPBRBaseSubstrate;
+import OpenPBRBSDF;
 import PathTracer.GlassSplit;
 import PathTracer.Guides;
 import PathTracer.Math;

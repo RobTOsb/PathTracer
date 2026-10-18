@@ -1,5 +1,5 @@
 // Splitting camera paths at glass: one lobe now, the other deferred, plus the panes' reflections.
-import OpenPBRBaseSubstrate;
+import OpenPBRBSDF;
 
 struct PaneReflection
 {

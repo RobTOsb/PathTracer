@@ -1,5 +1,5 @@
 // glTF material rows to OpenPBR parameters, for the integrator and the any-hit shaders.
-import OpenPBRBaseSubstrate;
+import OpenPBRBSDF;
 import PathTracer.Geometry;
 import PathTracer.Math;
 import PathTracer.RayTracing;
@@ -25,6 +25,11 @@ OpenPBRBaseParams OpenPBRDefaults()
     p.subsurfaceColour = float3(0.8, 0.8, 0.8);
     p.subsurfaceScatterAnisotropy = 0.0;
     p.subsurfaceRadius = float3(0.0, 0.0, 0.0);
+    p.coatWeight = 0.0;
+    p.coatColour = float3(1.0, 1.0, 1.0);
+    p.coatRoughness = 0.0;
+    p.coatIor = 1.6;
+    p.coatDarkening = 1.0;
     p.fuzzWeight = 0.0;
     p.fuzzColour = float3(1.0, 1.0, 1.0);
     p.fuzzRoughness = 0.5;
@@ -32,7 +37,19 @@ OpenPBRBaseParams OpenPBRDefaults()
     p.geometryTangent = float3(1.0, 0.0, 0.0);
     p.geometryBitangent = float3(0.0, 1.0, 0.0);
     p.geometryNormal = float3(0.0, 0.0, 1.0);
+    p.geometryCoatNormal = float3(0.0, 0.0, 1.0);
     return p;
+}
+
+// glTF clearcoat as OpenPBR coat: white, of IOR 1.5. glTF has no darkening; this keeps OpenPBR's default
+// of 1, so coated base colours come out a little darker than in glTF viewers. Set on every material, coat
+// or not, so the IOR is a constant the compiler folds the coat's Fresnel terms with.
+void SetGltfClearcoat(inout OpenPBRBaseParams p, float weight, float roughness, float3 normal)
+{
+    p.coatWeight = saturate(weight);
+    p.coatRoughness = saturate(roughness);
+    p.coatIor = 1.5;
+    p.geometryCoatNormal = normal;
 }
 
 // glTF transmission in OpenPBR terms: the base colour tints what crosses the surface, unless a
@@ -85,6 +102,7 @@ void ApplyMaterialOverrides(inout OpenPBRBaseParams p)
     {
         p.baseMetalness = 0.0;
         p.specularColour = float3(0.0, 0.0, 0.0);
+        p.coatWeight = 0.0;
     }
     if ((g_Frame.materialOverrides & MATERIAL_OVERRIDE_NO_TRANSMISSION) != 0)
     {
@@ -110,6 +128,26 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
         tn.y = -tn.y; // flip green channel (DirectX-style normal map convention)
         tn.xy *= material.normalScale;
         hit.Ns = normalize(hit.T * tn.x + hit.B * tn.y + hit.N * tn.z);
+    }
+
+    // The coat has a normal map of its own, and without one follows the vertex normal (glTF), in the
+    // tangent space before anisotropy turns it.
+    float coatWeight = material.coatWeight;
+    float coatRoughness = material.coatRoughness;
+    float3 coatNormal = hit.N;
+    if (coatWeight > 0.0)
+    {
+        if (material.coatWeightTexture != INVALIDDESCRIPTORHANDLE)
+            coatWeight *= SampleTextureGrad(material.coatWeightTexture, uv, ddx, ddy, anisotropic).r;
+        if (material.coatRoughnessTexture != INVALIDDESCRIPTORHANDLE)
+            coatRoughness *= SampleTextureGrad(material.coatRoughnessTexture, uv, ddx, ddy, anisotropic).g;
+        if (material.coatNormalTexture != INVALIDDESCRIPTORHANDLE)
+        {
+            float3 tn = SampleTextureGrad(material.coatNormalTexture, uv, ddx, ddy, anisotropic).xyz * 2.0 - 1.0;
+            tn.y = -tn.y;
+            tn.xy *= material.coatNormalScale;
+            coatNormal = normalize(hit.T * tn.x + hit.B * tn.y + hit.N * tn.z);
+        }
     }
 
     float3 baseColour = material.baseColour.rgb;
@@ -179,6 +217,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
             sheenRoughness *= SampleTextureGrad(material.sheenRoughnessTexture, uv, ddx, ddy, anisotropic).a;
         SetGltfSheen(p, sheen, sheenRoughness);
     }
+    SetGltfClearcoat(p, coatWeight, coatRoughness, coatNormal);
 
     // On a thin wall the subsurface is split between diffuse reflection and diffuse transmission by its
     // anisotropy. In a solid object it is a scattering medium instead, unless the Rendering panel
@@ -254,6 +293,11 @@ float3 PassThroughTransmittance(MaterialData material, float2 uv, float3 baseCol
             sheenRoughness *= SampleTexture(material.sheenRoughnessTexture, uv).a;
         SetGltfSheen(p, sheen, sheenRoughness);
     }
+    // And so does the coat. A pass-through surface's coat is smooth, so only its weight matters.
+    float coatWeight = material.coatWeight;
+    if (coatWeight > 0.0 && material.coatWeightTexture != INVALIDDESCRIPTORHANDLE)
+        coatWeight *= SampleTexture(material.coatWeightTexture, uv).r;
+    SetGltfClearcoat(p, coatWeight, 0.0, p.geometryNormal);
     ApplyMaterialOverrides(p);
     return ThinDeltaTransmittance(p, faceCosine);
 }

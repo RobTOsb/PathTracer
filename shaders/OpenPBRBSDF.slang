@@ -1,4 +1,4 @@
-// OpenPBR base substrate for path tracing: evaluation, sampling and PDF.
+// OpenPBR BSDF for path tracing (base substrate, coat and fuzz): evaluation, sampling and PDF.
 //
 // API
 //   void           SetShadingBasis(p, T, B, N, Ns, wo)  fills the shading basis in the params
@@ -16,8 +16,10 @@
 //   and geometryNormal must be orthonormal, with normal mapping already applied and the
 //   tangent already pointing along the anisotropy direction. Internally everything is
 //   evaluated in the local frame where the normal is +Z and the tangent is +X.
+//   The coat has a normal of its own, geometryCoatNormal, which SetShadingBasis faces like the base's.
+//   Its lobe's cosine is the one from the coat normal.
 //   The side of geometryNormal that wo lies on decides inside versus outside:
-//     outside: the full base substrate applies.
+//     outside: the full surface applies.
 //     inside:  the viewer is inside a transmissive object, only the dielectric interface applies.
 //   If a normal map can tilt geometryNormal away from the viewer, bend it back when building
 //   the basis, otherwise an outside hit can be treated as inside.
@@ -27,7 +29,7 @@
 //   One-sample mixture over lobes, selected with probabilities from approximate albedos.
 //   The returned weight is Eval / Pdf using the full mixture PDF, so it is unbiased and can be
 //   combined with light sampling through MIS using OpenPBRPdf (or OpenPBREvalPdf).
-//   Specular reflection uses bounded VNDF sampling (Eto and Tokuyoshi 2023).
+//   Specular and coat reflection use bounded VNDF sampling (Eto and Tokuyoshi 2023).
 //   Specular transmission uses spherical cap VNDF sampling (Dupuy and Benyoub 2023), because
 //   the bounded cap is only valid for reflections.
 //   Diffuse and subsurface use cosine-weighted hemisphere sampling. On a thin wall the diffuse lobe's
@@ -41,12 +43,29 @@
 //   samples like the reflection. At zero roughness it is a delta lobe straight through
 //   (LOBE_DELTA_TRANSMISSION), which Eval and Pdf leave out; the sample's pdf is then the discrete
 //   probability of picking it, and its weight ThinDeltaTransmittance / pdf.
+//   The u.x shares are, in order: specular reflection, specular transmission, diffuse, coat, fuzz. The
+//   splits in PathTracer that aim u.x at the specular lobes rely on the first two coming first.
 //   Fuzz samples its LTC exactly (SampleFuzz), see the Fuzz section.
 //
+// Coat
+//   An isotropic dielectric GGX interface over an absorbing medium, layered on the base with weight
+//   coatWeight by albedo scaling: the base under it is scaled by (1 - E_c(wo)) and tinted by coatColour
+//   along the refracted path through the coat, coatColour^((1 / mu_i' + 1 / mu_o') / 2). Following the
+//   spec it also changes the base: its specular roughness is roughened (CoatedSpecularRoughness), its
+//   Fresnel sees the coat's IOR instead of the ambient one (SpecularIorRatio), and what it reflects is
+//   darkened by the light the coat reflects back down (CoatDarkening).
+//
 // Simplifications
-//   No coat or thin film, ambient IOR is 1.
-//   Fuzz sits directly on the base substrate and, like the spec, scales everything under it by
-//   1 - fuzzWeight * E_F(wo) only, not by the albedo towards wi as well.
+//   No thin film, ambient IOR is 1.
+//   The coat is isotropic (no coat_roughness_anisotropy). Seen from inside a transmissive object it is
+//   not there, and on a thin wall it is on the viewer's side, whichever that is.
+//   The coat changes the base's Fresnel but not its refraction direction, which stays that of the base's
+//   own IOR (as through a flat coat). Darkening applies to the base's reflection only; light the base
+//   transmits is neither darkened nor brightened by the inter-reflections.
+//   Under the coat, volumetric subsurface takes the coat's absorption as if it left the way it came in.
+//   Fuzz sits on top of the coated base and, like the spec, scales everything under it by
+//   1 - fuzzWeight * E_F(wo) only, not by the albedo towards wi as well. The coat likewise scales by
+//   1 - E_c(wo) only.
 //   Thin-walled specular transmission is the single-interface lobe above (as in glTF), not a slab with
 //   two interfaces.
 //   Subsurface without a radius is approximated by a Lambertian lobe under the dielectric interface. On a thin wall it
@@ -67,6 +86,7 @@ static const uint LOBE_DELTA_TRANSMISSION = 8;
 static const uint LOBE_DIFFUSE_TRANSMISSION = 16;
 static const uint LOBE_SUBSURFACE = 32;
 static const uint LOBE_FUZZ = 64;
+static const uint LOBE_COAT = 128;
 
 struct OpenPBRBaseParams
 {
@@ -93,6 +113,12 @@ struct OpenPBRBaseParams
     // the subsurface a scattering medium (LOBE_SUBSURFACE). Zero keeps the Lambertian approximation.
     float3 subsurfaceRadius;
 
+    float coatWeight;
+    float3 coatColour;
+    float coatRoughness;
+    float coatIor;
+    float coatDarkening;
+
     float fuzzWeight;
     float3 fuzzColour;
     float fuzzRoughness;
@@ -101,6 +127,7 @@ struct OpenPBRBaseParams
     float3 geometryTangent;
     float3 geometryBitangent;
     float3 geometryNormal;
+    float3 geometryCoatNormal;
 };
 
 struct BSDFSample
@@ -117,11 +144,13 @@ struct OpenPBRContext
     bool deltaTransmission; // thin-walled and smooth, see LOBE_DELTA_TRANSMISSION
     float3 wo;
     float2 alpha;
-    float eta;
+    float eta;        // IOR ratio across the interface, for the refraction direction
+    float fresnelEta; // the base's IOR ratio for its Fresnel, which the coat changes (SpecularIorRatio)
     float E;
     float probSpecR;
     float probSpecT;
     float probDiffuse;
+    float probCoat;
     float probFuzz;
 
     float fuzzE;    // white fuzz's directional albedo E_F(wo), 0 without fuzz or inside
@@ -132,6 +161,17 @@ struct OpenPBRContext
     float boundedB;     // lower bound of the bounded cap, b in Eto and Tokuyoshi 2023, Listing 1
     float reflPdfScale; // bounded VNDF reflection PDF divided by D(h), Listing 2
     float vndfPdfScale; // spherical cap VNDF PDF divided by D(m) * dot(wo, m), equation 7
+
+    // The coat, all of it unused without one or inside.
+    float3 coatN;          // geometryCoatNormal in the local frame
+    float coatCos;         // dot(wo, coatN)
+    float coatAlpha;
+    float coatE;           // the coat's directional albedo E_c(wo), 0 without a coat or inside
+    float coatLambdaO;     // the coat's lambdaO, boundedB and reflPdfScale, in a frame around coatN
+    float coatBoundedB;
+    float coatReflPdfScale;
+    float coatExponentO;   // CoatAbsorptionExponent at wo
+    float3 coatDarkening;  // CoatDarkening at wo, 1 without a coat
 };
 
 // Utilities
@@ -152,15 +192,49 @@ float3 ToWorld(OpenPBRBaseParams p, float3 v)
     return v.x * p.geometryTangent + v.y * p.geometryBitangent + v.z * p.geometryNormal;
 }
 
+// Orthonormal tangent and bitangent around a unit normal, Duff et al. 2017.
+void OrthonormalBasis(float3 n, out float3 t, out float3 b)
+{
+    float s = n.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (s + n.z);
+    float c = n.x * n.y * a;
+    t = float3(1.0 + s * n.x * n.x * a, s * c, -s * n.x);
+    b = float3(c, s + n.y * n.y * a, -n.y);
+}
+
+// A direction at cos(theta) z from the normal, for isotropic lobes that only see that angle.
+float3 IsotropicDirection(float z)
+{
+    return float3(sqrt(saturate(1.0 - z * z)), 0.0, z);
+}
+
 float3 TransmissionTint(OpenPBRBaseParams p)
 {
     return p.transmissionDepth > 0.0 ? float3(1.0, 1.0, 1.0) : p.transmissionColour;
 }
 
+// The coat's IOR, at least the ambient one.
+float CoatIor(OpenPBRBaseParams p)
+{
+    return max(p.coatIor, 1.0);
+}
+
+// Spec equation for the coat's roughening of the base's specular lobe: r'^4 = min(1, r^4 + 2 r_c^4) under
+// the coat, mixed in by its weight.
+float CoatedSpecularRoughness(OpenPBRBaseParams p)
+{
+    if (p.coatWeight <= 0.0)
+        return p.specularRoughness;
+    float r2 = p.specularRoughness * p.specularRoughness;
+    float c2 = p.coatRoughness * p.coatRoughness;
+    float roughened = sqrt(sqrt(min(1.0, r2 * r2 + 2.0 * c2 * c2)));
+    return lerp(p.specularRoughness, roughened, p.coatWeight);
+}
+
 // A thin wall that transmits as a delta lobe.
 bool HasDeltaTransmission(OpenPBRBaseParams p)
 {
-    return p.geometryThinWalled && p.specularRoughness <= 0.0 && p.transmissionWeight > 0.0;
+    return p.geometryThinWalled && CoatedSpecularRoughness(p) <= 0.0 && p.transmissionWeight > 0.0;
 }
 
 // A thin wall whose subsurface transmits diffusely to the other side.
@@ -260,17 +334,44 @@ float FresnelDielectric(float cosI, float eta)
     return 0.5 * (rs * rs + rp * rp);
 }
 
+// Fresnel reflectance at normal incidence.
+float FresnelF0(float eta)
+{
+    float F0 = (1.0 - eta) / (1.0 + eta);
+    return F0 * F0;
+}
+
+// Hemispherical albedo of a smooth dielectric, 2 integral of F(mu, eta) mu dmu, for eta >= 1: the spec's
+// fit, within 0.2% for eta in [1, 3].
+float FresnelHemisphericalAlbedo(float eta)
+{
+    return log((10893.0 * eta - 1438.2) / (-774.4 * eta * eta + 10212.0 * eta + 1.0));
+}
+
 // Spec equation [modulated_ior]: specularWeight scales F0 by altering the IOR ratio.
 float ModulatedIORRatio(float etaS, float specularWeight)
 {
-    float Fs = (1.0 - etaS) / (1.0 + etaS);
-    Fs *= Fs;
+    float Fs = FresnelF0(etaS);
     if (Fs < 1.0e-8)
         return 1.0;
     float xi = clamp(specularWeight, 0.0, 1.0 / Fs);
     float e = sign(etaS - 1.0) * sqrt(xi * Fs);
     e = clamp(e, -0.9999, 0.9999);
     return (1.0 + e) / (1.0 - e);
+}
+
+// The base's IOR ratio for its Fresnel, spec equation [specular_ior_ratio]: under the coat the base meets
+// the coat instead of the ambient medium. The ratio is inverted where the coat's IOR is the higher, so it
+// has no total internal reflection, then modulated by specularWeight.
+float SpecularIorRatio(OpenPBRBaseParams p)
+{
+    float eta = p.specularIor;
+    if (p.coatWeight > 0.0)
+    {
+        float coatIor = CoatIor(p);
+        eta = lerp(eta, coatIor > eta ? coatIor / eta : eta / coatIor, p.coatWeight);
+    }
+    return ModulatedIORRatio(eta, p.specularWeight);
 }
 
 // F82-tint metallic Fresnel (Kutz et al. 2021).
@@ -329,6 +430,91 @@ float3 EvalEON(float3 rho, float r, float3 wi, float3 wo)
     const float eps = 1.0e-7;
     float3 fMS = (rhoMS / PI) * max(eps, 1.0 - EFo) * max(eps, 1.0 - EFi) / max(eps, 1.0 - avgEF);
     return fSS + fMS;
+}
+
+// Coat: a white GGX dielectric of IOR coatIor on its own normal, over the base.
+
+// The coat's directional albedo E_c at cos(theta) mu from its normal.
+float CoatAlbedo(OpenPBRBaseParams p, float mu)
+{
+    return DielectricAlbedo(mu, p.coatRoughness, FresnelF0(CoatIor(p)));
+}
+
+// Half the coat colour's exponent for one crossing at cos(theta) mu from the coat normal: the path length
+// through the coat after refraction into it, relative to normal incidence, so two crossings at normal
+// incidence tint by coatColour.
+float CoatAbsorptionExponent(OpenPBRBaseParams p, float mu)
+{
+    float eta = CoatIor(p);
+    float muT = sqrt(saturate(1.0 - (1.0 - mu * mu) / (eta * eta)));
+    return 0.5 / max(muT, 1.0e-4);
+}
+
+// What the coat leaves to the base: 1 - E_c(wo) of the light, tinted by the coat colour along its path
+// through the coat, mixed in by the coat weight. coatE is E_c(wo) and exponentO wo's
+// CoatAbsorptionExponent. muI is wi's cosine from the coat normal when the light crosses the coat again
+// towards wi, 0 when it leaves through the other side.
+float3 CoatTransmittance(OpenPBRBaseParams p, float coatE, float exponentO, float muI)
+{
+    float3 transmitted = (1.0 - coatE).xxx;
+    if (any(p.coatColour < 1.0))
+        transmitted *= pow(max(p.coatColour, 1.0e-6), exponentO + (muI > 0.0 ? CoatAbsorptionExponent(p, muI) : 0.0));
+    return lerp(float3(1.0, 1.0, 1.0), transmitted, p.coatWeight);
+}
+
+// The base's albedo at normal incidence, its slabs' blended by their weights, for the coat's darkening.
+// fresnelEta is SpecularIorRatio(p).
+float3 BaseNormalAlbedo(OpenPBRBaseParams p, float fresnelEta)
+{
+    float F0 = FresnelF0(fresnelEta);
+    float3 diffuse = lerp(p.baseWeight * p.baseColour, p.subsurfaceColour, p.subsurfaceWeight);
+    float3 dielectric = F0 * p.specularColour + (1.0 - F0) * (1.0 - p.transmissionWeight) * diffuse;
+    float3 metal = p.specularWeight * p.baseWeight * p.baseColour;
+    return lerp(dielectric, metal, p.baseMetalness);
+}
+
+// Spec coat darkening at cos(theta) mu from the coat normal: of the light the base reflects, the coat
+// reflects K back down, so the base's albedo E_b becomes E_b (1 - K) / (1 - E_b K). K is the coat's internal
+// reflectance, the diffuse one for a rough base and the mirror one for a smooth base, mixed by an estimate
+// of the base's roughness. Mixed in by coatWeight * coatDarkening. fresnelEta and roughness are the
+// base's SpecularIorRatio and CoatedSpecularRoughness, which the callers have at hand.
+float3 CoatDarkening(OpenPBRBaseParams p, float mu, float fresnelEta, float roughness)
+{
+    float eta = CoatIor(p);
+    float Kr = 1.0 - (1.0 - FresnelHemisphericalAlbedo(eta)) / (eta * eta);
+    float Ks = FresnelDielectric(saturate(mu), eta);
+    float rDielectric = lerp(1.0, roughness, saturate(p.specularWeight * FresnelF0(p.specularIor)));
+    float K = lerp(Ks, Kr, lerp(rDielectric, roughness, p.baseMetalness));
+    float3 Eb = BaseNormalAlbedo(p, fresnelEta);
+    float3 darkening = (1.0 - K) / (1.0 - Eb * K);
+    return lerp(float3(1.0, 1.0, 1.0), darkening, p.coatWeight * p.coatDarkening);
+}
+
+// What the coat leaves to the base lobes towards wi: reflected ones cross it again at cos(theta) muI from
+// its normal and are darkened, transmitted ones leave through the other side.
+float3 CoatBaseScale(OpenPBRBaseParams p, OpenPBRContext c, bool reflected, float muI)
+{
+    if (p.coatWeight <= 0.0 || c.inside)
+        return float3(1.0, 1.0, 1.0);
+    if (!reflected)
+        return CoatTransmittance(p, c.coatE, c.coatExponentO, 0.0);
+    return CoatTransmittance(p, c.coatE, c.coatExponentO, max(muI, 1.0e-4)) * c.coatDarkening;
+}
+
+// The coat's reflection, white: f cos with the coat normal's cosine, and the pdf of sampling wi with
+// the coat's bounded VNDF.
+float EvalPdfCoat(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out float pdf)
+{
+    pdf = 0.0;
+    float cosI = dot(wi, c.coatN);
+    if (cosI <= 0.0)
+        return 0.0;
+    float3 h = normalize(wi + c.wo);
+    float2 alpha = c.coatAlpha.xx;
+    float ndf = GGXD(IsotropicDirection(dot(h, c.coatN)), alpha);
+    pdf = ndf * c.coatReflPdfScale;
+    float F = FresnelDielectric(saturate(dot(c.wo, h)), CoatIor(p));
+    return F * ndf * GGXG2(IsotropicDirection(cosI), c.coatLambdaO, alpha) / (4.0 * c.coatCos);
 }
 
 // Fuzz: Zeltner, Burley and Chiang 2022, "Practical Multiple-Scattering Sheen Using Linearly Transformed
@@ -466,7 +652,7 @@ float EvalPdfGGXTransmission(float3 wi, OpenPBRContext c, out float pdf)
     // Spherical cap VNDF density of h (woDotH > 0 here) times the refraction Jacobian.
     float jacobian = eta * eta * abs(wiDotH) * invDenom2;
     pdf = ndf * woDotH * c.vndfPdfScale * jacobian;
-    float F = FresnelDielectric(woDotH, eta);
+    float F = FresnelDielectric(woDotH, c.fresnelEta);
     return abs(wiDotH * woDotH) / abs(wi.z * wo.z) * (1.0 - F) * GGXG2(wi, c.lambdaO, c.alpha) * ndf * invDenom2;
 }
 
@@ -479,30 +665,37 @@ float EvalPdfGGXThinTransmission(float3 wi, OpenPBRContext c, out float pdf)
     float3 h = normalize(wr + wo);
     float ndf = GGXD(h, c.alpha);
     pdf = ndf * c.reflPdfScale;
-    float F = FresnelDielectric(saturate(dot(wo, h)), c.eta);
+    float F = FresnelDielectric(saturate(dot(wo, h)), c.fresnelEta);
     return (1.0 - F) * ndf * GGXG2(wr, c.lambdaO, c.alpha) / (4.0 * wr.z * wo.z);
 }
 
 // What a smooth thin wall lets through straight along -wo, cosTheta from its normal: the delta
-// lobe's integral, so its sample weight times the probability of picking it.
+// lobe's integral, so its sample weight times the probability of picking it. The coat is taken at
+// the same angle.
 float3 ThinDeltaTransmittance(OpenPBRBaseParams p, float cosTheta)
 {
-    float eta = ModulatedIORRatio(p.specularIor, p.specularWeight);
-    float F = FresnelDielectric(saturate(cosTheta), eta);
-    return FuzzThroughput(p, cosTheta) * (1.0 - p.baseMetalness) * p.transmissionWeight * (1.0 - F) * TransmissionTint(p);
+    float mu = saturate(cosTheta);
+    float F = FresnelDielectric(mu, SpecularIorRatio(p));
+    float3 transmittance = FuzzThroughput(p, cosTheta) * (1.0 - p.baseMetalness) * p.transmissionWeight * (1.0 - F) *
+                           TransmissionTint(p);
+    if (p.coatWeight > 0.0)
+        transmittance *= CoatTransmittance(p, CoatAlbedo(p, mu), CoatAbsorptionExponent(p, mu), 0.0);
+    return transmittance;
 }
 
 OpenPBRContext OpenPBRSetup(OpenPBRBaseParams p, float3 woWorld)
 {
     float3 wo = ToLocal(p, woWorld);
+    float roughness = CoatedSpecularRoughness(p);
     OpenPBRContext c;
     c.inside = wo.z < 0.0 && !p.geometryThinWalled;
-    c.deltaTransmission = p.geometryThinWalled && p.specularRoughness <= 0.0;
+    c.deltaTransmission = p.geometryThinWalled && roughness <= 0.0;
     c.wo = c.inside ? -wo : wo;
-    c.alpha = GGXAlpha(p.specularRoughness, p.specularRoughnessAnisotropy);
+    c.alpha = GGXAlpha(roughness, p.specularRoughnessAnisotropy);
 
     float etaS = ModulatedIORRatio(p.specularIor, p.specularWeight);
     c.eta = c.inside ? 1.0 / etaS : etaS;
+    c.fresnelEta = c.inside ? c.eta : SpecularIorRatio(p);
 
     float t = length(float3(c.alpha * c.wo.xy, c.wo.z)); // length of the stretched view vector
     float k = BoundedCapK(c.wo, c.alpha);
@@ -515,6 +708,16 @@ OpenPBRContext OpenPBRSetup(OpenPBRBaseParams p, float3 woWorld)
     c.fuzzAInv = 1.0;
     c.fuzzBInv = 0.0;
     c.probFuzz = 0.0;
+    c.probCoat = 0.0;
+    c.coatN = float3(0.0, 0.0, 1.0);
+    c.coatCos = c.wo.z;
+    c.coatAlpha = 1.0;
+    c.coatE = 0.0;
+    c.coatLambdaO = 0.0;
+    c.coatBoundedB = 0.0;
+    c.coatReflPdfScale = 0.0;
+    c.coatExponentO = 0.0;
+    c.coatDarkening = float3(1.0, 1.0, 1.0);
     if (c.inside)
     {
         c.E = 0.0;
@@ -533,9 +736,29 @@ OpenPBRContext OpenPBRSetup(OpenPBRBaseParams p, float3 woWorld)
         c.fuzzBInv = FuzzBInv(mu, r);
     }
 
-    float F0 = (1.0 - etaS) / (1.0 + etaS);
-    F0 *= F0;
-    c.E = DielectricAlbedo(c.wo.z, p.specularRoughness, F0);
+    // What the coat leaves to the base's reflected and transmitted lobes, as wo sees it.
+    float3 coatReflected = float3(1.0, 1.0, 1.0);
+    float3 coatTransmitted = float3(1.0, 1.0, 1.0);
+    if (p.coatWeight > 0.0)
+    {
+        c.coatN = ToLocal(p, p.geometryCoatNormal);
+        c.coatCos = max(dot(c.wo, c.coatN), 1.0e-4);
+        float a = GGXAlpha(p.coatRoughness, 0.0).x;
+        float3 v = IsotropicDirection(c.coatCos);
+        float coatT = length(float3(a * v.xy, v.z));
+        float coatK = BoundedCapK(v, a.xx);
+        c.coatAlpha = a;
+        c.coatLambdaO = GGXLambda(v, a.xx);
+        c.coatBoundedB = coatK * v.z / coatT;
+        c.coatReflPdfScale = 1.0 / (2.0 * (coatK * v.z + coatT));
+        c.coatE = CoatAlbedo(p, c.coatCos);
+        c.coatExponentO = CoatAbsorptionExponent(p, c.coatCos);
+        c.coatDarkening = CoatDarkening(p, c.coatCos, c.fresnelEta, roughness);
+        coatReflected = CoatTransmittance(p, c.coatE, c.coatExponentO, c.coatCos) * c.coatDarkening;
+        coatTransmitted = CoatTransmittance(p, c.coatE, c.coatExponentO, 0.0);
+    }
+
+    c.E = DielectricAlbedo(c.wo.z, roughness, FresnelF0(c.fresnelEta));
 
     float M = p.baseMetalness;
     float T = p.transmissionWeight;
@@ -544,20 +767,23 @@ OpenPBRContext OpenPBRSetup(OpenPBRBaseParams p, float3 woWorld)
     float3 metalF = p.specularWeight * FresnelF82Tint(c.wo.z, p.baseWeight * p.baseColour, p.specularColour);
     float3 diffuseAlbedo = lerp(p.baseWeight * p.baseColour, p.subsurfaceColour, S);
 
-    float wSpecR = (1.0 - M) * c.E * Luminance(p.specularColour) + M * Luminance(metalF);
-    float wSpecT = (1.0 - M) * T * (1.0 - c.E) * Luminance(TransmissionTint(p));
-    float wDiffuse = (1.0 - M) * (1.0 - T) * (1.0 - c.E) * Luminance(diffuseAlbedo);
+    float coatReflectedLuminance = Luminance(coatReflected);
+    float wSpecR = ((1.0 - M) * c.E * Luminance(p.specularColour) + M * Luminance(metalF)) * coatReflectedLuminance;
+    float wSpecT = (1.0 - M) * T * (1.0 - c.E) * Luminance(TransmissionTint(p) * coatTransmitted);
+    float wDiffuse = (1.0 - M) * (1.0 - T) * (1.0 - c.E) * Luminance(diffuseAlbedo) * coatReflectedLuminance;
+    float wCoat = p.coatWeight * c.coatE;
 
     // The fuzz on top, with what it lets through to the rest.
     float wFuzz = p.fuzzWeight * c.fuzzE * Luminance(p.fuzzColour);
     float fuzzThroughput = 1.0 - p.fuzzWeight * c.fuzzE;
 
-    float total = fuzzThroughput * (wSpecR + wSpecT + wDiffuse) + wFuzz;
+    float total = fuzzThroughput * (wSpecR + wSpecT + wDiffuse + wCoat) + wFuzz;
     float invTotal = total > 0.0 ? 1.0 / total : 0.0;
     float baseScale = fuzzThroughput * invTotal;
     c.probSpecR = wSpecR * baseScale;
     c.probSpecT = wSpecT * baseScale;
     c.probDiffuse = wDiffuse * baseScale;
+    c.probCoat = wCoat * baseScale;
     c.probFuzz = wFuzz * invTotal;
     return c;
 }
@@ -577,6 +803,16 @@ float3 OpenPBREvalPdfLocal(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out
     // 1 inside, where there is no fuzz.
     float fuzzThroughput = 1.0 - p.fuzzWeight * c.fuzzE;
 
+    // The coat reflects about its own normal, which can see wi above it where the base sees it below.
+    // Never inside, where probCoat is 0.
+    float3 fCoat = float3(0.0, 0.0, 0.0);
+    if (c.probCoat > 0.0)
+    {
+        float coatPdf;
+        fCoat = (fuzzThroughput * p.coatWeight * EvalPdfCoat(p, c, wi, coatPdf)).xxx;
+        pdf = c.probCoat * coatPdf;
+    }
+
     if (wi.z < 0.0)
     {
         // Thin-walled subsurface seen from the other side, never inside.
@@ -586,28 +822,29 @@ float3 OpenPBREvalPdfLocal(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out
             float cosI = -wi.z;
             fDiffuseT = (1.0 - M) * (1.0 - T) * S * 0.5 * (1.0 + p.subsurfaceScatterAnisotropy) * (1.0 - c.E) *
                         p.subsurfaceColour * (cosI / PI);
-            pdf = c.probDiffuse * DiffuseTransmittedShare(p) * cosI / PI;
+            pdf += c.probDiffuse * DiffuseTransmittedShare(p) * cosI / PI;
         }
+        float3 coatScale = CoatBaseScale(p, c, false, 0.0);
         if (c.deltaTransmission)
-            return fuzzThroughput * fDiffuseT;
+            return fuzzThroughput * coatScale * fDiffuseT + fCoat;
         float transmissionPdf;
         float fT = (p.geometryThinWalled ? EvalPdfGGXThinTransmission(wi, c, transmissionPdf)
                                         : EvalPdfGGXTransmission(wi, c, transmissionPdf)) * abs(wi.z);
         pdf += c.probSpecT * transmissionPdf;
         if (c.inside)
             return fT.xxx;
-        return fuzzThroughput * ((1.0 - M) * T * TransmissionTint(p) * fT + fDiffuseT);
+        return fuzzThroughput * coatScale * ((1.0 - M) * T * TransmissionTint(p) * fT + fDiffuseT) + fCoat;
     }
 
     float3 h = normalize(wi + wo);
     float ndf = GGXD(h, c.alpha);
 
     // At most one of the shares is nonzero, the first only on thin walls, the second only on solid ones.
-    pdf = c.probSpecR * ndf * c.reflPdfScale + c.probDiffuse * (1.0 - DiffuseTransmittedShare(p) - SubsurfaceShare(p)) * wi.z / PI;
+    pdf += c.probSpecR * ndf * c.reflPdfScale + c.probDiffuse * (1.0 - DiffuseTransmittedShare(p) - SubsurfaceShare(p)) * wi.z / PI;
 
     float cosH = saturate(dot(wo, h));
     float microfacet = ndf * GGXG2(wi, c.lambdaO, c.alpha) / (4.0 * wi.z * wo.z);
-    float Fd = FresnelDielectric(cosH, c.eta);
+    float Fd = FresnelDielectric(cosH, c.fresnelEta);
 
     if (c.inside)
         return (Fd * microfacet * wi.z).xxx;
@@ -624,7 +861,8 @@ float3 OpenPBREvalPdfLocal(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out
     // Spec mix tree. The translucent slab only contributes fSpecR in the upper hemisphere.
     float3 fOpaqueBase = fSpecR + lerp(fDiffuse, fSubsurface, S);
     float3 fDielectricBase = lerp(fOpaqueBase, fSpecR, T);
-    float3 fCos = fuzzThroughput * lerp(fDielectricBase, fMetal, M) * wi.z;
+    float3 coatScale = CoatBaseScale(p, c, true, dot(wi, c.coatN));
+    float3 fCos = fuzzThroughput * coatScale * lerp(fDielectricBase, fMetal, M) * wi.z + fCoat;
 
     // The fuzz lobe already includes the cosine.
     if (c.probFuzz > 0.0)
@@ -690,6 +928,18 @@ BSDFSample OpenPBRSample(OpenPBRBaseParams p, OpenPBRContext c, float3 u)
         wi = SampleFuzz(wo, c.fuzzAInv, c.fuzzBInv, SampleCosineHemisphere(u.yz));
         lobe = LOBE_FUZZ;
     }
+    else if (u.x >= 1.0 - c.probFuzz - c.probCoat)
+    {
+        // In a frame around the coat normal, where wo is at coatCos.
+        float3 t, b;
+        OrthonormalBasis(c.coatN, t, b);
+        float3 v = float3(dot(wo, t), dot(wo, b), c.coatCos);
+        float3 w = SampleGGXReflectionBounded(v, c.coatAlpha.xx, c.coatBoundedB, u.yz);
+        if (w.z <= 0.0)
+            return s;
+        wi = w.x * t + w.y * b + w.z * c.coatN;
+        lobe = LOBE_COAT;
+    }
     else if (c.probDiffuse > 0.0)
     {
         wi = SampleCosineHemisphere(u.yz);
@@ -708,7 +958,7 @@ BSDFSample OpenPBRSample(OpenPBRBaseParams p, OpenPBRContext c, float3 u)
             float S = (1.0 - p.baseMetalness) * (1.0 - p.transmissionWeight) * p.subsurfaceWeight;
             s.wi = ToWorld(p, float3(wi.xy, -wi.z));
             s.pdf = probability * wi.z / PI;
-            s.weight = ((1.0 - p.fuzzWeight * c.fuzzE) * S * (1.0 - c.E) / probability).xxx;
+            s.weight = (1.0 - p.fuzzWeight * c.fuzzE) * S * (1.0 - c.E) / probability * CoatBaseScale(p, c, true, c.coatCos);
             s.lobe = LOBE_SUBSURFACE;
             return s;
         }
@@ -766,8 +1016,19 @@ bool GeometricallyConsistent(OpenPBRBaseParams p, float3 Ng, float3 wi, float3 w
     return gi != 0.0 && ((gi * go > 0.0) == (si * so > 0.0));
 }
 
+// A normal-mapped normal n bent so the viewer along wo stays on the same side of it as of the vertex
+// normal, side being that side's sign.
+float3 FaceViewer(float3 n, float3 wo, float side)
+{
+    const float eps = 0.01;
+    n = normalize(n);
+    float d = dot(n, wo) * side;
+    return d < eps ? normalize(n - side * wo * (d - eps)) : n;
+}
+
 // Builds the shading basis in the params from the interpolated vertex frame and the
-// normal-mapped shading normal. Call once per hit, before OpenPBRSetup.
+// normal-mapped shading normal. Call once per hit, before OpenPBRSetup. The coat normal already in the
+// params is turned to N's side and faced the same way.
 //
 // T, B, N  interpolated vertex tangent, bitangent and normal (world space)
 // Ns       shading normal from the normal map (world space), pass N if there is no map
@@ -775,12 +1036,8 @@ bool GeometricallyConsistent(OpenPBRBaseParams p, float3 Ng, float3 wi, float3 w
 void SetShadingBasis(inout OpenPBRBaseParams p, float3 T, float3 B, float3 N, float3 Ns, float3 wo)
 {
     // Keep the viewer on the same side of Ns as of the vertex normal.
-    const float eps = 0.01;
-    Ns = normalize(Ns);
     float side = dot(N, wo) >= 0.0 ? 1.0 : -1.0;
-    float d = dot(Ns, wo) * side;
-    if (d < eps)
-        Ns = normalize(Ns - side * wo * (d - eps));
+    Ns = FaceViewer(Ns, wo, side);
 
     // Make the tangent perpendicular to Ns, falling back to the bitangent if they are parallel.
     float3 t = T - Ns * dot(Ns, T);
@@ -790,4 +1047,10 @@ void SetShadingBasis(inout OpenPBRBaseParams p, float3 T, float3 B, float3 N, fl
     p.geometryNormal = Ns;
     p.geometryTangent = normalize(t);
     p.geometryBitangent = cross(Ns, p.geometryTangent);
+
+    if (p.coatWeight > 0.0)
+    {
+        float3 Nc = p.geometryCoatNormal;
+        p.geometryCoatNormal = FaceViewer(dot(Nc, N) < 0.0 ? -Nc : Nc, wo, side);
+    }
 }

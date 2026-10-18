@@ -13,7 +13,7 @@
 // OpenPBR's (1 - E(wo)) like the diffuse lobe, the other side by nothing. Probes go along the normal only
 // and the profile ignores the medium's anisotropy. Distances are sampled in one channel, weighted by the
 // pdf of all three.
-import OpenPBRBaseSubstrate;
+import OpenPBRBSDF;
 import PathTracer.Geometry;
 import PathTracer.LightSampling;
 import PathTracer.Math;

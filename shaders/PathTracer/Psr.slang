@@ -1,6 +1,6 @@
 // Primary surface replacement: follows mirrors and glass in front of the camera so the DLSS-RR
 // guides describe the surface seen through them.
-import OpenPBRBaseSubstrate;
+import OpenPBRBSDF;
 import PathTracer.Guides;
 import PathTracer.RayTracing;
 import PathTracer.Resources;
@@ -14,26 +14,37 @@ float2 SpecularFractions(OpenPBRBaseParams p)
     float T = p.transmissionWeight;
     float3 baseColour = p.baseWeight * p.baseColour;
 
-    float etaS = ModulatedIORRatio(p.specularIor, p.specularWeight);
-    float F0 = (1.0 - etaS) / (1.0 + etaS);
-    F0 *= F0;
+    float F0 = FresnelF0(SpecularIorRatio(p));
 
     // F82-tint reflects baseColour head on.
     float specular = (1.0 - M) * F0 * Luminance(p.specularColour) + M * p.specularWeight * Luminance(baseColour);
     float diffuse = (1.0 - M) * (1.0 - F0) * (1.0 - T) * Luminance(lerp(baseColour, p.subsurfaceColour, p.subsurfaceWeight));
     float transmission = (1.0 - M) * (1.0 - F0) * T * Luminance(TransmissionTint(p));
-    // Head-on fuzz over all of it.
+    // Head-on coat over the base, then fuzz over all of it.
+    float coat = 0.0;
+    if (p.coatWeight > 0.0)
+    {
+        float coatAlbedo = CoatAlbedo(p, 1.0);
+        float exponent = CoatAbsorptionExponent(p, 1.0);
+        float3 transmitted = CoatTransmittance(p, coatAlbedo, exponent, 0.0);
+        float reflected =
+                Luminance(CoatTransmittance(p, coatAlbedo, exponent, 1.0) * CoatDarkening(p, 1.0, SpecularIorRatio(p), CoatedSpecularRoughness(p)));
+        specular *= reflected;
+        diffuse *= reflected;
+        transmission *= Luminance(transmitted);
+        coat = p.coatWeight * coatAlbedo;
+    }
     float fuzzAlbedo = p.fuzzWeight > 0.0 ? p.fuzzWeight * FuzzAlbedo(1.0, FuzzRoughness(p)) : 0.0;
     float fuzz = fuzzAlbedo * Luminance(p.fuzzColour);
     float under = 1.0 - fuzzAlbedo;
-    return under * float2(specular, transmission) / max(under * (specular + transmission + diffuse) + fuzz, 1.0e-4);
+    return under * float2(specular, transmission) / max(under * (specular + transmission + diffuse + coat) + fuzz, 1.0e-4);
 }
 
 bool IsPsrEvent(OpenPBRBaseParams p, OpenPBRContext ctx, uint lobe, out float fraction)
 {
     fraction = 1.0;
     bool reflection = lobe == LOBE_SPECULAR_REFLECTION;
-    if (!(reflection || lobe == LOBE_SPECULAR_TRANSMISSION) || p.specularRoughness > g_Frame.psrMaxRoughness)
+    if (!(reflection || lobe == LOBE_SPECULAR_TRANSMISSION) || CoatedSpecularRoughness(p) > g_Frame.psrMaxRoughness)
         return false;
     if (ctx.inside)
         return reflection == (FresnelDielectric(ctx.wo.z, ctx.eta) >= 0.5);
@@ -53,11 +64,11 @@ float3 PsrEventThroughput(OpenPBRBaseParams p, OpenPBRContext ctx, float3 wo, bo
     if (reflection)
     {
         PrimaryGuides reflectance;
-        ReflectanceGuides(p, wo, reflectance);
+        ReflectanceGuides(p, ctx, wo, reflectance);
         return reflectance.specularAlbedo;
     }
     return (1.0 - p.fuzzWeight * ctx.fuzzE) * (1.0 - p.baseMetalness) * p.transmissionWeight * (1.0 - ctx.E) *
-           TransmissionTint(p);
+           TransmissionTint(p) * CoatBaseScale(p, ctx, false, 0.0);
 }
 
 // First-order change of a ray (Igehy 1999): of its point on the surface it last met, and of its direction.
@@ -286,8 +297,8 @@ float3 ApplySpecularChain(SpecularChain chain, float3 v)
 // at a surface of geometric normal endNg. A chain with a motion vector through it stands unless it
 // shrinks the surface's image past psrMaxMinification; one without, unless an event on the way is curved
 // enough to smear the virtual image. Returns whether it did.
-bool ReplacePrimarySurface(SpecularChain chain, OpenPBRBaseParams surface, float curvature, float3 endDir, float3 endNg, float3 wo,
-                           float3 cameraDir, inout PrimaryGuides guides)
+bool ReplacePrimarySurface(SpecularChain chain, OpenPBRBaseParams surface, OpenPBRContext ctx, float curvature, float3 endDir,
+                           float3 endNg, float3 wo, float3 cameraDir, inout PrimaryGuides guides)
 {
     float pathLength = chain.primaryDistance + chain.length;
     float2 motion;
@@ -302,16 +313,16 @@ bool ReplacePrimarySurface(SpecularChain chain, OpenPBRBaseParams surface, float
     // The chain's transform is a rotation or reflection, which preserves the angle between wo and the
     // normal, so the reflectance seen in virtual space is the real one.
     PrimaryGuides seen;
-    ReflectanceGuides(surface, wo, seen);
+    ReflectanceGuides(surface, ctx, wo, seen);
 
     // What the primary surface shows of the surface comes scaled by the chain's throughput, on top of
     // the primary's own (small) diffuse part.
     guides.position = float4(guides.position.xyz + cameraDir * chain.length, 1.0);
     guides.normal = normalize(ApplySpecularChain(chain, surface.geometryNormal));
-    guides.roughness = surface.specularRoughness;
+    guides.roughness = GuideRoughness(surface, ctx);
     guides.diffuseAlbedo += chain.throughput * seen.diffuseAlbedo;
     guides.specularAlbedo = lerp(guides.specularAlbedo, chain.throughput * seen.specularAlbedo, chain.primaryFraction);
-    guides.specularHitDistance = InitialSpecularHitDistance(surface.specularRoughness);
+    guides.specularHitDistance = InitialSpecularHitDistance(guides.roughness);
     // The chain's rotations and reflections keep the viewer on the same side of the surface.
     guides.curvature = curvature;
     return true;

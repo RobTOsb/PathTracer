@@ -1,5 +1,5 @@
 // DLSS Ray Reconstruction guides for the primary surface: albedos, normal, hit distance, motion.
-import OpenPBRBaseSubstrate;
+import OpenPBRBSDF;
 import PathTracer.Math;
 import PathTracer.RayTracing;
 import PathTracer.Resources;
@@ -66,22 +66,39 @@ float4 SpecularVirtualPosition(PrimaryGuides g, float3 viewDir, float hitDistanc
     return float4(g.reflector.xyz * inverseImageDistance + viewDir * dominantFactor, inverseImageDistance);
 }
 
-// Directional reflectance of an OpenPBR base, split into its diffuse and specular parts. Fuzz is broad
-// enough to count as diffuse.
-void ReflectanceGuides(OpenPBRBaseParams p, float3 wo, inout PrimaryGuides g)
+// The specular guides follow the coat where it reflects more than the base's specular lobe.
+bool CoatLeadsGuides(OpenPBRContext ctx)
+{
+    return ctx.probCoat > ctx.probSpecR;
+}
+
+// The roughness of the lobe the specular guides follow.
+float GuideRoughness(OpenPBRBaseParams p, OpenPBRContext ctx)
+{
+    return CoatLeadsGuides(ctx) ? p.coatRoughness : CoatedSpecularRoughness(p);
+}
+
+// Directional reflectance of an OpenPBR surface, split into its diffuse and specular parts. Fuzz is broad
+// enough to count as diffuse, the coat is specular and takes its terms from the context.
+void ReflectanceGuides(OpenPBRBaseParams p, OpenPBRContext ctx, float3 wo, inout PrimaryGuides g)
 {
     float M = p.baseMetalness;
     float3 baseColour = p.baseWeight * p.baseColour;
 
-    float etaS = ModulatedIORRatio(p.specularIor, p.specularWeight);
-    float dielectricF0 = (1.0 - etaS) / (1.0 + etaS);
-    dielectricF0 *= dielectricF0;
+    float dielectricF0 = FresnelF0(SpecularIorRatio(p));
     float3 F0 = lerp(dielectricF0 * p.specularColour, p.specularWeight * baseColour, M);
 
     float NdotV = dot(p.geometryNormal, wo);
-    float roughness = p.specularRoughness;
+    float roughness = CoatedSpecularRoughness(p);
     g.specularAlbedo = EnvBRDFApprox2(F0, roughness * roughness, NdotV);
     g.diffuseAlbedo = (1.0 - M) * (1.0 - p.transmissionWeight) * lerp(baseColour, p.subsurfaceColour, p.subsurfaceWeight);
+    if (p.coatWeight > 0.0)
+    {
+        float3 under = CoatBaseScale(p, ctx, true, ctx.coatCos);
+        g.specularAlbedo = p.coatWeight * ctx.coatE + under * g.specularAlbedo;
+        g.diffuseAlbedo *= under;
+    }
+    
     if (p.fuzzWeight > 0.0)
     {
         float fuzzAlbedo = p.fuzzWeight * FuzzAlbedo(saturate(NdotV), FuzzRoughness(p));

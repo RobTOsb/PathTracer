@@ -53,7 +53,7 @@ struct AtmosphereSettings
 	float altitudeKm = 0.0f; // of the scene's y = 0 above the ground
 	// The scene's air is this many times denser than real air at its altitude, so that its haze and
 	// light shafts show at the scale of a building. 1 is physical.
-	float aerialPerspectiveScale = 10.0f;
+	float aerialPerspectiveScale = 1.0f;
 	// Path segments (1 = camera rays only) that gather the sunlight the air scatters into them; the
 	// air only dims the later ones.
 	int inScatterSegments = 1;
@@ -131,7 +131,7 @@ struct RenderSettings
 	// Curved mirrors and glass keep PSR too, with motion vectors traced through them by ray differentials,
 	// unless they shrink the image of the surface they show by more than psrMaxMinification (linear).
 	bool psrCurvedSurfaces = true;
-	float psrMaxMinification = 4.0f;
+	float psrMaxMinification = 2.0f;
 	// Surfaces at most this rough keep last frame's specular hit distance in frames whose path took
 	// the diffuse lobe, so the guide does not flicker between a distance and none.
 	bool holdSpecularHitDistance = true;

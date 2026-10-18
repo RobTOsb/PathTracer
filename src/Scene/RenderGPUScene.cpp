@@ -228,7 +228,10 @@ namespace
 									  &material.subsurfaceScaleTexture,
 									  &material.anisotropyTexture,
 									  &material.sheenColourTexture,
-									  &material.sheenRoughnessTexture })
+									  &material.sheenRoughnessTexture,
+									  &material.coatWeightTexture,
+									  &material.coatRoughnessTexture,
+									  &material.coatNormalTexture })
 			{
 				apply(*texture);
 			}
@@ -610,7 +613,10 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 								 material.subsurfaceScaleTexture,
 								 material.anisotropyTexture,
 								 material.sheenColourTexture,
-								 material.sheenRoughnessTexture })
+								 material.sheenRoughnessTexture,
+								 material.coatWeightTexture,
+								 material.coatRoughnessTexture,
+								 material.coatNormalTexture })
 		{
 			if (!validTexture(texture))
 			{
@@ -1069,12 +1075,36 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 																		  "Material_Anisotropy",
 																		  batch)
 														  : INVALIDDESCRIPTORHANDLE;
+		// KHR_materials_clearcoat as OpenPBR coat. The weight and roughness textures are often one image
+		// (R and G), which then shares its upload.
+		gpu.coatWeightTexture = INVALIDDESCRIPTORHANDLE;
+		gpu.coatRoughnessTexture = INVALIDDESCRIPTORHANDLE;
+		gpu.coatNormalTexture = INVALIDDESCRIPTORHANDLE;
+		gpu.coatNormalScale = 1.0f;
+		if (material.HasClearcoat())
+		{
+			gpu.coatWeight = std::clamp(material.GetClearcoat(), 0.0f, 1.0f);
+			gpu.coatRoughness = std::clamp(material.GetClearcoatRoughness(), 0.0f, 1.0f);
+			gpu.coatNormalScale = material.GetClearcoatNormalScale();
+			gpu.coatWeightTexture =
+					UploadTexture(material.GetClearcoatTexture(), Format::R8G8B8A8_UNORM, "Material_Clearcoat", batch);
+			gpu.coatRoughnessTexture = UploadTexture(material.GetClearcoatRoughnessTexture(),
+													 Format::R8G8B8A8_UNORM,
+													 "Material_ClearcoatRoughness",
+													 batch);
+			gpu.coatNormalTexture = UploadTexture(material.GetClearcoatNormalTexture(),
+												  Format::R8G8B8A8_UNORM,
+												  "Material_ClearcoatNormal",
+												  batch);
+		}
 		// Only the file makes a material thin-walled (EXT_materials_thin_wall). Anisotropy stretches the
-		// lobe even at roughness 0, so such a wall is never a delta pass-through.
+		// lobe even at roughness 0, and a rough coat roughens the base, so such a wall is never a delta
+		// pass-through.
 		if (material.IsThinWalled())
 		{
 			gpu.transmissionFlags |= TRANSMISSION_THIN_WALLED;
-			if (gpu.transmission > 0.0f && gpu.roughness <= 0.0f && anisotropyStrength <= 0.0f)
+			if (gpu.transmission > 0.0f && gpu.roughness <= 0.0f && anisotropyStrength <= 0.0f &&
+				(gpu.coatWeight <= 0.0f || gpu.coatRoughness <= 0.0f))
 				gpu.transmissionFlags |= TRANSMISSION_PASS_THROUGH;
 		}
 		gpu.attenuationColour = float3(1.0f, 1.0f, 1.0f);
@@ -1195,6 +1225,10 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 	fallback.anisotropyTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.sheenColourTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.sheenRoughnessTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.coatNormalScale = 1.0f;
+	fallback.coatWeightTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.coatRoughnessTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.coatNormalTexture = INVALIDDESCRIPTORHANDLE;
 	materials.push_back(PackGpuMaterial(fallback));
 }
 

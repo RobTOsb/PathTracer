@@ -1,4 +1,4 @@
-import OpenPBRBaseSubstrate;
+import OpenPBRBSDF;
 import PathTracer.Resources;
 import PathTracer.Math;
 import PathTracer.Random;
@@ -207,13 +207,13 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             uint lobe = LOBE_NONE;
             const float3 dirIn = dir;
             float3 passTransmittance = float3(1.0, 1.0, 1.0);
-            // The two branches cover the specular lobes only, so nothing with a diffuse or fuzz lobe splits.
+            // The two branches cover the specular lobes only, so nothing with a diffuse, coat or fuzz lobe splits.
             bool splittable = fromCamera && !lastSegment && splits < g_Frame.glassReflectionSplits && ctx.probDiffuse <= 0.0 &&
-                              ctx.probFuzz <= 0.0 && ctx.probSpecR > 0.0 && ctx.probSpecR < 1.0;
+                              ctx.probCoat <= 0.0 && ctx.probFuzz <= 0.0 && ctx.probSpecR > 0.0 && ctx.probSpecR < 1.0;
             // A thin pane: its reflection now, what is behind it deferred.
             bool paneSplit = splittable && deltaTransmission;
             // Solid glass: the refraction now, which the guides' chain follows, its reflection deferred.
-            bool glassSplit = splittable && !mat.geometryThinWalled && !ctx.inside && mat.specularRoughness <= 0.0;
+            bool glassSplit = splittable && !mat.geometryThinWalled && !ctx.inside && CoatedSpecularRoughness(mat) <= 0.0;
             if (paneSplit || glassSplit)
                 ++splits;
 
@@ -247,12 +247,12 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             {
                 camera.guides.position = float4(hit.position, 1.0);
                 camera.guides.normal = mat.geometryNormal;
-                camera.guides.roughness = mat.specularRoughness;
+                camera.guides.roughness = GuideRoughness(mat, ctx);
                 // Until the path continues with a specular reflection: no reflection data, or last frame's.
-                camera.guides.specularHitDistance = InitialSpecularHitDistance(mat.specularRoughness);
+                camera.guides.specularHitDistance = InitialSpecularHitDistance(camera.guides.roughness);
                 camera.guides.curvature = ViewedCurvature(hit, wo);
                 camera.guides.hasChainMotion = false;
-                ReflectanceGuides(mat, wo, camera.guides);
+                ReflectanceGuides(mat, ctx, wo, camera.guides);
                 camera.guides.diffuseAlbedo *= camera.transmittance;
                 camera.guides.specularAlbedo *= camera.transmittance;
             }
@@ -268,7 +268,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 deferred.coneWidth = cone.width;
 
                 PrimaryGuides seen;
-                ReflectanceGuides(mat, wo, seen);
+                ReflectanceGuides(mat, ctx, wo, seen);
                 paneHitPending = AddPaneReflection(camera.panes, camera.transmittance * seen.specularAlbedo, camera.distance,
                                                    ViewedCurvature(hit, wo)) &&
                                  bs.lobe != LOBE_NONE;
@@ -302,8 +302,9 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             }
             else if (continuePath)
             {
-                // A pane's reflection is not its guides' (what is behind it is), see PaneReflection.
-                specularReflection = !paneSplit && bs.lobe == LOBE_SPECULAR_REFLECTION;
+                // A pane's reflection is not its guides' (what is behind it is), see PaneReflection. The
+                // guides' reflection is the coat's or the base's, whichever reflects more.
+                specularReflection = !paneSplit && bs.lobe == (CoatLeadsGuides(ctx) ? LOBE_COAT : LOBE_SPECULAR_REFLECTION);
                 float lobeProbability = paneSplit ? ctx.probSpecR : glassSplit ? ctx.probSpecT : 1.0;
                 throughput *= bs.weight * lobeProbability;
                 // Russian roulette on a pane's reflection is relative to the branch, as for a path of its own.
@@ -323,7 +324,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             // of it. A surface that takes another lobe, or ends the path, ends the chain on itself.
             float psrFraction = 1.0;
             bool psrEvent = continuePath && !paneSplit && (fromCamera || chainActive) &&
-                            (glassSplit ? mat.specularRoughness <= g_Frame.psrMaxRoughness : IsPsrEvent(mat, ctx, lobe, psrFraction));
+                            (glassSplit ? CoatedSpecularRoughness(mat) <= g_Frame.psrMaxRoughness : IsPsrEvent(mat, ctx, lobe, psrFraction));
             if (fromCamera)
             {
                 hitDistancePending = specularReflection;
@@ -350,7 +351,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 {
                     camera.chain.active = false;
                     if (!ctx.inside &&
-                        ReplacePrimarySurface(camera.chain, mat, ViewedCurvature(hit, wo), dirIn, hit.Ng, wo, cameraDir, camera.guides))
+                        ReplacePrimarySurface(camera.chain, mat, ctx, ViewedCurvature(hit, wo), dirIn, hit.Ng, wo, cameraDir, camera.guides))
                         hitDistancePending = specularReflection;
                     else if (camera.chain.throughGlass)
                         camera.guides.diffuseAlbedo += camera.transmittance * camera.chain.throughput;
