@@ -19,7 +19,7 @@
 
 namespace
 {
-	constexpr uint32_t kMaxPayloadSizeInBytes = 44;
+	constexpr uint32_t kMaxPayloadSizeInBytes = 48;
 
 	// Halton phases before the jitter repeats. The DLSS guide asks for 8 * (output / render)^2, so
 	// 72 at Ultra Performance, and the RR guide for at least 32 with no reason to limit it.
@@ -230,6 +230,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.invProj = InvertMatrix(camera_.GetProjectionMatrix());
 	constants.viewProj = camera_.GetViewMatrix() * camera_.GetProjectionMatrix();
 	constants.prevViewProj = camera_.GetPreviousViewMatrix() * camera_.GetPreviousProjectionMatrix();
+	const float4x4 prevInvView = InvertMatrix(camera_.GetPreviousViewMatrix());
+	constants.prevCameraPosition = { prevInvView._41, prevInvView._42, prevInvView._43 };
 	constants.jitter = jitter_;
 
 	// Sun disc of angular radius r. 1 - cos(r) = 2 sin^2(r / 2) stays accurate for the tiny
@@ -293,6 +295,9 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
 
 	constants.psrMaxRoughness = settings_.primarySurfaceReplacement ? settings_.psrMaxRoughness : -1.0f;
+	constants.psrMaxMinification = settings_.primarySurfaceReplacement && settings_.psrCurvedSurfaces
+										   ? std::max(settings_.psrMaxMinification, 1.0f)
+										   : -1.0f;
 	constants.specularHitDistanceHoldRoughness =
 			settings_.holdSpecularHitDistance ? settings_.holdHitDistanceMaxRoughness : -1.0f;
 

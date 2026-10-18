@@ -17,9 +17,38 @@ struct HitInfo
     float3 emission; // emitted radiance (both faces), set by LoadMaterial
     uint materialId;
     uint emitter; // entry of the hit triangle in g_Emitters, INVALID_LIGHT_INDEX if its instance does not emit
-    float curvature; // radians the vertex normals turn per unit length, DLSS_RR permutation only
-    float meanCurvature; // signed, positive where the surface bulges towards N, DLSS_RR permutation only
+    // How N turns as the hit point moves over the triangle (the derivative of the normalised interpolated
+    // vertex normal), as a 2x2 matrix in the frame (T, cross(N, T)): see NormalDerivative. DLSS_RR only.
+    float4 shape;
 };
+
+// The change of N for a small move dP of the hit point along its triangle.
+float3 NormalDerivative(HitInfo hit, float3 dP)
+{
+    float3 B = cross(hit.N, hit.T);
+    float a = dot(dP, hit.T);
+    float b = dot(dP, B);
+    return hit.T * (hit.shape.x * a + hit.shape.y * b) + B * (hit.shape.z * a + hit.shape.w * b);
+}
+
+// Radians the vertex normals turn per unit length, at most: the shape matrix's larger singular value.
+float HitCurvature(HitInfo hit)
+{
+    float4 s = hit.shape;
+    return 0.5 * (length(float2(s.x + s.w, s.z - s.y)) + length(float2(s.x - s.w, s.y + s.z)));
+}
+
+// Signed mean curvature, positive where the surface bulges towards N.
+float HitMeanCurvature(HitInfo hit)
+{
+    return 0.5 * (hit.shape.x + hit.shape.w);
+}
+
+// The shape of the hit with N turned around, which turns dN and cross(N, T) around with it.
+void FlipShape(inout HitInfo hit)
+{
+    hit.shape.xw = -hit.shape.xw;
+}
 
 // Ray types, indexing both the hit group and the miss shader in the shader table, so PathTracerPass
 // must add its records in this order.
@@ -31,7 +60,7 @@ struct ShadowRayPayload
     float3 visibility;
 };
 
-// Packed like a G-buffer to keep it in registers: 44 bytes.
+// Packed like a G-buffer to keep it in registers: 48 bytes.
 struct HitPayload
 {
     float hitT;
@@ -42,7 +71,7 @@ struct HitPayload
     uint T;  // octahedral snorm16x2
     float2 uv;
     uint2 uvGradients; // half4
-    uint curvature; // half2: HitInfo::curvature, HitInfo::meanCurvature; on the way in, nonzero to compute them
+    uint2 shape; // half4: HitInfo::shape; on the way in, x nonzero to compute it
 };
 
 static const uint TANGENT_SIGN_BIT = 0x80000000u;
@@ -96,7 +125,7 @@ void GenerateCameraRay(uint2 pixel, float2 u, out float3 origin, out float3 dir)
     dir = normalize(mul(float4(viewDir, 0.0), g_Frame.invView).xyz);
 }
 
-// needCurvature: the hit feeds the DLSS-RR guides, the only users of its curvature. Returns the
+// needCurvature: the hit feeds the DLSS-RR guides, the only users of its shape. Returns the
 // payload still packed (see HitDistance and UnpackHit), the smaller form to keep across other rays.
 HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvature, uint rayFlags)
 {
@@ -108,7 +137,7 @@ HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvat
 
     HitPayload payload = (HitPayload)0;
     payload.hitT = -1.0;
-    payload.curvature = needCurvature ? 1u : 0u;
+    payload.shape = uint2(needCurvature ? 1u : 0u, 0u);
     // Masked and pass-through geometry runs AnyHit; everything else is flagged opaque in its BLAS.
 #ifdef SER
     // DXR 1.2 SER: traverse, regroup threads by hit/miss and material, then shade. The threads stay in
@@ -123,7 +152,7 @@ HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvat
     // A fresh payload: only AnyHit read the traced one, so it need not survive the reorder.
     payload = (HitPayload)0;
     payload.hitT = -1.0;
-    payload.curvature = needCurvature ? 1u : 0u;
+    payload.shape = uint2(needCurvature ? 1u : 0u, 0u);
     HitObject::Invoke(hitObject, payload);
 #else
     TraceRay(g_Scene, rayFlags, 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
@@ -156,9 +185,11 @@ HitInfo UnpackHit(HitPayload payload, float3 origin, float3 dir)
     hit.uvGradients = float4(UnpackHalf2(payload.uvGradients.x), UnpackHalf2(payload.uvGradients.y));
     hit.materialId = payload.materialId & ~TANGENT_SIGN_BIT;
     hit.emitter = payload.emitter;
-    float2 curvature = UnpackHalf2(payload.curvature);
-    hit.curvature = curvature.x;
-    hit.meanCurvature = curvature.y;
+#ifdef DLSS_RR
+    hit.shape = float4(UnpackHalf2(payload.shape.x), UnpackHalf2(payload.shape.y));
+#else
+    hit.shape = float4(0.0, 0.0, 0.0, 0.0);
+#endif
     hit.emission = float3(0.0, 0.0, 0.0);
     hit.Ns = hit.N; // LoadMaterial applies the normal map
     return hit;

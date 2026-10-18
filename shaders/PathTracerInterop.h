@@ -79,6 +79,13 @@ struct FrameConstants
 	uint pad0;
 	uint pad1;
 	uint pad2;
+
+	// Last frame's camera position, for the motion vectors of what curved mirrors and glass show.
+	float3 prevCameraPosition;
+	// Chains of curved mirrors and glass keep PSR, with motion vectors traced through them, unless they
+	// shrink the image of the surface they end on by more than this (linear); negative = off, which
+	// leaves only the chains that barely bend the virtual image.
+	float psrMaxMinification;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -342,6 +349,11 @@ struct GpuCameraState
 	uint2 transmittance; // half: camera transmittance rgb, then unused
 	float distance;
 	uint flags; // CAMERA_STATE_* in CameraState.slang
+	// half: dP xyz then dD xyz of SpecularChain's pixelU, pixelV and motion differentials while the chain
+	// is active. Once it has ended, chainPixelU.xy holds PrimaryGuides::chainMotion (float2).
+	uint3 chainPixelU;
+	uint3 chainPixelV;
+	uint3 chainMotion;
 };
 
 // Root constants for the tonemap compute pass (bound as g_PushConstants).
@@ -364,11 +376,11 @@ struct TonemapConstants
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(FrameConstants) == 464,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 480,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuMaterial) == 128,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
-static_assert(sizeof(GpuCameraState) == 104, "GpuCameraState must match the structured buffer stride");
+static_assert(sizeof(GpuCameraState) == 140, "GpuCameraState must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 56, "TonemapConstants must fit the root constants");
 #endif
 

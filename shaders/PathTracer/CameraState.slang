@@ -31,6 +31,24 @@ static const uint CAMERA_STATE_SKY = 1; // guides.position is a direction (w = 0
 static const uint CAMERA_STATE_CHAIN_ACTIVE = 2;
 static const uint CAMERA_STATE_CHAIN_PARITY_ODD = 4;
 static const uint CAMERA_STATE_CHAIN_THROUGH_GLASS = 8;
+static const uint CAMERA_STATE_CHAIN_DIFFERENTIALS = 16; // SpecularChain::differentialsValid
+static const uint CAMERA_STATE_CHAIN_MOTION = 32; // PrimaryGuides::hasChainMotion
+
+uint3 PackDifferential(RayDifferential r)
+{
+    return uint3(PackHalf2(r.dP.xy), PackHalf2(float2(r.dP.z, r.dD.x)), PackHalf2(r.dD.yz));
+}
+
+RayDifferential UnpackDifferential(uint3 p)
+{
+    float2 a = UnpackHalf2(p.x);
+    float2 b = UnpackHalf2(p.y);
+    float2 c = UnpackHalf2(p.z);
+    RayDifferential r;
+    r.dP = float3(a, b.x);
+    r.dD = float3(b.y, c);
+    return r;
+}
 
 uint CameraStateIndex()
 {
@@ -63,7 +81,22 @@ void StoreCameraState(CameraState s)
     p.distance = s.distance;
     p.flags = (sky ? CAMERA_STATE_SKY : 0) | (s.chain.active ? CAMERA_STATE_CHAIN_ACTIVE : 0) |
               (s.chain.parityOdd ? CAMERA_STATE_CHAIN_PARITY_ODD : 0) |
-              (s.chain.throughGlass ? CAMERA_STATE_CHAIN_THROUGH_GLASS : 0);
+              (s.chain.throughGlass ? CAMERA_STATE_CHAIN_THROUGH_GLASS : 0) |
+              (s.chain.differentialsValid ? CAMERA_STATE_CHAIN_DIFFERENTIALS : 0) |
+              (s.guides.hasChainMotion ? CAMERA_STATE_CHAIN_MOTION : 0);
+    // The differentials are done with once the chain ends, which is when it leaves its motion vector.
+    if (s.chain.active)
+    {
+        p.chainPixelU = PackDifferential(s.chain.pixelU);
+        p.chainPixelV = PackDifferential(s.chain.pixelV);
+        p.chainMotion = PackDifferential(s.chain.motion);
+    }
+    else
+    {
+        p.chainPixelU = uint3(asuint(s.guides.chainMotion), 0);
+        p.chainPixelV = uint3(0, 0, 0);
+        p.chainMotion = uint3(0, 0, 0);
+    }
     g_CameraState[CameraStateIndex()] = p;
 #endif
 }
@@ -88,6 +121,12 @@ CameraState LoadCameraState()
     s.chain.active = (p.flags & CAMERA_STATE_CHAIN_ACTIVE) != 0;
     s.chain.parityOdd = (p.flags & CAMERA_STATE_CHAIN_PARITY_ODD) != 0;
     s.chain.throughGlass = (p.flags & CAMERA_STATE_CHAIN_THROUGH_GLASS) != 0;
+    s.chain.differentialsValid = (p.flags & CAMERA_STATE_CHAIN_DIFFERENTIALS) != 0;
+    s.chain.pixelU = UnpackDifferential(p.chainPixelU);
+    s.chain.pixelV = UnpackDifferential(p.chainPixelV);
+    s.chain.motion = UnpackDifferential(p.chainMotion);
+    s.guides.hasChainMotion = (p.flags & CAMERA_STATE_CHAIN_MOTION) != 0;
+    s.guides.chainMotion = asfloat(p.chainPixelU.xy);
     s.chain.primaryDistance = p.chainPrimaryDistance;
     s.chain.length = p.chainLength;
     s.chain.pixelDeflection = p.chainPixelDeflection;

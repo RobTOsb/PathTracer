@@ -22,6 +22,10 @@ struct PrimaryGuides
     float4 reflector;
     float reflectorRoughness;
     float curvature; // the reflector's signed mean curvature as the camera sees it, positive for a convex mirror
+    // Motion vector of the surface a curved chain of mirrors and glass ends on (see ChainMotionVector),
+    // for the virtual position's own reprojection, which only flat mirrors move like.
+    float2 chainMotion;
+    bool hasChainMotion;
 };
 
 PrimaryGuides DefaultGuides(float3 dir)
@@ -36,13 +40,16 @@ PrimaryGuides DefaultGuides(float3 dir)
     g.reflector = g.position;
     g.reflectorRoughness = 0.0;
     g.curvature = 0.0;
+    g.chainMotion = float2(0.0, 0.0);
+    g.hasChainMotion = false;
     return g;
 }
 
 // The hit's mean curvature as a viewer looking along -wo sees it, positive for a bulge towards them.
 float ViewedCurvature(HitInfo hit, float3 wo)
 {
-    return dot(hit.Ng, wo) < 0.0 ? -hit.meanCurvature : hit.meanCurvature;
+    float meanCurvature = HitMeanCurvature(hit);
+    return dot(hit.Ng, wo) < 0.0 ? -meanCurvature : meanCurvature;
 }
 
 // Where the reflector's reflection appears, by the thin mirror equation 1/i = 1/o + 2 curvature, moved

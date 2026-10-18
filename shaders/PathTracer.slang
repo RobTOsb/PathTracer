@@ -164,7 +164,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 hit.Ng = -hit.Ng;
                 hit.N = -hit.N;
                 hit.Ns = -hit.Ns;
-                hit.meanCurvature = -hit.meanCurvature;
+                FlipShape(hit);
             }
 
             SetShadingBasis(mat, hit.T, hit.B, hit.N, hit.Ns, wo);
@@ -251,6 +251,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 // Until the path continues with a specular reflection: no reflection data, or last frame's.
                 camera.guides.specularHitDistance = InitialSpecularHitDistance(mat.specularRoughness);
                 camera.guides.curvature = ViewedCurvature(hit, wo);
+                camera.guides.hasChainMotion = false;
                 ReflectanceGuides(mat, wo, camera.guides);
                 camera.guides.diffuseAlbedo *= camera.transmittance;
                 camera.guides.specularAlbedo *= camera.transmittance;
@@ -327,8 +328,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             {
                 hitDistancePending = specularReflection;
                 if (psrEvent)
-                    camera.chain = StartSpecularChain(mat, ctx, wo, dirIn, dir, specularReflection, psrFraction, camera.distance,
-                                                      cone.width, hit.curvature);
+                    camera.chain = StartSpecularChain(mat, ctx, hit, wo, dirIn, dir, specularReflection, psrFraction, camera.distance,
+                                                      cone.width);
                 if (!opaque && !mat.geometryThinWalled && !(psrEvent && camera.chain.throughGlass))
                     camera.guides.diffuseAlbedo += camera.transmittance * PsrEventThroughput(mat, ctx, wo, false);
                 if (passThrough)
@@ -336,19 +337,20 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             }
             else if (chainActive)
             {
+                ChainArrive(camera.chain, dirIn, hit);
                 if (passThrough)
                 {
                     camera.chain.throughput *= passTransmittance;
                 }
                 else if (psrEvent)
                 {
-                    AddPsrEvent(camera.chain, mat, ctx, wo, dirIn, dir, specularReflection, cone.width, hit.curvature);
+                    AddPsrEvent(camera.chain, mat, ctx, hit, wo, dirIn, dir, specularReflection, cone.width);
                 }
                 else
                 {
                     camera.chain.active = false;
                     if (!ctx.inside &&
-                        ReplacePrimarySurface(camera.chain, mat, ViewedCurvature(hit, wo), wo, cameraDir, camera.guides))
+                        ReplacePrimarySurface(camera.chain, mat, ViewedCurvature(hit, wo), dirIn, hit.Ng, wo, cameraDir, camera.guides))
                         hitDistancePending = specularReflection;
                     else if (camera.chain.throughGlass)
                         camera.guides.diffuseAlbedo += camera.transmittance * camera.chain.throughput;
@@ -486,7 +488,9 @@ void RayGen()
 
     // Static scene, so the primary point was in the same place last frame and only the camera
     // moved. CalculateMotionVector works in NDC, whose +y is up in D3D, while DLSS wants +y down.
-    float2 motion = CalculateMotionVector(guides.position, guides.position, g_Frame.prevViewProj, g_Frame.viewProj, float2(dims));
+    float2 motion = guides.hasChainMotion
+                    ? guides.chainMotion
+                    : CalculateMotionVector(guides.position, guides.position, g_Frame.prevViewProj, g_Frame.viewProj, float2(dims));
     motion.y = -motion.y;
 
     // Reversed Z: the sky sits on the far plane at 0.
@@ -570,29 +574,32 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     payload.emitter = emitterTable != INVALID_LIGHT_INDEX ? emitterTable + PrimitiveIndex() : INVALID_LIGHT_INDEX;
 
 #ifdef DLSS_RR
-    // Largest turn of the vertex normals per unit length along an edge, telling flat mirrors from curved
-    // ones for PSR. Chords between object-space normals stand in for angles, over world-space edges.
-    // Only the guides use it, so other hits skip it.
-    if (payload.curvature == 0)
+    // How the shading normal turns over the triangle, telling flat mirrors from curved ones for PSR and
+    // carrying ray differentials through them. Only the guides use it, so other hits skip it.
+    // N = n / |n| for n = cofactor (n0 + b1 (n1 - n0) + b2 (n2 - n0)) at P = p0 + b1 e1 + b2 e2, so
+    // dN = (I - N N^T) / |n| (w1 db1 + w2 db2), w the cofactor's normal differences and db_i = g_i . dP.
+    if (payload.shape.x == 0)
         return;
-    float3 dn1 = v1.normal - v0.normal;
-    float3 dn2 = v2.normal - v0.normal;
-    float3 dn3 = dn2 - dn1;
-    float3 e3 = e2 - e1;
-    float k1 = dot(dn1, dn1) / max(dot(e1, e1), 1.0e-20);
-    float k2 = dot(dn2, dn2) / max(dot(e2, e2), 1.0e-20);
-    float k3 = dot(dn3, dn3) / max(dot(e3, e3), 1.0e-20);
-    float curvature = sqrt(max(k1, max(k2, k3)));
-    float3 o1 = p1 - p0;
-    float3 o2 = p2 - p0;
-    float3 o3 = o2 - o1;
-    float m1 = dot(dn1, o1) * rsqrt(max(dot(o1, o1) * dot(e1, e1), 1.0e-30));
-    float m2 = dot(dn2, o2) * rsqrt(max(dot(o2, o2) * dot(e2, e2), 1.0e-30));
-    float m3 = dot(dn3, o3) * rsqrt(max(dot(o3, o3) * dot(e3, e3), 1.0e-30));
-    float meanCurvature = (m1 + m2 + m3) * (1.0 / 3.0);
-    payload.curvature = f32tof16(min(curvature, HALF_MAX)) | (f32tof16(clamp(meanCurvature, -HALF_MAX, HALF_MAX)) << 16);
+    float3 n = mul(cofactor, objectNormal) * handedness;
+    float invLength = rsqrt(max(dot(n, n), 1.0e-30));
+    float3 N = n * invLength;
+    float3 w1 = mul(cofactor, v1.normal - v0.normal) * handedness;
+    float3 w2 = mul(cofactor, v2.normal - v0.normal) * handedness;
+    w1 = (w1 - N * dot(N, w1)) * invLength;
+    w2 = (w2 - N * dot(N, w2)) * invLength;
+    float invArea2 = 1.0 / max(dot(faceCross, faceCross), 1.0e-30);
+    float3 g1 = cross(e2, faceCross) * invArea2;
+    float3 g2 = cross(faceCross, e1) * invArea2;
+    // In the frame UnpackHit gives NormalDerivative.
+    float3 T = mul(linearToWorld, objectTangent.xyz);
+    T = normalize(T - N * dot(N, T));
+    float3 B = cross(N, T);
+    float3 dNdT = w1 * dot(g1, T) + w2 * dot(g2, T);
+    float3 dNdB = w1 * dot(g1, B) + w2 * dot(g2, B);
+    float4 shape = clamp(float4(dot(T, dNdT), dot(T, dNdB), dot(B, dNdT), dot(B, dNdB)), -HALF_MAX, HALF_MAX);
+    payload.shape = uint2(PackHalf2(shape.xy), PackHalf2(shape.zw));
 #else
-    payload.curvature = 0;
+    payload.shape = uint2(0, 0);
 #endif
 }
 

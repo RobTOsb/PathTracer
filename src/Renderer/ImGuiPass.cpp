@@ -235,6 +235,14 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::Checkbox("Primary surface replacement", &settings_.primarySurfaceReplacement);
 		ImGui::BeginDisabled(!settings_.primarySurfaceReplacement);
 		ImGui::SliderFloat("Mirror and glass roughness", &settings_.psrMaxRoughness, 0.0f, 0.3f, "%.3f");
+		ImGui::Checkbox("Curved mirrors and glass", &settings_.psrCurvedSurfaces);
+		ImGui::SetItemTooltip("Motion vectors traced through the curvature of the mirrors and glass (ray differentials), "
+							  "so curved ones keep PSR. Off: only those that barely bend the image keep it");
+		ImGui::BeginDisabled(!settings_.psrCurvedSurfaces);
+		ImGui::SliderFloat("Max minification", &settings_.psrMaxMinification, 1.0f, 16.0f, "%.1f");
+		ImGui::SetItemTooltip("How far a curved chain may shrink the image of the surface it shows before PSR gives up "
+							  "on it, its detail then being finer than a pixel");
+		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 		ImGui::Checkbox("Hold specular hit distance", &settings_.holdSpecularHitDistance);
 		ImGui::BeginDisabled(!settings_.holdSpecularHitDistance);
