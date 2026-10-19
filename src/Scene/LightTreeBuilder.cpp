@@ -458,6 +458,62 @@ namespace
 						 { return Component(a.centroid, axis) < Component(b.centroid, axis); });
 		return mid;
 	}
+
+	// Vose's alias method over the leaves' flux, in light order.
+	std::vector<GpuLightAliasEntry> BuildPowerTable(const std::vector<Cluster> &leaves)
+	{
+		const size_t count = leaves.size();
+		double total = 0.0;
+		for (const Cluster &leaf: leaves)
+		{
+			total += leaf.flux;
+		}
+
+		// Each entry's flux in units of the mean, split into the ones below it and the ones that cover them.
+		std::vector<double> scaled(count);
+		std::vector<uint32_t> small;
+		std::vector<uint32_t> large;
+		for (uint32_t i = 0; i < static_cast<uint32_t>(count); ++i)
+		{
+			scaled[i] = leaves[i].flux * static_cast<double>(count) / total;
+			(scaled[i] < 1.0 ? small : large).push_back(i);
+		}
+
+		std::vector<GpuLightAliasEntry> table(count);
+		while (!small.empty() && !large.empty())
+		{
+			const uint32_t s = small.back();
+			small.pop_back();
+			const uint32_t l = large.back();
+			table[s].threshold = static_cast<float>(scaled[s]);
+			table[s].alias = l;
+			scaled[l] -= 1.0 - scaled[s];
+			if (scaled[l] < 1.0)
+			{
+				large.pop_back();
+				small.push_back(l);
+			}
+		}
+		// What is left is 1 up to rounding, and keeps itself.
+		for (const std::vector<uint32_t> *rest: { &small, &large })
+		{
+			for (uint32_t i: *rest)
+			{
+				table[i].threshold = 1.0f;
+				table[i].alias = i;
+			}
+		}
+
+		for (uint32_t i = 0; i < static_cast<uint32_t>(count); ++i)
+		{
+			table[i].pmf = static_cast<float>(leaves[i].flux / total);
+		}
+		for (GpuLightAliasEntry &entry: table)
+		{
+			entry.aliasPmf = table[entry.alias].pmf;
+		}
+		return table;
+	}
 } // namespace
 
 float LightTreeFlux(const GpuLight &light, float fluxScale)
@@ -507,6 +563,9 @@ LightTree BuildLightTree(std::span<const GpuLight> lights,
 		// Leaves address their range with 29 bits.
 		return LightTree{};
 	}
+
+	// Still in light order here; the build below reorders prims, not leaves.
+	tree.powerTable = BuildPowerTable(leaves);
 
 	// Top down binary topology. Children are allocated as adjacent pairs, so a child always has a
 	// larger index than its parent. Ranges of maxLeafLights or fewer become leaves.

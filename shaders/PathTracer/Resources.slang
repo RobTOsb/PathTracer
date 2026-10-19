@@ -70,6 +70,7 @@ StructuredBuffer<GpuLightTreeLeafEntry> g_LightLeaves : register(t7);
 StructuredBuffer<uint> g_Emitters : register(t8);
 StructuredBuffer<uint> g_LightTreeParents : register(t9);
 StructuredBuffer<GpuLightTreeLeafEntry> g_LightTreeLeafLights : register(t10);
+StructuredBuffer<GpuLightAliasEntry> g_LightPower : register(t13);
 
 #ifdef ATMOSPHERE
 Texture2D<float4> g_SkyViewLUT : register(t11);

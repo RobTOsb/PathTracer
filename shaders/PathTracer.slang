@@ -444,7 +444,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 {
                     SubsurfaceExit exit = (SubsurfaceExit)0;
                     if (dot(dir, hit.Ng) < 0.0)
-                        radiance += SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput, rayFlags, rng, exit);
+                        radiance += SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput, rayFlags,
+                                                      bounce + 1, rng, exit);
                     continuePath = exit.valid;
                     origin = exit.origin;
                     dir = exit.dir;

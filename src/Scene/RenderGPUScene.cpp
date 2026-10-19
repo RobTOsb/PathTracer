@@ -326,7 +326,7 @@ void RenderGPUScene::DestroyLights()
 {
 	for (LightFrameBuffers &frame: lightFrames_)
 	{
-		for (ResourceHandle buffer: { frame.lights, frame.nodes, frame.leaves, frame.parents, frame.leafLights })
+		for (ResourceHandle buffer: { frame.lights, frame.nodes, frame.leaves, frame.parents, frame.leafLights, frame.power })
 		{
 			if (buffer != InvalidResourceHandle)
 			{
@@ -372,6 +372,7 @@ void RenderGPUScene::UpdateLights(const LightTreeBuildSettings &settings)
 		tree.leafOfLight.push_back({});
 		tree.parents.push_back(0);
 		tree.leafLights.push_back({});
+		tree.powerTable.push_back({});
 	}
 
 	// BeginFrame has waited for the frame that last read this slot, so it can be overwritten.
@@ -387,6 +388,7 @@ void RenderGPUScene::UpdateLights(const LightTreeBuildSettings &settings)
 					 frame.leafLightCapacity,
 					 tree.leafLights,
 					 "Scene_LightTreeLeafLights");
+	WriteLightBuffer(renderContext_, frame.power, frame.powerCapacity, tree.powerTable, "Scene_LightPower");
 }
 
 void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)

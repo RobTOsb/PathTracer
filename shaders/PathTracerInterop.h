@@ -76,7 +76,9 @@ struct FrameConstants
 	// camera ray) trace with RAY_FLAG_FORCE_OMM_2_STATE, taking the micromaps' unknown micro-triangles as
 	// opaque or transparent instead of running the alpha test. UINT_MAX = never.
 	uint opacityMicromap2StateBounce;
-	uint pad0;
+	// LIGHT_SAMPLING_TREE: path vertices before this bounce (0 = the primary hit) select lights with the
+	// tree, later ones and those that transmit by power, which skips the tree walks there.
+	uint lightTreeBounces;
 	uint pad1;
 	uint pad2;
 
@@ -113,8 +115,9 @@ enum MaterialOverrideFlags
 UnscopedEnum
 enum LightSamplingMode
 {
-	LIGHT_SAMPLING_TREE = 0, // SG light tree (Tokuyoshi et al. 2024)
+	LIGHT_SAMPLING_TREE = 0, // SG light tree (Tokuyoshi et al. 2024), power selection past lightTreeBounces
 	LIGHT_SAMPLING_UNIFORM = 1,
+	LIGHT_SAMPLING_POWER = 2, // in proportion to flux, wherever the shading point is
 };
 
 // glTF alphaMode, matches Scene::AlphaMode.

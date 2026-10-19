@@ -266,6 +266,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	const bool lightsActive = lights.enabled && scene_.GetLightCount() > 0;
 	constants.lightCount = lightsActive ? scene_.GetLightCount() : 0u;
 	constants.lightSampling = static_cast<uint>(lights.sampling);
+	constants.lightTreeBounces = static_cast<uint>(std::max(lights.treeBounces, 0));
 	constants.sunSelectProbability = sunActive ? (lightsActive ? 0.5f : 1.0f) : 0.0f;
 	constants.lightTreeGlossyBounces = static_cast<uint>(std::max(lights.glossyImportanceBounces, 0));
 	constants.lightTreeFarFieldSharpness = lights.farFieldImportance ? lights.farFieldSharpness : FLT_MAX;
@@ -377,6 +378,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	renderContext->SetRaytracingSRV(8, scene_.GetEmitterBuffer());
 	renderContext->SetRaytracingSRV(9, scene_.GetLightTreeParentBuffer());
 	renderContext->SetRaytracingSRV(10, scene_.GetLightTreeLeafLightBuffer());
+	renderContext->SetRaytracingSRV(13, scene_.GetLightPowerBuffer());
 	
 	if (atmosphere)
 	{

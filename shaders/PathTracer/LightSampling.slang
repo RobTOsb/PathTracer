@@ -27,8 +27,20 @@ struct LightSelectVertex
     float diffuseWeight;
     float specularWeight;
     float2 alpha;
-    bool tree; // the light tree picks the light, otherwise uniform selection
+    uint selection; // LIGHT_SELECT_*, how the light is picked from the light buffer
 };
+
+static const uint LIGHT_SELECT_UNIFORM = 0;
+static const uint LIGHT_SELECT_TREE = 1;
+static const uint LIGHT_SELECT_POWER = 2; // in proportion to flux, g_LightPower
+
+// The selection for a vertex the light tree may serve (treeAllowed) or not, under the frame's sampling mode.
+uint LightSelection(bool treeAllowed)
+{
+    if (g_Frame.lightSampling == LIGHT_SAMPLING_UNIFORM)
+        return LIGHT_SELECT_UNIFORM;
+    return g_Frame.lightSampling == LIGHT_SAMPLING_TREE && treeAllowed ? LIGHT_SELECT_TREE : LIGHT_SELECT_POWER;
+}
 
 LightSample SampleSun(float2 u)
 {
@@ -80,8 +92,8 @@ LightSample SampleBufferLight(GpuLight light, float3 position, float2 u)
     return ls;
 }
 
-// The light tree only handles reflecting surfaces, others fall back to uniform selection. From bounce
-// lightTreeGlossyBounces on, the specular weight folds into the diffuse one to cheapen traversal.
+// The light tree only handles reflecting surfaces before bounce lightTreeBounces, others select by power.
+// From bounce lightTreeGlossyBounces on, the specular weight folds into the diffuse one to cheapen traversal.
 LightSelectVertex MakeLightSelectVertex(float3 position, OpenPBRBaseParams mat, OpenPBRContext ctx, float3 wo, bool reflectOnly,
                                         uint bounce)
 {
@@ -100,7 +112,7 @@ LightSelectVertex MakeLightSelectVertex(float3 position, OpenPBRBaseParams mat, 
         v.specularWeight = 0.0;
     }
     v.alpha = ctx.probCoat > ctx.probSpecR ? ctx.coatAlpha.xx : ctx.alpha;
-    v.tree = g_Frame.lightSampling == LIGHT_SAMPLING_TREE && reflectOnly;
+    v.selection = LightSelection(reflectOnly && bounce < g_Frame.lightTreeBounces);
     return v;
 }
 
@@ -114,7 +126,7 @@ struct PackedLightSelectVertex
     uint wo;
     uint weights; // half2: diffuseWeight, specularWeight
     uint alpha;   // half2
-    bool tree;
+    uint selection;
 };
 
 PackedLightSelectVertex PackLightSelectVertex(LightSelectVertex v)
@@ -126,7 +138,7 @@ PackedLightSelectVertex PackLightSelectVertex(LightSelectVertex v)
     p.wo = OctEncode(v.wo);
     p.weights = PackHalf2(float2(v.diffuseWeight, v.specularWeight));
     p.alpha = PackHalf2(v.alpha);
-    p.tree = v.tree;
+    p.selection = v.selection;
     return p;
 }
 
@@ -141,7 +153,7 @@ LightSelectVertex UnpackLightSelectVertex(PackedLightSelectVertex p)
     v.diffuseWeight = weights.x;
     v.specularWeight = weights.y;
     v.alpha = UnpackHalf2(p.alpha);
-    v.tree = p.tree;
+    v.selection = p.selection;
     return v;
 }
 
@@ -155,8 +167,13 @@ LightTreeShadingContext MakeLightTreeShadingContext(LightSelectVertex v)
 // Probability of SampleLight at v picking lightIndex from the light buffer, sun selection included.
 float LightSelectPmf(LightSelectVertex v, uint lightIndex)
 {
-    float pmf = v.tree ? LightTreePmf(g_LightTreeNodes, g_LightTreeParents, g_LightLeaves, MakeLightTreeShadingContext(v), lightIndex)
-                       : 1.0 / g_Frame.lightCount;
+    float pmf;
+    if (v.selection == LIGHT_SELECT_TREE)
+        pmf = LightTreePmf(g_LightTreeNodes, g_LightTreeParents, g_LightLeaves, MakeLightTreeShadingContext(v), lightIndex);
+    else if (v.selection == LIGHT_SELECT_POWER)
+        pmf = g_LightPower[lightIndex].pmf;
+    else
+        pmf = 1.0 / g_Frame.lightCount;
     return pmf * (1.0 - g_Frame.sunSelectProbability);
 }
 
@@ -195,10 +212,19 @@ LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
     float uSelect = min((u.x - pSun) / (1.0 - pSun), 0.99999994);
     uint lightIndex;
     float pmf;
-    if (v.tree)
+    if (v.selection == LIGHT_SELECT_TREE)
     {
         if (!SampleLightTree(g_LightTreeNodes, g_LightTreeLeafLights, MakeLightTreeShadingContext(v), uSelect, lightIndex, pmf))
             return ls;
+    }
+    else if (v.selection == LIGHT_SELECT_POWER)
+    {
+        // u.y, which only the sun uses, decides between the entry's light and its alias.
+        uint entry = min(uint(uSelect * g_Frame.lightCount), g_Frame.lightCount - 1);
+        GpuLightAliasEntry alias = g_LightPower[entry];
+        bool keep = u.y < alias.threshold;
+        lightIndex = keep ? entry : alias.alias;
+        pmf = keep ? alias.pmf : alias.aliasPmf;
     }
     else
     {

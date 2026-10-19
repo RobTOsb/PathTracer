@@ -47,6 +47,7 @@ namespace
 	constexpr ComboEntry<LightSamplingMode> kLightSamplingModes[] = {
 		{ LIGHT_SAMPLING_TREE, "Light tree" },
 		{ LIGHT_SAMPLING_UNIFORM, "Uniform" },
+		{ LIGHT_SAMPLING_POWER, "Power" },
 	};
 
 	constexpr ComboEntry<DLSSRayReconstructionPreset> kRRPresets[] = {
@@ -290,6 +291,9 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::Checkbox("Enabled", &lights.enabled);
 		EnumCombo("Sampling", kLightSamplingModes, lights.sampling);
 		ImGui::BeginDisabled(lights.sampling != LIGHT_SAMPLING_TREE);
+		ImGui::SliderInt("Light tree bounces", &lights.treeBounces, 0, 16);
+		ImGui::SetItemTooltip("Path vertices (0 = primary hit) that select lights with the tree, later ones "
+							  "select them in proportion to their flux");
 		ImGui::Checkbox("Diffuse-only importance", &lights.diffuseOnlyRoughLobes);
 		ImGui::SetItemTooltip("Skip the glossy light tree importance for lobes at least this rough");
 		ImGui::SameLine();

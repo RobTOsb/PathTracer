@@ -19,6 +19,7 @@ struct LightTree
 	std::vector<GpuLightTreeLeafEntry> leafLights; // per leaf slot: light index and its PMF within the leaf
 	std::vector<GpuLight> lights; // the lights the leaves index, only those with non-zero flux
 	std::vector<GpuLightTreeLeafEntry> leafOfLight; // per light: its leaf node and PMF within it (LightTreePmf)
+	std::vector<GpuLightAliasEntry> powerTable; // per light: power selection by flux, see GpuLightAliasEntry
 	std::vector<uint32_t> sourceIndex; // index into the input lights for each light
 	uint32_t maxDepth = 0; // levels of groups the deepest light is under
 	float averageDepth = 0.0f; // the same averaged over the lights

@@ -139,6 +139,12 @@ public:
 		return lightFrames_.empty() ? InvalidResourceHandle : lightFrames_[lightFrame_].leafLights;
 	}
 
+	// GpuLightAliasEntry per light, for power light selection.
+	ResourceHandle GetLightPowerBuffer() const
+	{
+		return lightFrames_.empty() ? InvalidResourceHandle : lightFrames_[lightFrame_].power;
+	}
+
 	// Maps a ray hit to the light of the emissive triangle it hit (uint). The first entry per TLAS
 	// instance (indexed by InstanceIndex()) is the offset of that instance's triangle table in the
 	// same buffer, or INVALID_LIGHT_INDEX if it does not emit; the table then holds the light index
@@ -261,11 +267,13 @@ private:
 		ResourceHandle leaves = InvalidResourceHandle;
 		ResourceHandle parents = InvalidResourceHandle;
 		ResourceHandle leafLights = InvalidResourceHandle;
+		ResourceHandle power = InvalidResourceHandle;
 		size_t lightCapacity = 0;
 		size_t nodeCapacity = 0;
 		size_t leafCapacity = 0;
 		size_t parentCapacity = 0;
 		size_t leafLightCapacity = 0;
+		size_t powerCapacity = 0;
 	};
 
 	// The light tree input: the emissive triangles (one-sided area lights, with the average of their

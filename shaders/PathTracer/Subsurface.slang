@@ -166,7 +166,7 @@ SubsurfaceHit TraceSubsurfaceRay(float3 origin, float3 dir, float tMax, uint mat
 }
 
 // Light selection at an exit, which reflects like a white Lambertian surface facing along normal.
-LightSelectVertex ExitLightSelectVertex(float3 position, float3 normal)
+LightSelectVertex ExitLightSelectVertex(float3 position, float3 normal, uint bounce)
 {
     LightSelectVertex v;
     v.position = position;
@@ -177,7 +177,7 @@ LightSelectVertex ExitLightSelectVertex(float3 position, float3 normal)
     v.diffuseWeight = 1.0;
     v.specularWeight = 0.0;
     v.alpha = float2(1.0, 1.0);
-    v.tree = g_Frame.lightSampling == LIGHT_SAMPLING_TREE;
+    v.selection = LightSelection(bounce < g_Frame.lightTreeBounces);
     return v;
 }
 
@@ -194,9 +194,10 @@ struct SubsurfaceExit
 
 // The light leaving through the surface at position (geometric normal Ng and vertex normal N facing the
 // viewer, the object's material materialIndex) by way of the medium under it, for a path that took
-// LOBE_SUBSURFACE there into dirIn with the given throughput. exit is how the path goes on.
+// LOBE_SUBSURFACE there into dirIn with the given throughput. exit is how the path goes on, from path
+// vertex exitBounce, which decides how the exits select lights.
 float3 SubsurfaceScatter(OpenPBRBaseParams mat, float3 position, float3 Ng, float3 N, uint materialIndex, float3 dirIn,
-                         float3 throughput, uint shadowRayFlags, inout uint rng, out SubsurfaceExit exit)
+                         float3 throughput, uint shadowRayFlags, uint exitBounce, inout uint rng, out SubsurfaceExit exit)
 {
     SubsurfaceMedium m = GetSubsurfaceMedium(mat);
     uint components = g_Frame.subsurfaceComponents;
@@ -286,7 +287,7 @@ float3 SubsurfaceScatter(OpenPBRBaseParams mat, float3 position, float3 Ng, floa
         // The light entering here, as a white Lambertian surface would reflect it, MIS weighted against the
         // cosine sample the path takes if it leaves through here.
         float3 lightU = Rand3(rng);
-        PackedLightSelectVertex vertex = PackLightSelectVertex(ExitLightSelectVertex(hitPosition, normal));
+        PackedLightSelectVertex vertex = PackLightSelectVertex(ExitLightSelectVertex(hitPosition, normal, exitBounce));
         LightSample ls = SampleLight(UnpackLightSelectVertex(vertex), lightU.xy, rng);
         float cosLight = dot(ls.direction, normal);
         if (ls.pdf > 0.0 && cosLight > 0.0 && dot(ls.direction, hit.Ng) > 0.0)

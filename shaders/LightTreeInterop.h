@@ -48,9 +48,25 @@ struct GpuLightTreeLeafEntry
 	float pmf;
 };
 
+// Power light selection, Vose's alias method over the lights' flux: entry i keeps light i with
+// probability threshold and otherwise picks alias. pmf is light i's share of the flux and aliasPmf the
+// alias's, so a pick takes one load, and so does the MIS PMF of a light (its own entry's pmf).
+struct GpuLightAliasEntry
+{
+	float threshold;
+#ifdef __cplusplus
+	uint32_t alias;
+#else
+	uint alias;
+#endif
+	float pmf;
+	float aliasPmf;
+};
+
 #ifdef __cplusplus
 static_assert(sizeof(GpuLightTreeNode) == 32, "GpuLightTreeNode must match the structured buffer stride");
 static_assert(sizeof(GpuLightTreeLeafEntry) == 8, "GpuLightTreeLeafEntry must match the structured buffer stride");
+static_assert(sizeof(GpuLightAliasEntry) == 16, "GpuLightAliasEntry must match the structured buffer stride");
 #endif
 
 #endif // LIGHT_TREE_INTEROP_H
