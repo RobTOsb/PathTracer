@@ -248,7 +248,21 @@ public:
 
 	void RotateCamera(float yaw, float pitch, float sensitivity = 0.05f);
 
+	float GetYaw() const // radians
+	{
+		return yaw;
+	}
+
+	float GetPitch() const // radians
+	{
+		return pitch;
+	}
+
+	void SetOrientation(float newYaw, float newPitch); // radians
+
 private:
+	void UpdateOrientation();
+
 	float3 position;
 	float3 front;
 	float3 up;

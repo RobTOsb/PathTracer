@@ -139,4 +139,14 @@ struct RenderSettings
 	bool specularMotionVectors = true;
 
 	float cameraSpeed = 5.0f; // world units per second
+	// Set by the Camera panel, carried out (and cleared) by the main loop: the camera bookmark beside the
+	// scene, so captures for an A/B comparison can be taken from exactly the same view.
+	enum class CameraBookmarkRequest
+	{
+		None,
+		Save,
+		Restore
+	};
+	CameraBookmarkRequest cameraBookmarkRequest = CameraBookmarkRequest::None;
+	bool cameraBookmarkExists = false; // the main loop keeps it current, for the Restore button
 };

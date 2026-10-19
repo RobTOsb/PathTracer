@@ -174,26 +174,28 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 break;
             }
 
+            // Front-face emission found by BSDF sampling is MIS weighted against NEE at the previous vertex
+            // unless the triangle has no light (degenerate or black) or light buffer NEE is off. The weight's
+            // light tree walk needs only the packed hit, so it comes before the material, which is then not
+            // held across it.
+            float3 wo = -dir;
+            bool frontFace = dot(OctDecode(payload.Ng), wo) > 0.0;
+            float emissionWeight = 1.0;
+            if (frontFace && !fromCamera && !smoothSegment && g_Frame.lightCount > 0 && payload.emitter != INVALID_LIGHT_INDEX)
+            {
+                uint lightIndex = g_Emitters[payload.emitter];
+                if (lightIndex != INVALID_LIGHT_INDEX)
+                    emissionWeight = PowerHeuristic(prevBsdfPdf, EmitterLightPdf(UnpackLightSelectVertex(prevVertex), lightIndex, dir,
+                                                                                 origin + dir * payload.hitT));
+            }
+
             hit = UnpackHit(payload, origin, dir);
 
             // Material and shading basis for this hit, its textures filtered over the cone's footprint.
             cone.width += cone.spread * hit.t;
             OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments);
-            float3 wo = -dir;
-
-            // Front-face emission found by BSDF sampling, MIS weighted against NEE at the previous vertex
-            // unless the triangle has no light (degenerate or black) or light buffer NEE is off.
-            if (any(hit.emission > 0.0) && dot(hit.Ng, wo) > 0.0)
-            {
-                float w = 1.0;
-                if (!fromCamera && !smoothSegment && g_Frame.lightCount > 0 && hit.emitter != INVALID_LIGHT_INDEX)
-                {
-                    uint lightIndex = g_Emitters[hit.emitter];
-                    if (lightIndex != INVALID_LIGHT_INDEX)
-                        w = PowerHeuristic(prevBsdfPdf, EmitterLightPdf(UnpackLightSelectVertex(prevVertex), lightIndex, dir, hit.position));
-                }
-                radiance += throughput * hit.emission * w;
-            }
+            if (frontFace && any(hit.emission > 0.0))
+                radiance += throughput * hit.emission * emissionWeight;
 
             // Opaque and thin-walled surfaces are treated as two-sided: face the frame towards the viewer
             // so a back face is not mistaken for the inside of a transmissive object
@@ -208,16 +210,22 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
 
             SetShadingBasis(mat, hit.T, hit.B, hit.N, hit.Ns, wo);
             OpenPBRContext ctx = OpenPBRSetup(mat, wo);
-            float3 extinction = MediumExtinction(mat);
-            bool deltaTransmission = HasDeltaTransmission(mat);
 
             // One hash covers the light sample (xy) and the Russian roulette decision (z).
             float3 lightU = Rand3(rng);
 
             // Sampled with the rounding prevVertex keeps, so both ends of an emitter's MIS see the same pmf.
             PackedLightSelectVertex vertex =
-                PackLightSelectVertex(MakeLightSelectVertex(hit.position, mat, ctx, wo, opaque || deltaTransmission, bounce));
+                PackLightSelectVertex(MakeLightSelectVertex(hit.position, mat, ctx, wo, opaque || HasDeltaTransmission(mat), bounce));
+            // The light tree walk needs registers of its own, so across it the material is held packed and
+            // the BSDF context not at all. Both are rebuilt after it, and everything from here on, sampling
+            // and evaluation alike, uses the rebuilt pair.
+            PackedMaterial packedMat = PackMaterial(mat);
             LightSample ls = SampleLight(UnpackLightSelectVertex(vertex), lightU.xy, rng);
+            mat = UnpackMaterial(packedMat);
+            ctx = OpenPBRSetup(mat, wo);
+            float3 extinction = MediumExtinction(mat);
+            bool deltaTransmission = HasDeltaTransmission(mat);
             bool lastSegment = bounce >= g_Frame.maxBounces;
             float3 neeContribution = float3(0.0, 0.0, 0.0);
             bool traceShadowRay = false;

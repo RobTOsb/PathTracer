@@ -21,9 +21,12 @@
 #include <chrono>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <math.h>
 #include <memory>
 #include <stdio.h>
+#include <string>
 #include <vector>
 
 #include <Windows.h>
@@ -126,6 +129,42 @@ void FrameScene(const RenderGPUScene &gpuScene, Camera &camera, RenderSettings &
 	const float distance = radius / tanf(0.5f * camera.GetFovY());
 	camera.SetPosition(float3(centre.x, centre.y, centre.z + distance));
 	settings.cameraSpeed = std::max(radius * 0.25f, 0.01f);
+}
+
+// The camera bookmark: position, orientation and move speed, as text in a .camera file beside the scene.
+std::filesystem::path CameraBookmarkPath(const std::filesystem::path &scenePath)
+{
+	std::filesystem::path path = scenePath;
+	return path.replace_extension(".camera");
+}
+
+bool SaveCameraBookmark(const std::filesystem::path &path, const Camera &camera, const RenderSettings &settings)
+{
+	std::ofstream file(path);
+	const float3 position = camera.GetPosition();
+	file << std::setprecision(9) << "position " << position.x << ' ' << position.y << ' ' << position.z << '\n'
+		 << "yaw " << camera.GetYaw() << '\n'
+		 << "pitch " << camera.GetPitch() << '\n'
+		 << "speed " << settings.cameraSpeed << '\n';
+	return static_cast<bool>(file);
+}
+
+bool LoadCameraBookmark(const std::filesystem::path &path, Camera &camera, RenderSettings &settings)
+{
+	std::ifstream file(path);
+	std::string key;
+	float3 position;
+	float yaw = 0.0f;
+	float pitch = 0.0f;
+	float speed = 0.0f;
+	if (!(file >> key >> position.x >> position.y >> position.z >> key >> yaw >> key >> pitch >> key >> speed))
+	{
+		return false;
+	}
+	camera.SetPosition(position);
+	camera.SetOrientation(yaw, pitch);
+	settings.cameraSpeed = speed;
+	return true;
 }
 
 void BuildPasses(RenderContext *renderContext,
@@ -278,6 +317,12 @@ int Run(const char *scenePath)
 	}
 	Camera camera(90.0f, window.GetAspectRatio(), 0.01f, 1000.0f, false, true);
 	FrameScene(gpuScene, camera, settings);
+	const std::filesystem::path bookmarkPath = CameraBookmarkPath(scenePath);
+	settings.cameraBookmarkExists = std::filesystem::exists(bookmarkPath);
+	if (settings.cameraBookmarkExists && LoadCameraBookmark(bookmarkPath, camera, settings))
+	{
+		logi("Camera restored from '{}'", bookmarkPath.string());
+	}
 
 	// Declared before the passes so it outlives the DLSS feature they use. Without it (no NVIDIA
 	// GPU, old driver, missing nvngx_dlssd.dll) DLSS-RR is simply unavailable.
@@ -309,6 +354,24 @@ int Run(const char *scenePath)
 		// Last frame's matrices, for the motion vectors.
 		camera.UpdatePreviousMatrices();
 		UpdateCamera(window, camera, settings, deltaSeconds);
+		if (settings.cameraBookmarkRequest == RenderSettings::CameraBookmarkRequest::Save)
+		{
+			settings.cameraBookmarkExists = SaveCameraBookmark(bookmarkPath, camera, settings);
+			if (settings.cameraBookmarkExists)
+			{
+				logi("Camera saved to '{}'", bookmarkPath.string());
+			}
+			else
+			{
+				loge("Could not write '{}'", bookmarkPath.string());
+			}
+		}
+		else if (settings.cameraBookmarkRequest == RenderSettings::CameraBookmarkRequest::Restore &&
+				 !LoadCameraBookmark(bookmarkPath, camera, settings))
+		{
+			loge("Could not read '{}'", bookmarkPath.string());
+		}
+		settings.cameraBookmarkRequest = RenderSettings::CameraBookmarkRequest::None;
 
 		renderContext->BeginFrame();
 

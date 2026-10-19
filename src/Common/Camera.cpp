@@ -13,6 +13,18 @@ void Camera::RotateCamera(float yawDelta, float pitchDelta, float sensitivity)
 	// Clamp pitch to prevent going over top or under bottom
 	pitch = Clamp(pitch, negativeRotationClamp, rotationClamp);
 
+	UpdateOrientation();
+}
+
+void Camera::SetOrientation(float newYaw, float newPitch)
+{
+	yaw = newYaw;
+	pitch = Clamp(newPitch, negativeRotationClamp, rotationClamp);
+	UpdateOrientation();
+}
+
+void Camera::UpdateOrientation()
+{
 	float3 worldUp = { 0.0f, 1.0f, 0.0f };
 	
 	// Calculate front vector from yaw and pitch

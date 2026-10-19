@@ -511,6 +511,18 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::Text("Forward   %.2f %.2f %.2f", front.x, front.y, front.z);
 		ImGui::DragFloat("Speed", &settings_.cameraSpeed, 0.1f, 0.01f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
 		ImGui::TextDisabled("WASD move, Q/E down/up, Shift faster, RMB drag to look");
+		if (ImGui::Button("Save view"))
+		{
+			settings_.cameraBookmarkRequest = RenderSettings::CameraBookmarkRequest::Save;
+		}
+		ImGui::SameLine();
+		ImGui::BeginDisabled(!settings_.cameraBookmarkExists);
+		if (ImGui::Button("Restore view"))
+		{
+			settings_.cameraBookmarkRequest = RenderSettings::CameraBookmarkRequest::Restore;
+		}
+		ImGui::EndDisabled();
+		ImGui::TextDisabled("Saved beside the scene and restored at startup");
 	}
 
 	ImGui::End();

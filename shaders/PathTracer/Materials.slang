@@ -250,6 +250,91 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     return p;
 }
 
+// What LoadMaterial sets per hit, in fewer registers: halves, the shading frame octahedral. The rest
+// keeps the constants of OpenPBRDefaults and SetGltfClearcoat, which the compiler folds into the BSDF.
+struct PackedMaterial
+{
+    uint4 base;     // half: baseColour rgb, baseMetalness, specularRoughness, specularRoughnessAnisotropy, specularIor, transmissionWeight
+    uint4 layers;   // half: transmissionColour rgb, subsurfaceWeight, subsurfaceColour rgb, subsurfaceScatterAnisotropy
+    uint4 coatFuzz; // half: coatWeight, coatRoughness, fuzzWeight, fuzzRoughness, fuzzColour rgb
+    float4 medium;  // transmissionDepth, subsurfaceRadius
+    uint3 basis;    // octahedral: geometryNormal, geometryTangent, geometryCoatNormal
+    bool thinWalled;
+};
+
+// A weight too small for a half still counts as nonzero, so the lobes it switches on stay on.
+float KeepNonzero(float weight)
+{
+    return weight > 0.0 ? max(weight, 6.0e-8) : 0.0;
+}
+
+PackedMaterial PackMaterial(OpenPBRBaseParams p)
+{
+    PackedMaterial m;
+    m.base = uint4(PackHalf2(p.baseColour.rg), PackHalf2(float2(p.baseColour.b, p.baseMetalness)),
+                   PackHalf2(float2(p.specularRoughness, p.specularRoughnessAnisotropy)),
+                   PackHalf2(float2(p.specularIor, KeepNonzero(p.transmissionWeight))));
+    m.layers = uint4(PackHalf2(p.transmissionColour.rg), PackHalf2(float2(p.transmissionColour.b, KeepNonzero(p.subsurfaceWeight))),
+                     PackHalf2(p.subsurfaceColour.rg), PackHalf2(float2(p.subsurfaceColour.b, p.subsurfaceScatterAnisotropy)));
+    m.coatFuzz = uint4(PackHalf2(float2(KeepNonzero(p.coatWeight), p.coatRoughness)),
+                       PackHalf2(float2(KeepNonzero(p.fuzzWeight), p.fuzzRoughness)), PackHalf2(p.fuzzColour.rg),
+                       f32tof16(p.fuzzColour.b));
+    m.medium = float4(p.transmissionDepth, p.subsurfaceRadius);
+    m.basis = uint3(OctEncode(p.geometryNormal), OctEncode(p.geometryTangent), OctEncode(p.geometryCoatNormal));
+    m.thinWalled = p.geometryThinWalled;
+    return m;
+}
+
+OpenPBRBaseParams UnpackMaterial(PackedMaterial m)
+{
+    OpenPBRBaseParams p = OpenPBRDefaults();
+    float2 h;
+    h = UnpackHalf2(m.base.x);
+    p.baseColour.rg = h;
+    h = UnpackHalf2(m.base.y);
+    p.baseColour.b = h.x;
+    p.baseMetalness = h.y;
+    h = UnpackHalf2(m.base.z);
+    p.specularRoughness = h.x;
+    p.specularRoughnessAnisotropy = h.y;
+    h = UnpackHalf2(m.base.w);
+    p.specularIor = h.x;
+    p.transmissionWeight = h.y;
+
+    h = UnpackHalf2(m.layers.x);
+    p.transmissionColour.rg = h;
+    h = UnpackHalf2(m.layers.y);
+    p.transmissionColour.b = h.x;
+    p.subsurfaceWeight = h.y;
+    h = UnpackHalf2(m.layers.z);
+    p.subsurfaceColour.rg = h;
+    h = UnpackHalf2(m.layers.w);
+    p.subsurfaceColour.b = h.x;
+    p.subsurfaceScatterAnisotropy = h.y;
+
+    h = UnpackHalf2(m.coatFuzz.y);
+    p.fuzzWeight = h.x;
+    p.fuzzRoughness = h.y;
+    p.fuzzColour = float3(UnpackHalf2(m.coatFuzz.z), f16tof32(m.coatFuzz.w));
+
+    p.transmissionDepth = m.medium.x;
+    p.subsurfaceRadius = m.medium.yzw;
+    p.geometryThinWalled = m.thinWalled;
+
+    // The tangent comes back perpendicular to the normal, which the quantization does not keep exactly.
+    float3 N = OctDecode(m.basis.x);
+    float3 T = OctDecode(m.basis.y);
+    p.geometryNormal = N;
+    p.geometryTangent = normalize(T - N * dot(N, T));
+    p.geometryBitangent = cross(N, p.geometryTangent);
+    h = UnpackHalf2(m.coatFuzz.x);
+    SetGltfClearcoat(p, h.x, h.y, OctDecode(m.basis.z));
+    // The only override that sets a value LoadMaterial otherwise leaves at its default.
+    if ((g_Frame.materialOverrides & MATERIAL_OVERRIDE_NO_SPECULAR) != 0)
+        p.specularColour = float3(0.0, 0.0, 0.0);
+    return p;
+}
+
 // Beer-Lambert extinction so that light reaching transmissionDepth has transmissionColor.
 float3 MediumExtinction(OpenPBRBaseParams p)
 {
