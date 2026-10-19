@@ -63,6 +63,13 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 		cameraState_ = renderContext->CreateBuffer(cameraStateDesc, ResourceViewType::UnorderedAccess);
 	}
 
+	BufferDesc deferredBranchDesc = {};
+	deferredBranchDesc.sizeInBytes = static_cast<uint64_t>(width_) * height_ * sizeof(GpuDeferredBranch);
+	deferredBranchDesc.structureByteStride = sizeof(GpuDeferredBranch);
+	deferredBranchDesc.usageFlags = ResourceUsageFlags::UnorderedAccess;
+	deferredBranchDesc.debugName = "PathTracer_DeferredBranches";
+	deferredBranches_ = renderContext->CreateBuffer(deferredBranchDesc, ResourceViewType::UnorderedAccess);
+
 	frameConstants_.resize(renderContext->GetFramesInFlight());
 	for (ResourceHandle &constants: frameConstants_)
 	{
@@ -80,7 +87,8 @@ PathTracerPass::~PathTracerPass()
 								  guides_.depth,
 								  guides_.specularHitDistance,
 								  guides_.specularMotionVectors,
-								  cameraState_ })
+								  cameraState_,
+								  deferredBranches_ })
 	{
 		if (target != InvalidResourceHandle)
 		{
@@ -283,7 +291,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.textureLodScale =
 			settings_.rayConeTextureLod ? exp2f(settings_.textureLodBias + upscalerBias) : 0.0f;
 	constants.anisotropicSegments = static_cast<uint>(std::max(settings_.anisotropicSegments, 0));
-	constants.glassReflectionSplits = static_cast<uint>(std::max(settings_.glassReflectionSplits, 0));
+	// TracePath counts splits in 8 bits.
+	constants.glassReflectionSplits = static_cast<uint>(std::clamp(settings_.glassReflectionSplits, 0, 255));
 	constants.subsurfaceComponents = (settings_.subsurfaceZeroScattering ? SUBSURFACE_ZERO_SCATTERING : 0u) |
 									 (settings_.subsurfaceSingleScattering ? SUBSURFACE_SINGLE_SCATTERING : 0u) |
 									 (settings_.subsurfaceMultipleScattering ? SUBSURFACE_MULTIPLE_SCATTERING : 0u);
@@ -318,7 +327,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		constants.atmosphereVolumetricShadows = atmosphereSettings.volumetricShadows ? 1u : 0u;
 	}
 	constants.frameIndex = renderContext->GetCurrentFrame();
-	constants.maxBounces = static_cast<uint>(settings_.maxBounces);
+	// TracePath keeps the bounce a deferred branch resumes at in 8 bits.
+	constants.maxBounces = static_cast<uint>(std::clamp(settings_.maxBounces, 0, 254));
 
 	// The slot for this frame index was last read framesInFlight frames ago, and BeginFrame has
 	// already waited on that frame's fence.
@@ -348,6 +358,10 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 										  ResourceSync::Raytracing,
 										  ResourceAccess::UnorderedAccess);
 	}
+	renderContext->TransitionResource(deferredBranches_,
+									  ResourceLayout::UnorderedAccess,
+									  ResourceSync::Raytracing,
+									  ResourceAccess::UnorderedAccess);
 
 	renderContext->SetRaytracingPipeline(pipeline->pipeline);
 	renderContext->SetRaytracingConstantBuffer(0, constantBuffer);
@@ -374,6 +388,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	{
 		renderContext->SetRaytracingUAV(i, targets[i]);
 	}
+	renderContext->SetRaytracingUAV(9, deferredBranches_);
 	renderContext->DispatchRays(pipeline->shaderTable, width_, height_, 1);
 
 	renderContext->EndProfileScope();

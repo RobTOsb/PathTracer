@@ -101,6 +101,7 @@ private:
 	ResourceHandle output_ = InvalidResourceHandle;
 	PathTracerGuides guides_;
 	ResourceHandle cameraState_ = InvalidResourceHandle; // GpuCameraState per pixel, DLSS-RR only
+	ResourceHandle deferredBranches_ = InvalidResourceHandle; // GpuDeferredBranch per pixel
 	std::vector<ResourceHandle> frameConstants_; // one per frame in flight, CPU-written each frame
 	uint width_ = 0;
 	uint height_ = 0;

@@ -376,6 +376,17 @@ struct GpuCameraState
 	uint3 chainPixelU;
 	uint3 chainPixelV;
 	uint3 chainMotion;
+	float3 cameraDirection; // the camera ray's, rather than held in registers through the path
+};
+
+// One per render pixel: the branch a glass split leaves for later (PathTracer/GlassSplit.slang).
+struct GpuDeferredBranch
+{
+	float3 origin;
+	float coneWidth;
+	float3 throughput;
+	float coneSpread;
+	float3 direction;
 };
 
 // Root constants for the tonemap compute pass (bound as g_PushConstants).
@@ -402,7 +413,8 @@ static_assert(sizeof(FrameConstants) == 480,"FrameConstants must match the HLSL 
 static_assert(sizeof(GpuMaterial) == 128,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
-static_assert(sizeof(GpuCameraState) == 140, "GpuCameraState must match the structured buffer stride");
+static_assert(sizeof(GpuCameraState) == 152, "GpuCameraState must match the structured buffer stride");
+static_assert(sizeof(GpuDeferredBranch) == 44, "GpuDeferredBranch must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 56, "TonemapConstants must fit the root constants");
 #endif
 

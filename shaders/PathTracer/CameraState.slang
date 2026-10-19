@@ -16,6 +16,7 @@ struct CameraState
     PaneReflection panes;
     float3 transmittance; // of the walls in front of the primary surface
     float distance; // camera to the latest hit through those walls
+    float3 cameraDir; // the camera ray's direction
 };
 
 CameraState DefaultCameraState(float3 cameraDir)
@@ -23,6 +24,7 @@ CameraState DefaultCameraState(float3 cameraDir)
     CameraState s = (CameraState)0;
     s.guides = DefaultGuides(cameraDir);
     s.transmittance = float3(1.0, 1.0, 1.0);
+    s.cameraDir = cameraDir;
     return s;
 }
 
@@ -50,12 +52,6 @@ RayDifferential UnpackDifferential(uint3 p)
     return r;
 }
 
-uint CameraStateIndex()
-{
-    uint2 pixel = DispatchRaysIndex().xy;
-    return pixel.y * DispatchRaysDimensions().x + pixel.x;
-}
-
 void StoreCameraState(CameraState s)
 {
 #ifdef DLSS_RR
@@ -79,6 +75,7 @@ void StoreCameraState(CameraState s)
     p.paneCurvatureHitDistance = PackHalf2(float2(s.panes.curvature, s.panes.hitDistance));
     p.transmittance = uint2(PackHalf2(s.transmittance.xy), PackHalf2(float2(s.transmittance.z, 0.0)));
     p.distance = s.distance;
+    p.cameraDirection = s.cameraDir;
     p.flags = (sky ? CAMERA_STATE_SKY : 0) | (s.chain.active ? CAMERA_STATE_CHAIN_ACTIVE : 0) |
               (s.chain.parityOdd ? CAMERA_STATE_CHAIN_PARITY_ODD : 0) |
               (s.chain.throughGlass ? CAMERA_STATE_CHAIN_THROUGH_GLASS : 0) |
@@ -97,7 +94,7 @@ void StoreCameraState(CameraState s)
         p.chainPixelV = uint3(0, 0, 0);
         p.chainMotion = uint3(0, 0, 0);
     }
-    g_CameraState[CameraStateIndex()] = p;
+    g_CameraState[PixelIndex()] = p;
 #endif
 }
 
@@ -105,7 +102,7 @@ CameraState LoadCameraState()
 {
     CameraState s = (CameraState)0;
 #ifdef DLSS_RR
-    GpuCameraState p = g_CameraState[CameraStateIndex()];
+    GpuCameraState p = g_CameraState[PixelIndex()];
     bool sky = (p.flags & CAMERA_STATE_SKY) != 0;
     s.guides.position = float4(p.guidePosition, sky ? 0.0 : 1.0);
     s.guides.normal = sky ? float3(0.0, 0.0, 0.0) : OctDecode(p.guideNormal);
@@ -145,13 +142,14 @@ CameraState LoadCameraState()
     s.panes.hitDistance = paneCurvatureHitDistance.y;
     s.transmittance = float3(UnpackHalf2(p.transmittance.x), UnpackHalf2(p.transmittance.y).x);
     s.distance = p.distance;
+    s.cameraDir = p.cameraDirection;
 #endif
     return s;
 }
 
 // The guides once the path is done. The specular guides follow the reflection on the guides' surface,
 // or on the brightest split pane in front of it if that reflects more.
-PrimaryGuides FinishGuides(CameraState s, float3 cameraOrigin, float3 cameraDir)
+PrimaryGuides FinishGuides(CameraState s, float3 cameraOrigin)
 {
     PrimaryGuides guides = s.guides;
     guides.reflector = guides.position;
@@ -162,7 +160,7 @@ PrimaryGuides FinishGuides(CameraState s, float3 cameraOrigin, float3 cameraDir)
         guides.specularAlbedo += s.panes.albedo;
         if (paneReflects)
         {
-            guides.reflector = float4(cameraOrigin + cameraDir * s.panes.distance, 1.0);
+            guides.reflector = float4(cameraOrigin + s.cameraDir * s.panes.distance, 1.0);
             guides.reflectorRoughness = 0.0;
             guides.roughness = 0.0;
             guides.curvature = s.panes.curvature;
