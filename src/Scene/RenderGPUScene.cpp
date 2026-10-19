@@ -1246,6 +1246,11 @@ void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMater
 		{
 			packed = PackGpuMaterial(material);
 		}
+		// Derived here rather than baked, so cached scenes get it too.
+		if (IsSimpleMaterial(packed))
+		{
+			packed.emissiveFlags.y |= GPU_MATERIAL_SIMPLE;
+		}
 		materialGeometry_.push_back(MaterialGeometryFlags(material));
 	}
 

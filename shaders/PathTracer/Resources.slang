@@ -89,6 +89,12 @@ float2 UnpackMaterialHalves(uint bits)
     return float2(f16tof32(bits & 0xFFFF), f16tof32(bits >> 16));
 }
 
+// The row's GPU_MATERIAL_SIMPLE bit, which picks TracePath's shading specialisation.
+bool IsSimpleMaterial(uint index)
+{
+    return (g_Materials[index].emissiveFlags.y & GPU_MATERIAL_SIMPLE) != 0;
+}
+
 // UnpackGpuMaterial's shader side. Fields the caller does not read are never loaded or converted.
 MaterialData LoadGpuMaterial(uint index)
 {

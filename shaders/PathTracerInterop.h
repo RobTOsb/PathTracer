@@ -210,6 +210,9 @@ struct MaterialData
 #define GPU_MATERIAL_TRANSMISSION_FLAGS_SHIFT 18 // GpuTransmissionFlags, 2 bits
 #define GPU_MATERIAL_WEIGHT_CHANNEL_SHIFT 20 // subsurfaceWeightChannel, 2 bits
 #define GPU_MATERIAL_SCALE_CHANNEL_SHIFT 22 // subsurfaceScaleChannel, 2 bits
+// No transmission, subsurface, coat, sheen or anisotropy, so the path tracer shades it with only the
+// base's diffuse and specular lobes (SimplifyMaterial). Set at upload, see IsSimpleMaterial.
+#define GPU_MATERIAL_SIMPLE (1u << 24)
 
 // One MaterialData per row of a StructuredBuffer, packed to 128 bytes (one aligned cache line): the
 // factors as halves (x in the low 16 bits), the coat's [0, 1] weight and roughness as unorm8, the texture
@@ -343,6 +346,16 @@ inline MaterialData UnpackGpuMaterial(const GpuMaterial &p)
 	m.coatRoughnessTexture = p.coatRoughnessTexture;
 	m.coatNormalTexture = p.coatNormalTexture;
 	return m;
+}
+
+// Whether LoadMaterial would leave every layer above the base off for this row: the same tests on the
+// same (unpacked half) values.
+inline bool IsSimpleMaterial(const GpuMaterial &p)
+{
+	const MaterialData m = UnpackGpuMaterial(p);
+	return !(m.transmission > 0.0f) && !(m.subsurfaceWeight > 0.0f) && !(m.coatWeight > 0.0f) &&
+		   !(m.sheenColour.x > 0.0f || m.sheenColour.y > 0.0f || m.sheenColour.z > 0.0f) &&
+		   m.anisotropy.x == 0.0f && m.anisotropy.y == 0.0f;
 }
 #endif
 

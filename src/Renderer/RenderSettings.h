@@ -31,7 +31,7 @@ struct LightSettings
 	LightSamplingMode sampling = LIGHT_SAMPLING_TREE;
 	// Light tree: path vertices before this bounce (0 = primary hit) walk the tree, later ones select by
 	// flux, which costs one lookup instead of a walk per light sample and per emitter hit's MIS.
-	int treeBounces = 1;
+	int treeBounces = 2;
 	// Light tree: skip the glossy importance for lobes at least this rough (perceptual roughness).
 	bool diffuseOnlyRoughLobes = true;
 	float diffuseOnlyRoughness = 0.7f;

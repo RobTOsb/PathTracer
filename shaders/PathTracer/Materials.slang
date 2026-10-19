@@ -112,9 +112,33 @@ void ApplyMaterialOverrides(inout OpenPBRBaseParams p)
     }
 }
 
+// A GPU_MATERIAL_SIMPLE material's layers as the constants they are, so the compiler drops every lobe
+// but the base's diffuse and specular from the code that follows.
+void SimplifyMaterial(inout OpenPBRBaseParams p)
+{
+    OpenPBRBaseParams d = OpenPBRDefaults();
+    p.specularRoughnessAnisotropy = 0.0;
+    p.transmissionWeight = 0.0;
+    p.transmissionColour = d.transmissionColour;
+    p.transmissionDepth = 0.0;
+    p.subsurfaceWeight = 0.0;
+    p.subsurfaceColour = d.subsurfaceColour;
+    p.subsurfaceScatterAnisotropy = 0.0;
+    p.subsurfaceRadius = float3(0.0, 0.0, 0.0);
+    p.coatWeight = 0.0;
+    p.coatRoughness = 0.0;
+    p.geometryCoatNormal = d.geometryCoatNormal;
+    p.fuzzWeight = 0.0;
+    p.fuzzColour = d.fuzzColour;
+    p.fuzzRoughness = d.fuzzRoughness;
+    // Without transmission or subsurface, a thin wall shades as a solid opaque surface.
+    p.geometryThinWalled = false;
+}
+
 // Reads the material row once, samples all of its textures and applies the normal map to hit.Ns.
 // The textures are filtered over the footprint of a ray cone coneWidth wide where it meets the surface.
-OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotropic)
+// simple: the row is GPU_MATERIAL_SIMPLE, so only the base's textures are read.
+OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotropic, bool simple)
 {
     MaterialData material = LoadGpuMaterial(hit.materialId);
     float2 uv = hit.uv;
@@ -135,7 +159,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     float coatWeight = material.coatWeight;
     float coatRoughness = material.coatRoughness;
     float3 coatNormal = hit.N;
-    if (coatWeight > 0.0)
+    if (!simple && coatWeight > 0.0)
     {
         if (material.coatWeightTexture != INVALIDDESCRIPTORHANDLE)
             coatWeight *= SampleTextureGrad(material.coatWeightTexture, uv, ddx, ddy, anisotropic).r;
@@ -164,7 +188,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     }
 
     float transmission = material.transmission;
-    if (transmission > 0.0 && material.transmissionTexture != INVALIDDESCRIPTORHANDLE)
+    if (!simple && transmission > 0.0 && material.transmissionTexture != INVALIDDESCRIPTORHANDLE)
         transmission *= SampleTextureGrad(material.transmissionTexture, uv, ddx, ddy, anisotropic).r;
     bool thinWalled = (material.transmissionFlags & TRANSMISSION_THIN_WALLED) != 0;
     if (thinWalled && material.transmission > 0.0 && (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) == 0)
@@ -172,7 +196,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
 
     float anisotropyStrength = 0.0;
     float2 anisotropy = material.anisotropy;
-    if (any(anisotropy != 0.0))
+    if (!simple && any(anisotropy != 0.0))
     {
         float2 direction = anisotropy;
         anisotropyStrength = length(anisotropy);
@@ -207,7 +231,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     SetTransmission(p, material, transmission, thinWalled);
     if (anisotropyStrength > 0.0)
         SetGltfAnisotropy(p, saturate(anisotropyStrength));
-    if (any(material.sheenColour > 0.0))
+    if (!simple && any(material.sheenColour > 0.0))
     {
         float3 sheen = material.sheenColour;
         if (material.sheenColourTexture != INVALIDDESCRIPTORHANDLE)
@@ -222,7 +246,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     // On a thin wall the subsurface is split between diffuse reflection and diffuse transmission by its
     // anisotropy. In a solid object it is a scattering medium instead, unless the Rendering panel
     // turned all of it off.
-    if (material.subsurfaceWeight > 0.0)
+    if (!simple && material.subsurfaceWeight > 0.0)
     {
         float weight = material.subsurfaceWeight;
         if (material.subsurfaceWeightTexture != INVALIDDESCRIPTORHANDLE)
@@ -246,6 +270,8 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
         }
     }
 
+    if (simple)
+        SimplifyMaterial(p);
     ApplyMaterialOverrides(p);
     return p;
 }
@@ -285,7 +311,7 @@ PackedMaterial PackMaterial(OpenPBRBaseParams p)
     return m;
 }
 
-OpenPBRBaseParams UnpackMaterial(PackedMaterial m)
+OpenPBRBaseParams UnpackMaterial(PackedMaterial m, bool simple)
 {
     OpenPBRBaseParams p = OpenPBRDefaults();
     float2 h;
@@ -329,6 +355,8 @@ OpenPBRBaseParams UnpackMaterial(PackedMaterial m)
     p.geometryBitangent = cross(N, p.geometryTangent);
     h = UnpackHalf2(m.coatFuzz.x);
     SetGltfClearcoat(p, h.x, h.y, OctDecode(m.basis.z));
+    if (simple)
+        SimplifyMaterial(p);
     // The only override that sets a value LoadMaterial otherwise leaves at its default.
     if ((g_Frame.materialOverrides & MATERIAL_OVERRIDE_NO_SPECULAR) != 0)
         p.specularColour = float3(0.0, 0.0, 0.0);

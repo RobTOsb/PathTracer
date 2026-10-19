@@ -81,6 +81,319 @@ void ArriveCameraState(inout CameraState camera, uint loaded, bool fromCamera, b
         camera.distance += t;
 }
 
+// What ShadeSurface leaves TracePath to decide: whether and how the path goes on, and the number Russian
+// roulette compares with.
+struct SurfaceOutcome
+{
+    bool continuePath;
+    bool passThrough;
+    float rrU;
+};
+
+// The hit's shading: emission, NEE, the BSDF sample (and the glass splits), the DLSS-RR camera state and
+// subsurface scattering, for the segment that ended at the payload's hit. SIMPLE: a GPU_MATERIAL_SIMPLE
+// material, whose specialisation drops every lobe but the base's and so holds far fewer registers.
+// arrivedExtinction is the medium the segment crossed, segmentExtinction comes back as the next one's.
+SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 origin, inout float3 dir, uint bounce,
+                                               uint rayFlags, bool fromCamera, bool chainActive, bool hitDistanceArrived,
+                                               bool paneHitArrived, bool smoothSegment, bool firstSegment, bool cameraSegment,
+                                               float3 arrivedExtinction, inout uint flags, inout uint rng, inout float3 radiance,
+                                               inout float3 throughput, inout float prevBsdfPdf,
+                                               inout PackedLightSelectVertex prevVertex, inout RayCone cone,
+                                               inout float3 segmentExtinction, inout float rrInvScale)
+{
+    // Front-face emission found by BSDF sampling is MIS weighted against NEE at the previous vertex
+    // unless the triangle has no light (degenerate or black) or light buffer NEE is off. The weight's
+    // light tree walk needs only the packed hit, so it comes before the material, which is then not
+    // held across it.
+    float3 wo = -dir;
+    bool frontFace = dot(OctDecode(payload.Ng), wo) > 0.0;
+    float emissionWeight = 1.0;
+    if (frontFace && !fromCamera && !smoothSegment && g_Frame.lightCount > 0 && payload.emitter != INVALID_LIGHT_INDEX)
+    {
+        uint lightIndex = g_Emitters[payload.emitter];
+        if (lightIndex != INVALID_LIGHT_INDEX)
+            emissionWeight = PowerHeuristic(prevBsdfPdf, EmitterLightPdf(UnpackLightSelectVertex(prevVertex), lightIndex, dir,
+                                                                         origin + dir * payload.hitT));
+    }
+
+    HitInfo hit = UnpackHit(payload, origin, dir);
+
+    // Material and shading basis for this hit, its textures filtered over the cone's footprint.
+    cone.width += cone.spread * hit.t;
+    OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments, SIMPLE);
+    if (frontFace && any(hit.emission > 0.0))
+        radiance += throughput * hit.emission * emissionWeight;
+
+    // Opaque and thin-walled surfaces are treated as two-sided: face the frame towards the viewer
+    // so a back face is not mistaken for the inside of a transmissive object
+    bool opaque = mat.transmissionWeight <= 0.0 && !HasDiffuseTransmission(mat);
+    if ((opaque || mat.geometryThinWalled) && dot(hit.Ng, wo) < 0.0)
+    {
+        hit.Ng = -hit.Ng;
+        hit.N = -hit.N;
+        hit.Ns = -hit.Ns;
+        FlipShape(hit);
+    }
+
+    SetShadingBasis(mat, hit.T, hit.B, hit.N, hit.Ns, wo);
+    OpenPBRContext ctx = OpenPBRSetup(mat, wo);
+
+    // One hash covers the light sample (xy) and the Russian roulette decision (z).
+    float3 lightU = Rand3(rng);
+
+    // Sampled with the rounding prevVertex keeps, so both ends of an emitter's MIS see the same pmf.
+    PackedLightSelectVertex vertex =
+        PackLightSelectVertex(MakeLightSelectVertex(hit.position, mat, ctx, wo, opaque || HasDeltaTransmission(mat), bounce));
+    // The light tree walk needs registers of its own, so across it the material is held packed and
+    // the BSDF context not at all. Both are rebuilt after it, and everything from here on, sampling
+    // and evaluation alike, uses the rebuilt pair.
+    PackedMaterial packedMat = PackMaterial(mat);
+    LightSample ls = SampleLight(UnpackLightSelectVertex(vertex), lightU.xy, rng);
+    mat = UnpackMaterial(packedMat, SIMPLE);
+    ctx = OpenPBRSetup(mat, wo);
+    float3 extinction = MediumExtinction(mat);
+    bool deltaTransmission = HasDeltaTransmission(mat);
+    bool lastSegment = bounce >= g_Frame.maxBounces;
+    float3 neeContribution = float3(0.0, 0.0, 0.0);
+    bool traceShadowRay = false;
+    if (ls.pdf > 0.0 && (!opaque || dot(ls.direction, hit.Ng) > 0.0))
+    {
+        float bsdfPdf;
+        float3 fCos = OpenPBREvalPdf(mat, ctx, ls.direction, bsdfPdf);
+        if (any(fCos > 0.0))
+        {
+            // The last segment takes no BSDF sample, which leaves NEE as the only strategy there.
+            float w = ls.lightSamplingOnly || lastSegment ? 1.0 : PowerHeuristic(ls.pdf, bsdfPdf);
+            bool intoMedium = dot(ls.direction, hit.Ng) < 0.0 && !mat.geometryThinWalled;
+            // The sun is FLT_MAX away. Capped, so a zero extinction cannot meet an overflowed distance
+            // (0 * inf) once the compiler folds exp's log2(e) into it; any medium is far shorter.
+            float3 shadowTransmittance = intoMedium ? exp(-extinction * min(ls.distance, MAX_MEDIUM_DISTANCE))
+                                                    : AtmosphereTransmittance(ls.distance);
+            neeContribution = throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf);
+            traceShadowRay = true;
+        }
+    }
+    // Continue the path by sampling the BSDF, unless this is the last segment
+    bool continuePath = false;
+    bool specularReflection = false;
+    bool passThrough = false;
+    uint lobe = LOBE_NONE;
+    const float3 dirIn = dir;
+    float3 passTransmittance = float3(1.0, 1.0, 1.0);
+    // The two branches cover the specular lobes only, so nothing with a diffuse, coat or fuzz lobe splits.
+    uint splits = (flags >> PATH_SPLITS_SHIFT) & PATH_SPLITS_MASK;
+    bool splittable = !SIMPLE && fromCamera && !lastSegment && splits < g_Frame.glassReflectionSplits && ctx.probDiffuse <= 0.0 &&
+                      ctx.probCoat <= 0.0 && ctx.probFuzz <= 0.0 && ctx.probSpecR > 0.0 && ctx.probSpecR < 1.0;
+    // A thin pane: its reflection now, what is behind it deferred.
+    bool paneSplit = splittable && deltaTransmission;
+    // Solid glass: the refraction now, which the guides' chain follows, its reflection deferred.
+    bool glassSplit = splittable && !mat.geometryThinWalled && !ctx.inside && CoatedSpecularRoughness(mat) <= 0.0;
+    if (paneSplit || glassSplit)
+        flags += 1u << PATH_SPLITS_SHIFT;
+
+    if (paneSplit)
+    {
+        // What is behind the pane is along the camera ray, with the cone as it reached the pane.
+        flags = (flags & ~DEFERRED_MASK) | DEFERRED_PENDING | ((bounce + 1) << DEFERRED_BOUNCE_SHIFT);
+        DeferredBranch deferred;
+        deferred.origin = OffsetRay(hit.position, hit.Ng, dir);
+        deferred.throughput = throughput * ThinDeltaTransmittance(mat, ctx.wo.z);
+        deferred.dir = dir;
+        deferred.coneWidth = cone.width;
+        deferred.coneSpread = cone.spread;
+        StoreDeferredBranch(deferred);
+    }
+
+    // Solid glass takes two samples, its deferred reflection's first, from one call site so the
+    // sampler is inlined once. A split sets u.x to land in its lobe, so a sample is that or none.
+    // The reflection goes to g_DeferredBranches as soon as it is sampled.
+    BSDFSample bs = (BSDFSample)0;
+    bool reflectionDeferred = false;
+    if (!lastSegment)
+    {
+        [loop]
+        for (uint s = glassSplit ? 0 : 1; s < 2; ++s)
+        {
+            float3 u = Rand3(rng);
+            if (s == 0 || paneSplit)
+                u.x = 0.0;
+            else if (glassSplit)
+                u.x = ctx.probSpecR; // the first value past the reflection's share
+            BSDFSample sample = OpenPBRSample(mat, ctx, u);
+            if (s != 0)
+            {
+                bs = sample;
+            }
+            else if (sample.lobe != LOBE_NONE)
+            {
+                flags = (flags & ~DEFERRED_MASK) | DEFERRED_PENDING | DEFERRED_REFLECTION | ((bounce + 1) << DEFERRED_BOUNCE_SHIFT);
+                DeferredBranch deferred;
+                deferred.origin = OffsetRay(hit.position, hit.Ng, sample.wi);
+                deferred.dir = sample.wi;
+                deferred.throughput = throughput * sample.weight * ctx.probSpecR;
+                deferred.coneWidth = cone.width;
+                deferred.coneSpread = min(cone.spread + g_Frame.rayConeBsdfSpread * SampledConeSpread(sample.pdf / ctx.probSpecR), PI);
+                StoreDeferredBranch(deferred);
+                reflectionDeferred = true;
+            }
+        }
+    }
+
+    lobe = bs.lobe;
+    passThrough = bs.lobe == LOBE_DELTA_TRANSMISSION;
+    continuePath = bs.lobe != LOBE_NONE;
+    if (passThrough)
+    {
+        // Same direction, same cone. NEE at the segment's start already sees through this wall, so
+        // its MIS only gains the probability of picking the lobe, which bs.pdf is.
+        throughput *= bs.weight;
+        prevBsdfPdf *= bs.pdf;
+        passTransmittance = bs.weight * bs.pdf;
+        segmentExtinction = float3(0.0, 0.0, 0.0);
+    }
+    else if (continuePath)
+    {
+        // A pane's reflection is not its guides' (what is behind it is), see PaneReflection. The
+        // guides' reflection is the coat's or the base's, whichever reflects more.
+        specularReflection = !paneSplit && bs.lobe == (CoatLeadsGuides(ctx) ? LOBE_COAT : LOBE_SPECULAR_REFLECTION);
+        float lobeProbability = paneSplit ? ctx.probSpecR : glassSplit ? ctx.probSpecT : 1.0;
+        throughput *= bs.weight * lobeProbability;
+        // Russian roulette on a pane's reflection is relative to the branch, as for a path of its own.
+        if (paneSplit)
+            rrInvScale = 1.0 / max(MaxComponent(throughput), 1.0e-8);
+        prevBsdfPdf = bs.pdf;
+        prevVertex = vertex;
+        // Surface curvature is ignored. The cap stops a tiny pdf from making the width infinite.
+        cone.spread = min(cone.spread + g_Frame.rayConeBsdfSpread * SampledConeSpread(bs.pdf / lobeProbability), PI);
+
+        // Heading into the object means travelling through its medium until the next hit.
+        segmentExtinction = dot(bs.wi, hit.Ng) < 0.0 ? extinction : float3(0.0, 0.0, 0.0);
+        dir = bs.wi;
+    }
+
+    // DLSS-RR guides: the primary surface, or the first surface past the mirrors and glass in front
+    // of it. A surface that takes another lobe, or ends the path, ends the chain on itself.
+    float psrFraction = 1.0;
+    bool psrEvent = continuePath && !paneSplit && (fromCamera || chainActive) &&
+                    (glassSplit ? CoatedSpecularRoughness(mat) <= g_Frame.psrMaxRoughness : IsPsrEvent(mat, ctx, lobe, psrFraction));
+    if (cameraSegment)
+    {
+        // Only the parts this segment changes come in. The primary surface's guides are written afresh,
+        // and a chain needs the guides only where it ends.
+        bool chainEnds = chainActive && !passThrough && !psrEvent;
+        bool panesChange = paneSplit || reflectionDeferred;
+        uint parts = (chainActive ? CAMERA_CHAIN : 0) | (chainEnds ? CAMERA_GUIDES | CAMERA_DIRECTION : 0) |
+                     (panesChange ? CAMERA_PANES : 0) | (fromCamera || chainEnds ? CAMERA_VIEW : 0);
+        CameraState camera = firstSegment ? DefaultCameraState(dirIn) : LoadCameraState(parts);
+        uint loaded = firstSegment ? CAMERA_ALL : parts;
+        ArriveCameraState(camera, loaded, fromCamera, chainActive, hitDistanceArrived, paneHitArrived, true, hit.t, arrivedExtinction);
+
+        if (fromCamera)
+        {
+            camera.guides.position = float4(hit.position, 1.0);
+            camera.guides.normal = mat.geometryNormal;
+            camera.guides.roughness = GuideRoughness(mat, ctx);
+            // Until the path continues with a specular reflection: no reflection data, or last frame's.
+            camera.guides.specularHitDistance = InitialSpecularHitDistance(camera.guides.roughness);
+            camera.guides.curvature = ViewedCurvature(hit, wo);
+            camera.guides.hasChainMotion = false;
+            ReflectanceGuides(mat, ctx, wo, camera.guides);
+            camera.guides.diffuseAlbedo *= camera.transmittance;
+            camera.guides.specularAlbedo *= camera.transmittance;
+        }
+
+        if (paneSplit)
+        {
+            PrimaryGuides seen;
+            ReflectanceGuides(mat, ctx, wo, seen);
+            if (AddPaneReflection(camera.panes, camera.transmittance * seen.specularAlbedo, camera.distance,
+                                  ViewedCurvature(hit, wo)) &&
+                continuePath)
+                flags |= PATH_PANE_HIT_PENDING;
+            // The reflection branch leaves the camera's transmittance and distance alone, so they take on
+            // the pane's now, for what is behind it.
+            camera.transmittance *= ThinDeltaTransmittance(mat, ctx.wo.z);
+        }
+        else if (reflectionDeferred)
+        {
+            // The guides' specular albedo is the glass's reflection, which moves to the panes.
+            if (AddPaneReflection(camera.panes, camera.guides.specularAlbedo, camera.distance, ViewedCurvature(hit, wo)))
+                flags |= DEFERRED_BRIGHTEST_PANE;
+            camera.guides.specularAlbedo = float3(0.0, 0.0, 0.0);
+        }
+
+        if (fromCamera)
+        {
+            if (specularReflection)
+                flags |= PATH_HIT_DISTANCE_PENDING;
+            if (psrEvent)
+                camera.chain = StartSpecularChain(mat, ctx, hit, wo, dirIn, dir, specularReflection, psrFraction, camera.distance,
+                                                  cone.width);
+            if (!opaque && !mat.geometryThinWalled && !(psrEvent && camera.chain.throughGlass))
+                camera.guides.diffuseAlbedo += camera.transmittance * PsrEventThroughput(mat, ctx, wo, false);
+            if (passThrough)
+                camera.transmittance *= passTransmittance;
+        }
+        else if (chainActive)
+        {
+            ChainArrive(camera.chain, dirIn, hit);
+            if (passThrough)
+            {
+                camera.chain.throughput *= passTransmittance;
+            }
+            else if (psrEvent)
+            {
+                AddPsrEvent(camera.chain, mat, ctx, hit, wo, dirIn, dir, specularReflection, cone.width);
+            }
+            else
+            {
+                camera.chain.active = false;
+                if (!ctx.inside && ReplacePrimarySurface(camera.chain, mat, ctx, ViewedCurvature(hit, wo), dirIn, hit.Ng, wo,
+                                                         camera.cameraDir, camera.guides))
+                    flags = SetFlag(flags, PATH_HIT_DISTANCE_PENDING, specularReflection);
+                else if (camera.chain.throughGlass)
+                    camera.guides.diffuseAlbedo += camera.transmittance * camera.chain.throughput;
+            }
+        }
+
+        uint changed = (fromCamera || chainEnds ? CAMERA_GUIDES : 0) | CAMERA_CHAIN | (panesChange ? CAMERA_PANES : 0) |
+                       (fromCamera ? CAMERA_VIEW : 0) | (firstSegment ? CAMERA_ALL : 0);
+        StoreCameraState(camera, changed);
+        flags = SetFlag(flags, PATH_CHAIN_ACTIVE, camera.chain.active);
+    }
+
+    if (continuePath)
+    {
+        origin = OffsetRay(hit.position, hit.Ng, dir);
+        // Through the medium under the surface: what leaves here comes in at other points of the
+        // object, and the path goes on out of one of them.
+        if (!SIMPLE && lobe == LOBE_SUBSURFACE)
+        {
+            SubsurfaceExit exit = (SubsurfaceExit)0;
+            if (dot(dir, hit.Ng) < 0.0)
+                radiance += SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput, rayFlags,
+                                              bounce + 1, rng, exit);
+            continuePath = exit.valid;
+            origin = exit.origin;
+            dir = exit.dir;
+            throughput = exit.throughput;
+            prevBsdfPdf = exit.pdf;
+            prevVertex = exit.vertex;
+            segmentExtinction = float3(0.0, 0.0, 0.0);
+        }
+    }
+
+    if (traceShadowRay)
+        radiance += neeContribution * CastShadowRay(hit.position, hit.Ng, ls.direction, ls.distance, rayFlags);
+
+    SurfaceOutcome outcome;
+    outcome.continuePath = continuePath;
+    outcome.passThrough = passThrough;
+    outcome.rrU = lightU.z;
+    return outcome;
+}
+
 // The DLSS-RR guides come out in g_CameraState, see FinishGuides.
 float3 TracePath(float3 origin, float3 dir, inout uint rng)
 {
@@ -174,302 +487,29 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 break;
             }
 
-            // Front-face emission found by BSDF sampling is MIS weighted against NEE at the previous vertex
-            // unless the triangle has no light (degenerate or black) or light buffer NEE is off. The weight's
-            // light tree walk needs only the packed hit, so it comes before the material, which is then not
-            // held across it.
-            float3 wo = -dir;
-            bool frontFace = dot(OctDecode(payload.Ng), wo) > 0.0;
-            float emissionWeight = 1.0;
-            if (frontFace && !fromCamera && !smoothSegment && g_Frame.lightCount > 0 && payload.emitter != INVALID_LIGHT_INDEX)
-            {
-                uint lightIndex = g_Emitters[payload.emitter];
-                if (lightIndex != INVALID_LIGHT_INDEX)
-                    emissionWeight = PowerHeuristic(prevBsdfPdf, EmitterLightPdf(UnpackLightSelectVertex(prevVertex), lightIndex, dir,
-                                                                                 origin + dir * payload.hitT));
-            }
+            // Most surfaces have only the base's lobes and shade in a specialisation without the others, in far
+            // fewer registers. SER orders the hits by material, so a wave mostly takes just one of the two.
+            SurfaceOutcome outcome;
+            if (IsSimpleMaterial(payload.materialId & ~TANGENT_SIGN_BIT))
+                outcome = ShadeSurface<true>(payload, origin, dir, bounce, rayFlags, fromCamera, chainActive, hitDistanceArrived,
+                                             paneHitArrived, smoothSegment, firstSegment, cameraSegment, medium.xyz, flags, rng,
+                                             radiance, throughput, prevBsdfPdf, prevVertex, cone, segmentExtinction, rrInvScale);
+            else
+                outcome = ShadeSurface<false>(payload, origin, dir, bounce, rayFlags, fromCamera, chainActive, hitDistanceArrived,
+                                              paneHitArrived, smoothSegment, firstSegment, cameraSegment, medium.xyz, flags, rng,
+                                              radiance, throughput, prevBsdfPdf, prevVertex, cone, segmentExtinction, rrInvScale);
 
-            hit = UnpackHit(payload, origin, dir);
-
-            // Material and shading basis for this hit, its textures filtered over the cone's footprint.
-            cone.width += cone.spread * hit.t;
-            OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments);
-            if (frontFace && any(hit.emission > 0.0))
-                radiance += throughput * hit.emission * emissionWeight;
-
-            // Opaque and thin-walled surfaces are treated as two-sided: face the frame towards the viewer
-            // so a back face is not mistaken for the inside of a transmissive object
-            bool opaque = mat.transmissionWeight <= 0.0 && !HasDiffuseTransmission(mat);
-            if ((opaque || mat.geometryThinWalled) && dot(hit.Ng, wo) < 0.0)
-            {
-                hit.Ng = -hit.Ng;
-                hit.N = -hit.N;
-                hit.Ns = -hit.Ns;
-                FlipShape(hit);
-            }
-
-            SetShadingBasis(mat, hit.T, hit.B, hit.N, hit.Ns, wo);
-            OpenPBRContext ctx = OpenPBRSetup(mat, wo);
-
-            // One hash covers the light sample (xy) and the Russian roulette decision (z).
-            float3 lightU = Rand3(rng);
-
-            // Sampled with the rounding prevVertex keeps, so both ends of an emitter's MIS see the same pmf.
-            PackedLightSelectVertex vertex =
-                PackLightSelectVertex(MakeLightSelectVertex(hit.position, mat, ctx, wo, opaque || HasDeltaTransmission(mat), bounce));
-            // The light tree walk needs registers of its own, so across it the material is held packed and
-            // the BSDF context not at all. Both are rebuilt after it, and everything from here on, sampling
-            // and evaluation alike, uses the rebuilt pair.
-            PackedMaterial packedMat = PackMaterial(mat);
-            LightSample ls = SampleLight(UnpackLightSelectVertex(vertex), lightU.xy, rng);
-            mat = UnpackMaterial(packedMat);
-            ctx = OpenPBRSetup(mat, wo);
-            float3 extinction = MediumExtinction(mat);
-            bool deltaTransmission = HasDeltaTransmission(mat);
-            bool lastSegment = bounce >= g_Frame.maxBounces;
-            float3 neeContribution = float3(0.0, 0.0, 0.0);
-            bool traceShadowRay = false;
-            if (ls.pdf > 0.0 && (!opaque || dot(ls.direction, hit.Ng) > 0.0))
-            {
-                float bsdfPdf;
-                float3 fCos = OpenPBREvalPdf(mat, ctx, ls.direction, bsdfPdf);
-                if (any(fCos > 0.0))
-                {
-                    // The last segment takes no BSDF sample, which leaves NEE as the only strategy there.
-                    float w = ls.lightSamplingOnly || lastSegment ? 1.0 : PowerHeuristic(ls.pdf, bsdfPdf);
-                    bool intoMedium = dot(ls.direction, hit.Ng) < 0.0 && !mat.geometryThinWalled;
-                    // The sun is FLT_MAX away. Capped, so a zero extinction cannot meet an overflowed distance
-                    // (0 * inf) once the compiler folds exp's log2(e) into it; any medium is far shorter.
-                    float3 shadowTransmittance = intoMedium ? exp(-extinction * min(ls.distance, MAX_MEDIUM_DISTANCE))
-                                                            : AtmosphereTransmittance(ls.distance);
-                    neeContribution = throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf);
-                    traceShadowRay = true;
-                }
-            }
-            // Continue the path by sampling the BSDF, unless this is the last segment
-            bool continuePath = false;
-            bool specularReflection = false;
-            bool passThrough = false;
-            uint lobe = LOBE_NONE;
-            const float3 dirIn = dir;
-            float3 passTransmittance = float3(1.0, 1.0, 1.0);
-            // The two branches cover the specular lobes only, so nothing with a diffuse, coat or fuzz lobe splits.
-            uint splits = (flags >> PATH_SPLITS_SHIFT) & PATH_SPLITS_MASK;
-            bool splittable = fromCamera && !lastSegment && splits < g_Frame.glassReflectionSplits && ctx.probDiffuse <= 0.0 &&
-                              ctx.probCoat <= 0.0 && ctx.probFuzz <= 0.0 && ctx.probSpecR > 0.0 && ctx.probSpecR < 1.0;
-            // A thin pane: its reflection now, what is behind it deferred.
-            bool paneSplit = splittable && deltaTransmission;
-            // Solid glass: the refraction now, which the guides' chain follows, its reflection deferred.
-            bool glassSplit = splittable && !mat.geometryThinWalled && !ctx.inside && CoatedSpecularRoughness(mat) <= 0.0;
-            if (paneSplit || glassSplit)
-                flags += 1u << PATH_SPLITS_SHIFT;
-
-            if (paneSplit)
-            {
-                // What is behind the pane is along the camera ray, with the cone as it reached the pane.
-                flags = (flags & ~DEFERRED_MASK) | DEFERRED_PENDING | ((bounce + 1) << DEFERRED_BOUNCE_SHIFT);
-                DeferredBranch deferred;
-                deferred.origin = OffsetRay(hit.position, hit.Ng, dir);
-                deferred.throughput = throughput * ThinDeltaTransmittance(mat, ctx.wo.z);
-                deferred.dir = dir;
-                deferred.coneWidth = cone.width;
-                deferred.coneSpread = cone.spread;
-                StoreDeferredBranch(deferred);
-            }
-
-            // Solid glass takes two samples, its deferred reflection's first, from one call site so the
-            // sampler is inlined once. A split sets u.x to land in its lobe, so a sample is that or none.
-            // The reflection goes to g_DeferredBranches as soon as it is sampled.
-            BSDFSample bs = (BSDFSample)0;
-            bool reflectionDeferred = false;
-            if (!lastSegment)
-            {
-                [loop]
-                for (uint s = glassSplit ? 0 : 1; s < 2; ++s)
-                {
-                    float3 u = Rand3(rng);
-                    if (s == 0 || paneSplit)
-                        u.x = 0.0;
-                    else if (glassSplit)
-                        u.x = ctx.probSpecR; // the first value past the reflection's share
-                    BSDFSample sample = OpenPBRSample(mat, ctx, u);
-                    if (s != 0)
-                    {
-                        bs = sample;
-                    }
-                    else if (sample.lobe != LOBE_NONE)
-                    {
-                        flags = (flags & ~DEFERRED_MASK) | DEFERRED_PENDING | DEFERRED_REFLECTION | ((bounce + 1) << DEFERRED_BOUNCE_SHIFT);
-                        DeferredBranch deferred;
-                        deferred.origin = OffsetRay(hit.position, hit.Ng, sample.wi);
-                        deferred.dir = sample.wi;
-                        deferred.throughput = throughput * sample.weight * ctx.probSpecR;
-                        deferred.coneWidth = cone.width;
-                        deferred.coneSpread = min(cone.spread + g_Frame.rayConeBsdfSpread * SampledConeSpread(sample.pdf / ctx.probSpecR), PI);
-                        StoreDeferredBranch(deferred);
-                        reflectionDeferred = true;
-                    }
-                }
-            }
-
-            lobe = bs.lobe;
-            passThrough = bs.lobe == LOBE_DELTA_TRANSMISSION;
-            continuePath = bs.lobe != LOBE_NONE;
-            if (passThrough)
-            {
-                // Same direction, same cone. NEE at the segment's start already sees through this wall, so
-                // its MIS only gains the probability of picking the lobe, which bs.pdf is.
-                throughput *= bs.weight;
-                prevBsdfPdf *= bs.pdf;
-                passTransmittance = bs.weight * bs.pdf;
-                segmentExtinction = float3(0.0, 0.0, 0.0);
-            }
-            else if (continuePath)
-            {
-                // A pane's reflection is not its guides' (what is behind it is), see PaneReflection. The
-                // guides' reflection is the coat's or the base's, whichever reflects more.
-                specularReflection = !paneSplit && bs.lobe == (CoatLeadsGuides(ctx) ? LOBE_COAT : LOBE_SPECULAR_REFLECTION);
-                float lobeProbability = paneSplit ? ctx.probSpecR : glassSplit ? ctx.probSpecT : 1.0;
-                throughput *= bs.weight * lobeProbability;
-                // Russian roulette on a pane's reflection is relative to the branch, as for a path of its own.
-                if (paneSplit)
-                    rrInvScale = 1.0 / max(MaxComponent(throughput), 1.0e-8);
-                prevBsdfPdf = bs.pdf;
-                prevVertex = vertex;
-                // Surface curvature is ignored. The cap stops a tiny pdf from making the width infinite.
-                cone.spread = min(cone.spread + g_Frame.rayConeBsdfSpread * SampledConeSpread(bs.pdf / lobeProbability), PI);
-
-                // Heading into the object means travelling through its medium until the next hit.
-                segmentExtinction = dot(bs.wi, hit.Ng) < 0.0 ? extinction : float3(0.0, 0.0, 0.0);
-                dir = bs.wi;
-            }
-
-            // DLSS-RR guides: the primary surface, or the first surface past the mirrors and glass in front
-            // of it. A surface that takes another lobe, or ends the path, ends the chain on itself.
-            float psrFraction = 1.0;
-            bool psrEvent = continuePath && !paneSplit && (fromCamera || chainActive) &&
-                            (glassSplit ? CoatedSpecularRoughness(mat) <= g_Frame.psrMaxRoughness : IsPsrEvent(mat, ctx, lobe, psrFraction));
-            if (cameraSegment)
-            {
-                // Only the parts this segment changes come in. The primary surface's guides are written afresh,
-                // and a chain needs the guides only where it ends.
-                bool chainEnds = chainActive && !passThrough && !psrEvent;
-                bool panesChange = paneSplit || reflectionDeferred;
-                uint parts = (chainActive ? CAMERA_CHAIN : 0) | (chainEnds ? CAMERA_GUIDES | CAMERA_DIRECTION : 0) |
-                             (panesChange ? CAMERA_PANES : 0) | (fromCamera || chainEnds ? CAMERA_VIEW : 0);
-                CameraState camera = firstSegment ? DefaultCameraState(dirIn) : LoadCameraState(parts);
-                uint loaded = firstSegment ? CAMERA_ALL : parts;
-                ArriveCameraState(camera, loaded, fromCamera, chainActive, hitDistanceArrived, paneHitArrived, true, hit.t, medium.xyz);
-
-                if (fromCamera)
-                {
-                    camera.guides.position = float4(hit.position, 1.0);
-                    camera.guides.normal = mat.geometryNormal;
-                    camera.guides.roughness = GuideRoughness(mat, ctx);
-                    // Until the path continues with a specular reflection: no reflection data, or last frame's.
-                    camera.guides.specularHitDistance = InitialSpecularHitDistance(camera.guides.roughness);
-                    camera.guides.curvature = ViewedCurvature(hit, wo);
-                    camera.guides.hasChainMotion = false;
-                    ReflectanceGuides(mat, ctx, wo, camera.guides);
-                    camera.guides.diffuseAlbedo *= camera.transmittance;
-                    camera.guides.specularAlbedo *= camera.transmittance;
-                }
-
-                if (paneSplit)
-                {
-                    PrimaryGuides seen;
-                    ReflectanceGuides(mat, ctx, wo, seen);
-                    if (AddPaneReflection(camera.panes, camera.transmittance * seen.specularAlbedo, camera.distance,
-                                          ViewedCurvature(hit, wo)) &&
-                        continuePath)
-                        flags |= PATH_PANE_HIT_PENDING;
-                    // The reflection branch leaves the camera's transmittance and distance alone, so they take on
-                    // the pane's now, for what is behind it.
-                    camera.transmittance *= ThinDeltaTransmittance(mat, ctx.wo.z);
-                }
-                else if (reflectionDeferred)
-                {
-                    // The guides' specular albedo is the glass's reflection, which moves to the panes.
-                    if (AddPaneReflection(camera.panes, camera.guides.specularAlbedo, camera.distance, ViewedCurvature(hit, wo)))
-                        flags |= DEFERRED_BRIGHTEST_PANE;
-                    camera.guides.specularAlbedo = float3(0.0, 0.0, 0.0);
-                }
-
-                if (fromCamera)
-                {
-                    if (specularReflection)
-                        flags |= PATH_HIT_DISTANCE_PENDING;
-                    if (psrEvent)
-                        camera.chain = StartSpecularChain(mat, ctx, hit, wo, dirIn, dir, specularReflection, psrFraction, camera.distance,
-                                                          cone.width);
-                    if (!opaque && !mat.geometryThinWalled && !(psrEvent && camera.chain.throughGlass))
-                        camera.guides.diffuseAlbedo += camera.transmittance * PsrEventThroughput(mat, ctx, wo, false);
-                    if (passThrough)
-                        camera.transmittance *= passTransmittance;
-                }
-                else if (chainActive)
-                {
-                    ChainArrive(camera.chain, dirIn, hit);
-                    if (passThrough)
-                    {
-                        camera.chain.throughput *= passTransmittance;
-                    }
-                    else if (psrEvent)
-                    {
-                        AddPsrEvent(camera.chain, mat, ctx, hit, wo, dirIn, dir, specularReflection, cone.width);
-                    }
-                    else
-                    {
-                        camera.chain.active = false;
-                        if (!ctx.inside && ReplacePrimarySurface(camera.chain, mat, ctx, ViewedCurvature(hit, wo), dirIn, hit.Ng, wo,
-                                                                 camera.cameraDir, camera.guides))
-                            flags = SetFlag(flags, PATH_HIT_DISTANCE_PENDING, specularReflection);
-                        else if (camera.chain.throughGlass)
-                            camera.guides.diffuseAlbedo += camera.transmittance * camera.chain.throughput;
-                    }
-                }
-
-                uint changed = (fromCamera || chainEnds ? CAMERA_GUIDES : 0) | CAMERA_CHAIN | (panesChange ? CAMERA_PANES : 0) |
-                               (fromCamera ? CAMERA_VIEW : 0) | (firstSegment ? CAMERA_ALL : 0);
-                StoreCameraState(camera, changed);
-                flags = SetFlag(flags, PATH_CHAIN_ACTIVE, camera.chain.active);
-            }
-
-            if (continuePath)
-            {
-                origin = OffsetRay(hit.position, hit.Ng, dir);
-                // Through the medium under the surface: what leaves here comes in at other points of the
-                // object, and the path goes on out of one of them.
-                if (lobe == LOBE_SUBSURFACE)
-                {
-                    SubsurfaceExit exit = (SubsurfaceExit)0;
-                    if (dot(dir, hit.Ng) < 0.0)
-                        radiance += SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput, rayFlags,
-                                                      bounce + 1, rng, exit);
-                    continuePath = exit.valid;
-                    origin = exit.origin;
-                    dir = exit.dir;
-                    throughput = exit.throughput;
-                    prevBsdfPdf = exit.pdf;
-                    prevVertex = exit.vertex;
-                    segmentExtinction = float3(0.0, 0.0, 0.0);
-                }
-            }
-
-            if (traceShadowRay)
-                radiance += neeContribution * CastShadowRay(hit.position, hit.Ng, ls.direction, ls.distance, rayFlags);
-
-            if (!continuePath)
+            if (!outcome.continuePath)
                 break;
 
-            if (!passThrough)
+            if (!outcome.passThrough)
                 flags &= ~PATH_FROM_CAMERA;
 
             // Russian roulette.
             if (bounce >= RR_START_BOUNCE)
             {
                 float q = saturate(MaxComponent(throughput) * rrInvScale);
-                if (lightU.z >= q)
+                if (outcome.rrU >= q)
                     break;
                 throughput /= q;
             }
