@@ -26,7 +26,6 @@ static const uint PATH_CHAIN_ACTIVE = 0x20; // the camera state's chain follows 
 // specular hit distance.
 static const uint PATH_HIT_DISTANCE_PENDING = 0x40;
 static const uint PATH_PANE_HIT_PENDING = 0x80; // the brightest pane's reflection ray ends at the next hit
-static const uint PATH_CAMERA_STATE_STORED = 0x100; // otherwise the camera state is still the default
 static const uint PATH_SPLITS_SHIFT = 16; // glass splits so far, 8 bits
 static const uint PATH_SPLITS_MASK = 0xFF;
 
@@ -52,16 +51,27 @@ float4 UnpackSegmentMedium(uint2 packed)
 // No medium and a scale of 1, as a literal since f32tof16 is not folded.
 static const uint2 SEGMENT_MEDIUM_AIR = uint2(0, 0x3C000000);
 
-// Loads the camera state and applies the segment just traced to it: t is its length, 0 for a miss,
-// through a medium of the given extinction. dir is the segment's, the camera ray's while nothing is stored.
-CameraState ArriveCameraState(bool stored, float3 dir, bool fromCamera, bool chainActive, bool hitDistancePending,
-                              bool paneHitPending, bool hit, float t, float3 extinction)
+// Applies the segment just traced to the camera state: t is its length, 0 for a miss, through a medium
+// of the given extinction. The CAMERA_* parts in loaded are in registers; the hit distances for parts
+// that are not go straight to g_CameraState.
+void ArriveCameraState(inout CameraState camera, uint loaded, bool fromCamera, bool chainActive, bool hitDistancePending,
+                       bool paneHitPending, bool hit, float t, float3 extinction)
 {
-    CameraState camera = stored ? LoadCameraState() : DefaultCameraState(dir);
+    float hitDistance = hit ? t : SKY_HIT_DISTANCE;
     if (hitDistancePending)
-        camera.guides.specularHitDistance = hit ? t : SKY_HIT_DISTANCE;
+    {
+        if ((loaded & CAMERA_GUIDES) != 0)
+            camera.guides.specularHitDistance = hitDistance;
+        else
+            StoreGuideHitDistance(hitDistance);
+    }
     if (paneHitPending)
-        camera.panes.hitDistance = hit ? t : SKY_HIT_DISTANCE;
+    {
+        if ((loaded & CAMERA_PANES) != 0)
+            camera.panes.hitDistance = hitDistance;
+        else
+            StorePaneHitDistance(hitDistance);
+    }
     if (chainActive)
     {
         camera.chain.length += t;
@@ -69,7 +79,6 @@ CameraState ArriveCameraState(bool stored, float3 dir, bool fromCamera, bool cha
     }
     if (fromCamera)
         camera.distance += t;
-    return camera;
 }
 
 // The DLSS-RR guides come out in g_CameraState, see FinishGuides.
@@ -99,10 +108,11 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             // Decoded after the trace, so only the packed forms were held across it.
             const bool fromCamera = (flags & PATH_FROM_CAMERA) != 0;
             const bool chainActive = (flags & PATH_CHAIN_ACTIVE) != 0;
-            const bool cameraStateStored = (flags & PATH_CAMERA_STATE_STORED) != 0;
             const bool hitDistanceArrived = (flags & PATH_HIT_DISTANCE_PENDING) != 0;
             const bool paneHitArrived = (flags & PATH_PANE_HIT_PENDING) != 0;
             const bool smoothSegment = (flags & DEFERRED_SMOOTH_SEGMENT) != 0;
+            // Nothing is stored before the camera ray's segment, which starts from the defaults.
+            const bool firstSegment = bounce == 0;
             flags &= ~(PATH_HIT_DISTANCE_PENDING | PATH_PANE_HIT_PENDING | DEFERRED_SMOOTH_SEGMENT);
             float4 medium = UnpackSegmentMedium(segmentMedium);
             float3 segmentExtinction = medium.xyz;
@@ -129,21 +139,22 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             }
     #endif
 
-            // Segments that touch the camera state load it late and store it again before the next
-            // TraceRay, so it stays out of the registers through the shading.
+            // Segments that touch the camera state load the parts they change late, and store them again
+            // before the next TraceRay, so it stays out of the registers through the shading.
             bool cameraSegment = fromCamera || chainActive || hitDistanceArrived || paneHitArrived;
 
             if (!hit.hit)
             {
+                // A miss adds nothing to a chain, which the chain's end after the loop takes care of.
                 if (cameraSegment)
                 {
-                    CameraState camera = ArriveCameraState(cameraStateStored, dir, fromCamera, chainActive, hitDistanceArrived,
-                                                           paneHitArrived, false, 0.0, segmentExtinction);
+                    CameraState camera = firstSegment ? DefaultCameraState(dir) : (CameraState)0;
+                    ArriveCameraState(camera, firstSegment ? CAMERA_ALL : 0, fromCamera, false, hitDistanceArrived, paneHitArrived,
+                                      false, 0.0, segmentExtinction);
                     // Sky seen through a window: the guides describe the sky, as for a camera ray.
                     if (fromCamera)
                         camera.guides = DefaultGuides(dir);
-                    StoreCameraState(camera);
-                    flags |= PATH_CAMERA_STATE_STORED;
+                    StoreCameraState(camera, firstSegment ? CAMERA_ALL & ~CAMERA_CHAIN : fromCamera ? CAMERA_GUIDES : 0);
                 }
 
                 // A ray inside a medium that finds no way out ends there.
@@ -227,7 +238,6 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                     traceShadowRay = true;
                 }
             }
-
             // Continue the path by sampling the BSDF, unless this is the last segment
             bool continuePath = false;
             bool specularReflection = false;
@@ -246,10 +256,24 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             if (paneSplit || glassSplit)
                 flags += 1u << PATH_SPLITS_SHIFT;
 
+            if (paneSplit)
+            {
+                // What is behind the pane is along the camera ray, with the cone as it reached the pane.
+                flags = (flags & ~DEFERRED_MASK) | DEFERRED_PENDING | ((bounce + 1) << DEFERRED_BOUNCE_SHIFT);
+                DeferredBranch deferred;
+                deferred.origin = OffsetRay(hit.position, hit.Ng, dir);
+                deferred.throughput = throughput * ThinDeltaTransmittance(mat, ctx.wo.z);
+                deferred.dir = dir;
+                deferred.coneWidth = cone.width;
+                deferred.coneSpread = cone.spread;
+                StoreDeferredBranch(deferred);
+            }
+
             // Solid glass takes two samples, its deferred reflection's first, from one call site so the
             // sampler is inlined once. A split sets u.x to land in its lobe, so a sample is that or none.
+            // The reflection goes to g_DeferredBranches as soon as it is sampled.
             BSDFSample bs = (BSDFSample)0;
-            BSDFSample reflected = (BSDFSample)0;
+            bool reflectionDeferred = false;
             if (!lastSegment)
             {
                 [loop]
@@ -261,68 +285,23 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                     else if (glassSplit)
                         u.x = ctx.probSpecR; // the first value past the reflection's share
                     BSDFSample sample = OpenPBRSample(mat, ctx, u);
-                    if (s == 0)
-                        reflected = sample;
-                    else
+                    if (s != 0)
+                    {
                         bs = sample;
+                    }
+                    else if (sample.lobe != LOBE_NONE)
+                    {
+                        flags = (flags & ~DEFERRED_MASK) | DEFERRED_PENDING | DEFERRED_REFLECTION | ((bounce + 1) << DEFERRED_BOUNCE_SHIFT);
+                        DeferredBranch deferred;
+                        deferred.origin = OffsetRay(hit.position, hit.Ng, sample.wi);
+                        deferred.dir = sample.wi;
+                        deferred.throughput = throughput * sample.weight * ctx.probSpecR;
+                        deferred.coneWidth = cone.width;
+                        deferred.coneSpread = min(cone.spread + g_Frame.rayConeBsdfSpread * SampledConeSpread(sample.pdf / ctx.probSpecR), PI);
+                        StoreDeferredBranch(deferred);
+                        reflectionDeferred = true;
+                    }
                 }
-            }
-
-            CameraState camera = (CameraState)0;
-            if (cameraSegment)
-                camera = ArriveCameraState(cameraStateStored, dir, fromCamera, chainActive, hitDistanceArrived, paneHitArrived,
-                                           true, hit.t, segmentExtinction);
-            if (fromCamera)
-            {
-                camera.guides.position = float4(hit.position, 1.0);
-                camera.guides.normal = mat.geometryNormal;
-                camera.guides.roughness = GuideRoughness(mat, ctx);
-                // Until the path continues with a specular reflection: no reflection data, or last frame's.
-                camera.guides.specularHitDistance = InitialSpecularHitDistance(camera.guides.roughness);
-                camera.guides.curvature = ViewedCurvature(hit, wo);
-                camera.guides.hasChainMotion = false;
-                ReflectanceGuides(mat, ctx, wo, camera.guides);
-                camera.guides.diffuseAlbedo *= camera.transmittance;
-                camera.guides.specularAlbedo *= camera.transmittance;
-            }
-
-            if (paneSplit)
-            {
-                float3 transmittance = ThinDeltaTransmittance(mat, ctx.wo.z);
-                flags = (flags & ~DEFERRED_MASK) | DEFERRED_PENDING | ((bounce + 1) << DEFERRED_BOUNCE_SHIFT);
-                // What is behind the pane is along the camera ray, with the cone as it reached the pane.
-                DeferredBranch deferred;
-                deferred.origin = OffsetRay(hit.position, hit.Ng, dir);
-                deferred.throughput = throughput * transmittance;
-                deferred.dir = dir;
-                deferred.coneWidth = cone.width;
-                deferred.coneSpread = cone.spread;
-                StoreDeferredBranch(deferred);
-
-                PrimaryGuides seen;
-                ReflectanceGuides(mat, ctx, wo, seen);
-                if (AddPaneReflection(camera.panes, camera.transmittance * seen.specularAlbedo, camera.distance,
-                                      ViewedCurvature(hit, wo)) &&
-                    bs.lobe != LOBE_NONE)
-                    flags |= PATH_PANE_HIT_PENDING;
-                // The reflection branch leaves the camera's transmittance and distance alone, so they take on
-                // the pane's now, for what is behind it.
-                camera.transmittance *= transmittance;
-            }
-            else if (glassSplit && reflected.lobe != LOBE_NONE)
-            {
-                flags = (flags & ~DEFERRED_MASK) | DEFERRED_PENDING | DEFERRED_REFLECTION | ((bounce + 1) << DEFERRED_BOUNCE_SHIFT);
-                DeferredBranch deferred;
-                deferred.origin = OffsetRay(hit.position, hit.Ng, reflected.wi);
-                deferred.dir = reflected.wi;
-                deferred.throughput = throughput * reflected.weight * ctx.probSpecR;
-                deferred.coneWidth = cone.width;
-                deferred.coneSpread = min(cone.spread + g_Frame.rayConeBsdfSpread * SampledConeSpread(reflected.pdf / ctx.probSpecR), PI);
-                StoreDeferredBranch(deferred);
-                // The guides' specular albedo is the glass's reflection, which moves to the panes.
-                if (AddPaneReflection(camera.panes, camera.guides.specularAlbedo, camera.distance, ViewedCurvature(hit, wo)))
-                    flags |= DEFERRED_BRIGHTEST_PANE;
-                camera.guides.specularAlbedo = float3(0.0, 0.0, 0.0);
             }
 
             lobe = bs.lobe;
@@ -362,43 +341,90 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             float psrFraction = 1.0;
             bool psrEvent = continuePath && !paneSplit && (fromCamera || chainActive) &&
                             (glassSplit ? CoatedSpecularRoughness(mat) <= g_Frame.psrMaxRoughness : IsPsrEvent(mat, ctx, lobe, psrFraction));
-            if (fromCamera)
-            {
-                if (specularReflection)
-                    flags |= PATH_HIT_DISTANCE_PENDING;
-                if (psrEvent)
-                    camera.chain = StartSpecularChain(mat, ctx, hit, wo, dirIn, dir, specularReflection, psrFraction, camera.distance,
-                                                      cone.width);
-                if (!opaque && !mat.geometryThinWalled && !(psrEvent && camera.chain.throughGlass))
-                    camera.guides.diffuseAlbedo += camera.transmittance * PsrEventThroughput(mat, ctx, wo, false);
-                if (passThrough)
-                    camera.transmittance *= passTransmittance;
-            }
-            else if (chainActive)
-            {
-                ChainArrive(camera.chain, dirIn, hit);
-                if (passThrough)
-                {
-                    camera.chain.throughput *= passTransmittance;
-                }
-                else if (psrEvent)
-                {
-                    AddPsrEvent(camera.chain, mat, ctx, hit, wo, dirIn, dir, specularReflection, cone.width);
-                }
-                else
-                {
-                    camera.chain.active = false;
-                    if (!ctx.inside && ReplacePrimarySurface(camera.chain, mat, ctx, ViewedCurvature(hit, wo), dirIn, hit.Ng, wo,
-                                                             camera.cameraDir, camera.guides))
-                        flags = SetFlag(flags, PATH_HIT_DISTANCE_PENDING, specularReflection);
-                    else if (camera.chain.throughGlass)
-                        camera.guides.diffuseAlbedo += camera.transmittance * camera.chain.throughput;
-                }
-            }
             if (cameraSegment)
             {
-                StoreCameraState(camera);
-                flags = SetFlag(flags | PATH_CAMERA_STATE_STORED, PATH_CHAIN_ACTIVE, camera.chain.active);
+                // Only the parts this segment changes come in. The primary surface's guides are written afresh,
+                // and a chain needs the guides only where it ends.
+                bool chainEnds = chainActive && !passThrough && !psrEvent;
+                bool panesChange = paneSplit || reflectionDeferred;
+                uint parts = (chainActive ? CAMERA_CHAIN : 0) | (chainEnds ? CAMERA_GUIDES | CAMERA_DIRECTION : 0) |
+                             (panesChange ? CAMERA_PANES : 0) | (fromCamera || chainEnds ? CAMERA_VIEW : 0);
+                CameraState camera = firstSegment ? DefaultCameraState(dirIn) : LoadCameraState(parts);
+                uint loaded = firstSegment ? CAMERA_ALL : parts;
+                ArriveCameraState(camera, loaded, fromCamera, chainActive, hitDistanceArrived, paneHitArrived, true, hit.t, medium.xyz);
+
+                if (fromCamera)
+                {
+                    camera.guides.position = float4(hit.position, 1.0);
+                    camera.guides.normal = mat.geometryNormal;
+                    camera.guides.roughness = GuideRoughness(mat, ctx);
+                    // Until the path continues with a specular reflection: no reflection data, or last frame's.
+                    camera.guides.specularHitDistance = InitialSpecularHitDistance(camera.guides.roughness);
+                    camera.guides.curvature = ViewedCurvature(hit, wo);
+                    camera.guides.hasChainMotion = false;
+                    ReflectanceGuides(mat, ctx, wo, camera.guides);
+                    camera.guides.diffuseAlbedo *= camera.transmittance;
+                    camera.guides.specularAlbedo *= camera.transmittance;
+                }
+
+                if (paneSplit)
+                {
+                    PrimaryGuides seen;
+                    ReflectanceGuides(mat, ctx, wo, seen);
+                    if (AddPaneReflection(camera.panes, camera.transmittance * seen.specularAlbedo, camera.distance,
+                                          ViewedCurvature(hit, wo)) &&
+                        continuePath)
+                        flags |= PATH_PANE_HIT_PENDING;
+                    // The reflection branch leaves the camera's transmittance and distance alone, so they take on
+                    // the pane's now, for what is behind it.
+                    camera.transmittance *= ThinDeltaTransmittance(mat, ctx.wo.z);
+                }
+                else if (reflectionDeferred)
+                {
+                    // The guides' specular albedo is the glass's reflection, which moves to the panes.
+                    if (AddPaneReflection(camera.panes, camera.guides.specularAlbedo, camera.distance, ViewedCurvature(hit, wo)))
+                        flags |= DEFERRED_BRIGHTEST_PANE;
+                    camera.guides.specularAlbedo = float3(0.0, 0.0, 0.0);
+                }
+
+                if (fromCamera)
+                {
+                    if (specularReflection)
+                        flags |= PATH_HIT_DISTANCE_PENDING;
+                    if (psrEvent)
+                        camera.chain = StartSpecularChain(mat, ctx, hit, wo, dirIn, dir, specularReflection, psrFraction, camera.distance,
+                                                          cone.width);
+                    if (!opaque && !mat.geometryThinWalled && !(psrEvent && camera.chain.throughGlass))
+                        camera.guides.diffuseAlbedo += camera.transmittance * PsrEventThroughput(mat, ctx, wo, false);
+                    if (passThrough)
+                        camera.transmittance *= passTransmittance;
+                }
+                else if (chainActive)
+                {
+                    ChainArrive(camera.chain, dirIn, hit);
+                    if (passThrough)
+                    {
+                        camera.chain.throughput *= passTransmittance;
+                    }
+                    else if (psrEvent)
+                    {
+                        AddPsrEvent(camera.chain, mat, ctx, hit, wo, dirIn, dir, specularReflection, cone.width);
+                    }
+                    else
+                    {
+                        camera.chain.active = false;
+                        if (!ctx.inside && ReplacePrimarySurface(camera.chain, mat, ctx, ViewedCurvature(hit, wo), dirIn, hit.Ng, wo,
+                                                                 camera.cameraDir, camera.guides))
+                            flags = SetFlag(flags, PATH_HIT_DISTANCE_PENDING, specularReflection);
+                        else if (camera.chain.throughGlass)
+                            camera.guides.diffuseAlbedo += camera.transmittance * camera.chain.throughput;
+                    }
+                }
+
+                uint changed = (fromCamera || chainEnds ? CAMERA_GUIDES : 0) | CAMERA_CHAIN | (panesChange ? CAMERA_PANES : 0) |
+                               (fromCamera ? CAMERA_VIEW : 0) | (firstSegment ? CAMERA_ALL : 0);
+                StoreCameraState(camera, changed);
+                flags = SetFlag(flags, PATH_CHAIN_ACTIVE, camera.chain.active);
             }
 
             if (continuePath)
@@ -444,11 +470,12 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         // A refraction chain the path ended on leaves the glass's transmittance as its diffuse albedo.
         if ((flags & PATH_CHAIN_ACTIVE) != 0)
         {
-            CameraState camera = LoadCameraState();
+            CameraState camera = LoadCameraState(CAMERA_CHAIN | CAMERA_GUIDES | CAMERA_VIEW);
             if (camera.chain.throughGlass)
+            {
                 camera.guides.diffuseAlbedo += camera.transmittance * camera.chain.throughput;
-            camera.chain.active = false;
-            StoreCameraState(camera);
+                StoreCameraState(camera, CAMERA_GUIDES);
+            }
         }
         flags &= ~PATH_CHAIN_ACTIVE;
 
@@ -511,7 +538,7 @@ void RayGen()
     g_Output[pixel] = float4(L, 1.0);
 
 #ifdef DLSS_RR
-    CameraState camera = LoadCameraState();
+    CameraState camera = LoadCameraState(CAMERA_GUIDES | CAMERA_PANES | CAMERA_DIRECTION);
     PrimaryGuides guides = FinishGuides(camera, origin);
 
     // Last frame's specular hit distance, loaded first so its latency hides behind the guides below.

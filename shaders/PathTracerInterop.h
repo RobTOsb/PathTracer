@@ -352,30 +352,48 @@ struct GpuVertex
 };
 
 // One per render pixel under DLSS_RR: what TracePath keeps for the camera between the path segments
-// that touch it, packed by PathTracer/CameraState.slang.
+// that touch it, packed by PathTracer/CameraState.slang. Each part is loaded and stored on its own.
+struct GpuCameraGuides
+{
+	float3 position; // its w in flags
+	uint normal; // octahedral snorm16x2
+	uint3 albedos; // half: diffuse rgb, then specular rgb
+	uint roughnessCurvature; // half2
+	float specularHitDistance;
+	uint flags; // CAMERA_GUIDES_* in CameraState.slang
+	float2 chainMotion;
+};
+
+// Only an active chain is stored.
+struct GpuSpecularChain
+{
+	float4 rotor;
+	uint2 throughputFraction; // half: throughput rgb, primary fraction
+	float primaryDistance;
+	float length;
+	float pixelDeflection;
+	uint flags; // CAMERA_CHAIN_* in CameraState.slang
+	// half: dP xyz then dD xyz of the pixelU, pixelV and motion differentials
+	uint3 pixelU;
+	uint3 pixelV;
+	uint3 motion;
+};
+
+struct GpuPaneReflection
+{
+	uint2 albedoLuminance; // half: albedo rgb, luminance
+	float distance;
+	float curvature;
+	float hitDistance;
+};
+
 struct GpuCameraState
 {
-	float3 guidePosition; // the guides' position, its w in flags
-	uint guideNormal; // octahedral snorm16x2
-	uint3 guideAlbedos; // half: diffuse rgb, then specular rgb
-	uint guideRoughnessCurvature; // half2
-	float guideSpecularHitDistance;
-	float chainPrimaryDistance;
-	float chainLength;
-	float chainPixelDeflection;
-	float4 chainRotor;
-	uint2 chainThroughputFraction; // half: throughput rgb, primary fraction
-	uint2 paneAlbedoLuminance; // half: albedo rgb, luminance
-	float paneDistance;
-	uint paneCurvatureHitDistance; // half2
+	GpuCameraGuides guides;
+	GpuSpecularChain chain;
+	GpuPaneReflection panes;
 	uint2 transmittance; // half: camera transmittance rgb, then unused
 	float distance;
-	uint flags; // CAMERA_STATE_* in CameraState.slang
-	// half: dP xyz then dD xyz of SpecularChain's pixelU, pixelV and motion differentials while the chain
-	// is active. Once it has ended, chainPixelU.xy holds PrimaryGuides::chainMotion (float2).
-	uint3 chainPixelU;
-	uint3 chainPixelV;
-	uint3 chainMotion;
 	float3 cameraDirection; // the camera ray's, rather than held in registers through the path
 };
 
@@ -413,7 +431,9 @@ static_assert(sizeof(FrameConstants) == 480,"FrameConstants must match the HLSL 
 static_assert(sizeof(GpuMaterial) == 128,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
-static_assert(sizeof(GpuCameraState) == 152, "GpuCameraState must match the structured buffer stride");
+static_assert(sizeof(GpuCameraGuides) == 48 && sizeof(GpuSpecularChain) == 76 && sizeof(GpuPaneReflection) == 20,
+			  "GpuCameraState parts must match their HLSL layout");
+static_assert(sizeof(GpuCameraState) == 168, "GpuCameraState must match the structured buffer stride");
 static_assert(sizeof(GpuDeferredBranch) == 44, "GpuDeferredBranch must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 56, "TonemapConstants must fit the root constants");
 #endif
