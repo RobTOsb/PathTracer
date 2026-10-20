@@ -50,7 +50,7 @@ struct FrameConstants
 
 	// Sky atmosphere (ATMOSPHERE permutation only, see SkyAtmospherePass). The scene sits at one
 	// altitude of the atmosphere, whose air fills it homogeneously. Coefficients are per scene unit,
-	// scaled up by the aerial perspective scale; the sun and the sky-view LUT are not.
+	// scaled up by the scene air (Rayleigh, ozone) and haze (Mie) scales; the sun and the sky-view LUT are not.
 	float3 atmosphereRayleighScattering;
 	float atmosphereViewHeight; // km from the planet centre, where the sky-view LUT was rendered
 	float3 atmosphereMieScattering;
@@ -82,7 +82,9 @@ struct FrameConstants
 	// Firefly clamp: indirect light (reaching the surface the camera sees after more than one scattering, see
 	// ClampIndirect) is scaled down to at most this in its largest channel per contribution. FLT_MAX = off.
 	float indirectClamp;
-	uint pad2;
+	// ATMOSPHERE: the air's multiple-scattered light counts only where a ray in a random direction from the
+	// in-scattering point reaches the sky.
+	uint atmosphereSkyVisibility;
 
 	// Last frame's camera position, for the motion vectors of what curved mirrors and glass show.
 	float3 prevCameraPosition;

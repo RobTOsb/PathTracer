@@ -55,13 +55,20 @@ struct AtmosphereSettings
 	bool enabled = true;
 	float altitudeKm = 0.0f; // of the scene's y = 0 above the ground
 	// The scene's air is this many times denser than real air at its altitude, so that its haze and
-	// light shafts show at the scale of a building. 1 is physical.
-	float aerialPerspectiveScale = 1.0f;
+	// light shafts show at the scale of a building; 1 is physical, and the sky is unaffected. Molecules
+	// (Rayleigh scattering and ozone) scatter almost evenly in all directions, a blue fog, while aerosols
+	// (Mie scattering) are the dust and haze whose forward scattering shows light shafts.
+	float sceneAirScale = 1.0f; // molecules
+	float sceneHazeScale = 1.0f; // aerosols
 	// Path segments (1 = camera rays only) that gather the sunlight the air scatters into them; the
 	// air only dims the later ones.
 	int inScatterSegments = 1;
 	// In-scattering traces a shadow ray towards the sun, so geometry casts light shafts.
 	bool volumetricShadows = true;
+	// The multiple-scattered light of the LUT is that of an open sky. In-scattering traces a ray in a random
+	// direction and keeps it only if that reaches the sky, so enclosed and shadowed spaces are not lit as if
+	// they stood in the open.
+	bool skyVisibility = true;
 
 	// Scales of Earth's atmosphere.
 	float rayleighScale = 1.0f;

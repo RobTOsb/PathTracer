@@ -65,7 +65,8 @@ float3 AtmosphereTransmittance(float distance)
 
 #ifdef ATMOSPHERE
 // Sunlight the air scatters towards origin along a segment, estimated at one distance along it. The
-// single scattering is shadowed by a ray towards the sun, the LUT's multiple scattering is not.
+// single scattering is shadowed by a ray towards the sun, the LUT's multiple scattering by one in a
+// random direction.
 float3 AtmosphereInScattering(float3 origin, float3 dir, float segmentLength, uint shadowRayFlags, inout uint rng)
 {
     float3 sigmaT = g_Frame.atmosphereExtinction;
@@ -93,6 +94,14 @@ float3 AtmosphereInScattering(float3 origin, float3 dir, float segmentLength, ui
 
     float3 scattering = g_Frame.atmosphereRayleighScattering + g_Frame.atmosphereMieScattering;
     float3 inScattered = g_AtmosphereLighting[kAtmosphereLightingMultiScattering].rgb * scattering;
+    if (g_Frame.atmosphereSkyVisibility != 0)
+    {
+        // The LUT's multiple scattering arrives from the whole of an open sky, so only the fraction of
+        // directions that reach it lights the point, estimated by one uniform direction on the sphere
+        // (a cone of 1 - cos = 2).
+        float2 v = Rand3(rng).xy;
+        inScattered *= TraceShadowRay(origin + dir * s, SampleUniformCone(float3(0.0, 1.0, 0.0), 2.0, v), FLT_MAX, shadowRayFlags);
+    }
     float3 sunTransmittance = SunTransmittance();
     if (any(sunTransmittance > 0.0))
     {

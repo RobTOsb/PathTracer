@@ -161,13 +161,13 @@ SkyAtmospherePass::SceneAir SkyAtmospherePass::GetSceneAir() const
 									  : p.absorptionDensity1LinearTerm * height + p.absorptionDensity1ConstantTerm;
 	const float densityOzo = std::clamp(ozoneLinear, 0.0f, 1.0f);
 
-	const float scale = kKmPerSceneUnit * settings_.atmosphere.aerialPerspectiveScale;
+	const float airScale = kKmPerSceneUnit * settings_.atmosphere.sceneAirScale;
+	const float hazeScale = kKmPerSceneUnit * settings_.atmosphere.sceneHazeScale;
 	SceneAir air;
-	air.rayleighScattering = p.rayleighScattering * (densityRay * scale);
-	air.mieScattering = p.mieScattering * (densityMie * scale);
-	air.extinction = (p.mieExtinction * densityMie + p.rayleighScattering * densityRay +
-					  p.absorptionExtinction * densityOzo) *
-					 scale;
+	air.rayleighScattering = p.rayleighScattering * (densityRay * airScale);
+	air.mieScattering = p.mieScattering * (densityMie * hazeScale);
+	air.extinction = p.mieExtinction * (densityMie * hazeScale) +
+					 (p.rayleighScattering * densityRay + p.absorptionExtinction * densityOzo) * airScale;
 	return air;
 }
 

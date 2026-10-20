@@ -327,6 +327,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		constants.atmosphereMissDistance = std::max(sqrtf(Dot(extent, extent)), 1.0e-3f);
 		constants.atmosphereInScatterSegments = static_cast<uint>(std::max(atmosphereSettings.inScatterSegments, 0));
 		constants.atmosphereVolumetricShadows = atmosphereSettings.volumetricShadows ? 1u : 0u;
+		constants.atmosphereSkyVisibility = atmosphereSettings.skyVisibility ? 1u : 0u;
 	}
 	constants.frameIndex = renderContext->GetCurrentFrame();
 	// TracePath keeps the bounce a deferred branch resumes at in 8 bits.

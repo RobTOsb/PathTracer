@@ -48,8 +48,8 @@ public:
 	// False once the planet hides the sun's centre from the camera's altitude.
 	bool IsSunAboveHorizon() const;
 
-	// The air at the camera's altitude, per scene unit (metres) and scaled by the aerial perspective
-	// scale, which the path tracer treats as filling the scene homogeneously.
+	// The air at the camera's altitude, per scene unit (metres) and scaled by the scene air and haze
+	// scales, which the path tracer treats as filling the scene homogeneously.
 	struct SceneAir
 	{
 		float3 rayleighScattering;
