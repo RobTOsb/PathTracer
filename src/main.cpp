@@ -73,7 +73,6 @@ constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gl
 // constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\TestScene\\scene.gltf";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\SubsurfaceScene\\scene.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\SphereRoom\\SphereRoom.glb";
-//constexpr const char *kDefaultScenePath = "h:\\SubwayInterior\\glTF\\SubwayInterior.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\SanMiguel.glb";
 
 constexpr uint kFramesInFlight = 2;

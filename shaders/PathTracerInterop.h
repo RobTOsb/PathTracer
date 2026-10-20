@@ -79,7 +79,9 @@ struct FrameConstants
 	// LIGHT_SAMPLING_TREE: path vertices before this bounce (0 = the primary hit) select lights with the
 	// tree, later ones and those that transmit by power, which skips the tree walks there.
 	uint lightTreeBounces;
-	uint pad1;
+	// Firefly clamp: indirect light (reaching the surface the camera sees after more than one scattering, see
+	// ClampIndirect) is scaled down to at most this in its largest channel per contribution. FLT_MAX = off.
+	float indirectClamp;
 	uint pad2;
 
 	// Last frame's camera position, for the motion vectors of what curved mirrors and glass show.

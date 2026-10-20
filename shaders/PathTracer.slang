@@ -26,12 +26,20 @@ static const uint PATH_CHAIN_ACTIVE = 0x20; // the camera state's chain follows 
 // specular hit distance.
 static const uint PATH_HIT_DISTANCE_PENDING = 0x40;
 static const uint PATH_PANE_HIT_PENDING = 0x80; // the brightest pane's reflection ray ends at the next hit
+static const uint PATH_DIRECT_SEGMENT = 0x100;
 static const uint PATH_SPLITS_SHIFT = 16; // glass splits so far, 8 bits
 static const uint PATH_SPLITS_MASK = 0xFF;
 
 uint SetFlag(uint flags, uint flag, bool set)
 {
     return set ? flags | flag : flags & ~flag;
+}
+
+
+float3 ClampIndirect(float3 contribution, bool direct)
+{
+    float m = MaxComponent(contribution);
+    return direct || m <= g_Frame.indirectClamp ? contribution : contribution * (g_Frame.indirectClamp / m);
 }
 
 // The extinction of the medium the next segment crosses and the Russian roulette scale, as halves
@@ -108,6 +116,9 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     // held across it.
     float3 wo = -dir;
     bool frontFace = dot(OctDecode(payload.Ng), wo) > 0.0;
+    // Light found here is direct for a surface the camera sees, or for the one the segment left.
+    bool visible = fromCamera || chainActive;
+    bool directArrival = visible || (flags & PATH_DIRECT_SEGMENT) != 0;
     float emissionWeight = 1.0;
     if (frontFace && !fromCamera && !smoothSegment && g_Frame.lightCount > 0 && payload.emitter != INVALID_LIGHT_INDEX)
     {
@@ -123,7 +134,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     cone.width += cone.spread * hit.t;
     OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments, SIMPLE);
     if (frontFace && any(hit.emission > 0.0))
-        radiance += throughput * hit.emission * emissionWeight;
+        radiance += ClampIndirect(throughput * hit.emission * emissionWeight, directArrival);
 
     // Opaque and thin-walled surfaces are treated as two-sided: face the frame towards the viewer
     // so a back face is not mistaken for the inside of a transmissive object
@@ -170,7 +181,8 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
             // (0 * inf) once the compiler folds exp's log2(e) into it; any medium is far shorter.
             float3 shadowTransmittance = intoMedium ? exp(-extinction * min(ls.distance, MAX_MEDIUM_DISTANCE))
                                                     : AtmosphereTransmittance(ls.distance);
-            neeContribution = throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf);
+            // Clamped unshadowed, which the shadow ray's visibility (at most 1) only scales down.
+            neeContribution = ClampIndirect(throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf), visible);
             traceShadowRay = true;
         }
     }
@@ -372,8 +384,9 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         {
             SubsurfaceExit exit = (SubsurfaceExit)0;
             if (dot(dir, hit.Ng) < 0.0)
-                radiance += SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput, rayFlags,
-                                              bounce + 1, rng, exit);
+                radiance += ClampIndirect(SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput,
+                                                            rayFlags, bounce + 1, rng, exit),
+                                          visible);
             continuePath = exit.valid;
             origin = exit.origin;
             dir = exit.dir;
@@ -447,7 +460,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 // whatever lies beyond. Rays that leave the scene cross atmosphereMissDistance of it.
                 float segmentLength = hit.hit ? hit.t : g_Frame.atmosphereMissDistance;
                 if (bounce < g_Frame.atmosphereInScatterSegments)
-                    radiance += throughput * AtmosphereInScattering(origin, dir, segmentLength, rayFlags, rng);
+                    radiance += ClampIndirect(throughput * AtmosphereInScattering(origin, dir, segmentLength, rayFlags, rng),
+                                              fromCamera || chainActive || (flags & PATH_DIRECT_SEGMENT) != 0);
                 throughput *= AtmosphereTransmittance(segmentLength);
             }
     #endif
@@ -474,15 +488,16 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 if (!inMedium)
                 {
                     // The sky is never light sampled, so BSDF sampling gets its full contribution.
-                    radiance += throughput * EnvironmentRadiance(dir);
+                    float3 sky = EnvironmentRadiance(dir);
 
                     // The sun disc is also reached by NEE, so weight it against light sampling.
                     float3 Lsun = SunRadiance(dir);
                     if (any(Lsun > 0.0))
                     {
                         float w = fromCamera || smoothSegment ? 1.0 : PowerHeuristic(prevBsdfPdf, LightPdf(origin, dir, hit));
-                        radiance += throughput * Lsun * w;
+                        sky += Lsun * w;
                     }
+                    radiance += ClampIndirect(throughput * sky, fromCamera || chainActive || (flags & PATH_DIRECT_SEGMENT) != 0);
                 }
                 break;
             }
@@ -503,7 +518,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 break;
 
             if (!outcome.passThrough)
-                flags &= ~PATH_FROM_CAMERA;
+                flags = SetFlag(flags & ~PATH_FROM_CAMERA, PATH_DIRECT_SEGMENT, fromCamera || chainActive);
 
             // Russian roulette.
             if (bounce >= RR_START_BOUNCE)
@@ -543,6 +558,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         flags &= ~(DEFERRED_MASK | PATH_HIT_DISTANCE_PENDING);
         if ((deferredFlags & DEFERRED_REFLECTION) != 0)
         {
+            // Solid glass's reflection leaves the surface the camera saw.
+            flags |= PATH_DIRECT_SEGMENT;
             flags = SetFlag(flags, PATH_PANE_HIT_PENDING, (deferredFlags & DEFERRED_BRIGHTEST_PANE) != 0);
             flags = (flags & ~PATH_FROM_CAMERA) | DEFERRED_SMOOTH_SEGMENT;
         }

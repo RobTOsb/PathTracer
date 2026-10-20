@@ -365,6 +365,12 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		ImGui::SliderInt("Max bounces", &settings_.maxBounces, 0, 32);
+		ImGui::Checkbox("Clamp indirect", &settings_.clampIndirect);
+		ImGui::SetItemTooltip("Firefly clamp: each indirect light contribution is scaled down to at most this in its "
+							  "brightest channel (biased darker)");
+		ImGui::BeginDisabled(!settings_.clampIndirect);
+		ImGui::SliderFloat("Indirect clamp", &settings_.indirectClampValue, 0.1f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+		ImGui::EndDisabled();
 
 		const ShaderExecutionReorderingSupport ser = renderContext->GetShaderExecutionReorderingSupport();
 		ImGui::BeginDisabled(!ser.supported);

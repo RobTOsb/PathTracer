@@ -31,7 +31,7 @@ struct LightSettings
 	LightSamplingMode sampling = LIGHT_SAMPLING_TREE;
 	// Light tree: path vertices before this bounce (0 = primary hit) walk the tree, later ones select by
 	// flux, which costs one lookup instead of a walk per light sample and per emitter hit's MIS.
-	int treeBounces = 2;
+	int treeBounces = 1;
 	// Light tree: skip the glossy importance for lobes at least this rough (perceptual roughness).
 	bool diffuseOnlyRoughLobes = true;
 	float diffuseOnlyRoughness = 0.7f;
@@ -83,6 +83,11 @@ struct RenderSettings
 	float skyIntensity = 1.0f;
 
 	int maxBounces = 8;
+	// Firefly clamp: each contribution of indirect light (more than one scattering away from the surface the
+	// camera sees, PSR's mirrors and glass and pass-throughs not counting) is scaled down to at most
+	// indirectClampValue in its largest channel. Biased darker.
+	bool clampIndirect = true;
+	float indirectClampValue = 2.0f;
 	// DXR 1.2 shader execution reordering: switches to the path tracing pipeline that reorders
 	// threads by material before shading each hit. Ignored where the device has no SER.
 	bool shaderExecutionReordering = true;
