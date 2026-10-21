@@ -413,7 +413,6 @@ bool NGXContext::EvaluateFeature(const DLSSEvalInputs &inputs, ID3D12GraphicsCom
 		evalParams.pInNormals = inputs.normalRoughness;
 		evalParams.pInRoughness = inputs.normalRoughness;
 		evalParams.pInMotionVectorsReflections = inputs.specularMotionVectors;
-		evalParams.pInSpecularHitDistance = inputs.specularHitDistance;
 		evalParams.pInWorldToViewMatrix = const_cast<float *>(inputs.worldToView);
 		evalParams.pInViewToClipMatrix = const_cast<float *>(inputs.viewToClip);
 

@@ -103,8 +103,7 @@ struct DLSSEvalInputs
 	ID3D12Resource *specularAlbedo = nullptr;
 	ID3D12Resource *normalRoughness = nullptr;
 	ID3D12Resource *specularMotionVectors = nullptr;
-	ID3D12Resource *specularHitDistance = nullptr;
-	// Row-major 4x4 view/proj matrices for RR specular reprojection.
+	// Row-major 4x4 view/proj matrices.
 	float worldToView[16] = {};
 	float viewToClip[16] = {};
 };

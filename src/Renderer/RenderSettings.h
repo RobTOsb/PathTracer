@@ -151,7 +151,6 @@ struct RenderSettings
 	// the diffuse lobe, so the guide does not flicker between a distance and none.
 	bool holdSpecularHitDistance = true;
 	float holdHitDistanceMaxRoughness = 0.25f;
-	bool specularMotionVectors = true;
 
 	float cameraSpeed = 5.0f; // world units per second
 	// Set by the Camera panel, carried out (and cleared) by the main loop: the camera bookmark beside the

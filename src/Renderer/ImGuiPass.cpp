@@ -249,7 +249,6 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::BeginDisabled(!settings_.holdSpecularHitDistance);
 		ImGui::SliderFloat("Hold max roughness", &settings_.holdHitDistanceMaxRoughness, 0.0f, 1.0f, "%.2f");
 		ImGui::EndDisabled();
-		ImGui::Checkbox("Specular motion vectors", &settings_.specularMotionVectors);
 		ImGui::EndDisabled();
 	}
 

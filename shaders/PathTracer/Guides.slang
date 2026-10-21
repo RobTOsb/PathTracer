@@ -4,7 +4,7 @@ import PathTracer.Math;
 import PathTracer.RayTracing;
 import PathTracer.Resources;
 
-// FP16_MAX, what DLSS-RR expects as the specular hit distance of sky pixels.
+// FP16_MAX, the specular hit distance of a reflection of the sky, which SpecularVirtualPosition puts at infinity.
 static const float SKY_HIT_DISTANCE = HALF_MAX;
 
 // What DLSS-RR needs to know about the primary surface. Defaults are the sky values from the RR
