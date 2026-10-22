@@ -100,7 +100,14 @@ struct FrameConstants
 	float specularAAVariance;
 	float specularAANormalMapScale;
 	float specularAAMaxVariance;
-	float pad0;
+	// Reference (REFERENCE permutation only): the paths per pixel already summed in the accumulation target.
+	uint referenceSampleCount;
+
+	// Paths per pixel this dispatch traces: averaged into the output, or under REFERENCE added to the sum.
+	uint samplesPerFrame;
+	uint pad0;
+	uint pad1;
+	uint pad2;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -456,7 +463,7 @@ struct TonemapConstants
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(FrameConstants) == 496,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 512,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuMaterial) == 128,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");

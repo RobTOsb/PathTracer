@@ -5,7 +5,10 @@
 #include "RenderContext.h"
 
 #include "Maths.h"
+#include "PathTracerInterop.h"
+#include "SkyAtmosphereInterop.h"
 
+#include <chrono>
 #include <vector>
 
 class Camera;
@@ -33,6 +36,10 @@ struct PathTracerGuides
 // which takes its sky and sunlight from the atmosphere's LUTs and scatters sunlight in the scene's air.
 // With RenderSettings::opacityMicromaps on a scene that has them, it traces the micromap TLAS with the
 // OPACITY_MICROMAPS permutation.
+// With reference set instead (the REFERENCE permutation) it sums RenderSettings::reference.samplesPerFrame
+// randomly jittered paths per pixel each frame into an accumulation target and outputs their mean, starting
+// over whenever the camera or anything else the image depends on changes, and stops tracing once it has
+// RenderSettings::reference.samples.
 // Leaves the output and the guides in the UnorderedAccess layout.
 class PathTracerPass final : public RenderPass
 {
@@ -42,7 +49,8 @@ public:
 				   const Camera &camera,
 				   const RenderSettings &settings,
 				   const SkyAtmospherePass &atmosphere,
-				   bool rayReconstruction);
+				   bool rayReconstruction,
+				   bool reference);
 	~PathTracerPass() override;
 
 	void Execute(RenderContext *renderContext) override;
@@ -74,6 +82,22 @@ public:
 		return height_;
 	}
 
+	bool IsReference() const
+	{
+		return reference_;
+	}
+
+	// The reference's paths per pixel so far, and the wall-clock seconds they took.
+	uint GetAccumulatedSamples() const
+	{
+		return accumulatedSamples_;
+	}
+
+	float GetAccumulationSeconds() const
+	{
+		return accumulationSeconds_;
+	}
+
 private:
 	struct Pipeline
 	{
@@ -93,6 +117,7 @@ private:
 	const RenderSettings &settings_;
 	const SkyAtmospherePass &atmosphere_;
 	const bool rayReconstruction_;
+	const bool reference_;
 
 	Pipeline pipelines_[2][2][2][2]; // indexed by shaderExecutionReordering, atmosphere, inline shadows, then opacity micromaps
 	bool serSupported_ = false;
@@ -108,4 +133,13 @@ private:
 
 	uint jitterIndex_ = 0;
 	float2 jitter_ = { 0.0f, 0.0f };
+
+	// Reference only. The key is the last dispatch's constants without what changes every frame anyway.
+	ResourceHandle accumulation_ = InvalidResourceHandle; // RGBA32F sum of the paths so far
+	uint accumulatedSamples_ = 0;
+	FrameConstants accumulationKey_ = {};
+	AtmosphereParameters accumulationAtmosphere_ = {};
+	uint accumulationRestartCount_ = 0;
+	std::chrono::steady_clock::time_point accumulationStart_;
+	float accumulationSeconds_ = 0.0f;
 };

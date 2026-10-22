@@ -38,6 +38,10 @@ RWTexture2D<float> g_SpecularHitDistance : register(u6); // kept across frames f
 RWTexture2D<float2> g_SpecularMotionVectors : register(u7); // render pixels, current to previous, of the reflection
 RWStructuredBuffer<GpuCameraState> g_CameraState : register(u8); // per pixel, see PathTracer/CameraState.slang
 #endif
+// The reference's sum of every path so far per pixel (RGBA32F); PathTracerPass binds it only under REFERENCE.
+#ifdef REFERENCE
+RWTexture2D<float4> g_Accumulation : register(u1);
+#endif
 RWStructuredBuffer<GpuDeferredBranch> g_DeferredBranches : register(u9); // per pixel, see PathTracer/GlassSplit.slang
 
 // Index of this pixel's row in the per-pixel buffers.

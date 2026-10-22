@@ -604,28 +604,52 @@ void RayGen()
 {
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 dims = DispatchRaysDimensions().xy;
-    uint rng = RngInit(g_Frame.frameIndex);
 #ifdef OPACITY_MICROMAPS
     // The shadow and subsurface ray queries meet the alpha-tested geometry's micromaps.
     AllowOpacityMicromapsInRayQueries();
 #endif
 
-#ifdef DLSS_RR
-    // Every pixel shares this frame's jitter, which DLSS is told about separately.
-    float2 subpixel = 0.5 + g_Frame.jitter;
+#ifdef REFERENCE
+    // The paths add to the sum of those before them, each numbered by its sample so that it has its own random
+    // sequence, and the output is the mean so far.
+    float3 sum = g_Frame.referenceSampleCount > 0 ? g_Accumulation[pixel].rgb : float3(0.0, 0.0, 0.0);
+    [loop]
+    for (uint s = 0; s < g_Frame.samplesPerFrame; ++s)
+    {
+        uint rng = RngInit(g_Frame.referenceSampleCount + s);
+        float3 origin, dir;
+        GenerateCameraRay(pixel, Rand3(rng).xy, origin, dir);
+        float3 L = TracePath(origin, dir, rng);
+        // A bad sample would otherwise stay in the sum for good.
+        if (all(isfinite(L)))
+            sum += L;
+    }
+    g_Accumulation[pixel] = float4(sum, 1.0);
+    g_Output[pixel] = float4(sum / float(g_Frame.referenceSampleCount + g_Frame.samplesPerFrame), 1.0);
 #else
-    float2 subpixel = Rand3(rng).xy;
-#endif
-
+    // The mean of the frame's paths, each with its own random sequence. Under DLSS-RR they all start along the
+    // same camera ray, and the guides are the last one's.
     float3 origin, dir;
-    GenerateCameraRay(pixel, subpixel, origin, dir);
-    float3 L = TracePath(origin, dir, rng);
+    float3 sum = float3(0.0, 0.0, 0.0);
+    [loop]
+    for (uint s = 0; s < g_Frame.samplesPerFrame; ++s)
+    {
+        uint rng = RngInit(g_Frame.frameIndex * g_Frame.samplesPerFrame + s);
+#ifdef DLSS_RR
+        // Every pixel shares this frame's jitter, which DLSS is told about separately.
+        float2 subpixel = 0.5 + g_Frame.jitter;
+#else
+        float2 subpixel = Rand3(rng).xy;
+#endif
+        GenerateCameraRay(pixel, subpixel, origin, dir);
+        float3 L = TracePath(origin, dir, rng);
 
-    // A single bad sample would otherwise stick in any temporal filter downstream.
-    if (any(isnan(L)) || any(isinf(L)))
-        L = float3(0.0, 0.0, 0.0);
+        // A single bad sample would otherwise stick in any temporal filter downstream.
+        if (all(isfinite(L)))
+            sum += L;
+    }
 
-    g_Output[pixel] = float4(L, 1.0);
+    g_Output[pixel] = float4(sum / float(g_Frame.samplesPerFrame), 1.0);
 
 #ifdef DLSS_RR
     CameraState camera = LoadCameraState(CAMERA_GUIDES | CAMERA_PANES | CAMERA_DIRECTION);
@@ -665,6 +689,7 @@ void RayGen()
     float2 specularMotion = CalculateMotionVector(reflection, reflection, g_Frame.prevViewProj, g_Frame.viewProj, float2(dims));
     specularMotion.y = -specularMotion.y;
     g_SpecularMotionVectors[pixel] = specularMotion;
+#endif
 #endif
 }
 

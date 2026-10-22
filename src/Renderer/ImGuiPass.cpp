@@ -2,6 +2,7 @@
 
 #include "Camera.h"
 #include "LightTreeInterop.h"
+#include "PathTracerPass.h"
 #include "RenderContext.h"
 #include "RenderSettings.h"
 #include "Scene/RenderGPUScene.h"
@@ -55,6 +56,11 @@ namespace
 		{ DLSSRayReconstructionPreset::PresetD, "D" },
 		{ DLSSRayReconstructionPreset::PresetE, "E" },
 		{ DLSSRayReconstructionPreset::PresetF, "F" },
+	};
+
+	// The reference's paths per pixel to stop at, 0 = never stop.
+	constexpr ComboEntry<int> kReferenceSampleCounts[] = {
+		{ 64, "64" }, { 256, "256" }, { 1024, "1K" }, { 4096, "4K" }, { 16384, "16K" }, { 0, "Unlimited" },
 	};
 
 	template<typename T, size_t Count>
@@ -165,8 +171,10 @@ namespace
 ImGuiPass::ImGuiPass(RenderSettings &settings,
 					 const Camera &camera,
 					 bool rayReconstructionSupported,
-					 const RenderGPUScene &scene) :
-	settings_(settings), camera_(camera), rayReconstructionSupported_(rayReconstructionSupported), scene_(scene)
+					 const RenderGPUScene &scene,
+					 const PathTracerPass &pathTracer) :
+	settings_(settings), camera_(camera), rayReconstructionSupported_(rayReconstructionSupported), scene_(scene),
+	pathTracer_(pathTracer)
 {
 }
 
@@ -201,13 +209,15 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	}
 
 	const ImGuiIO &io = ImGui::GetIO();
-	ImGui::Text("%.1f fps (%.2f ms)  %ux%u -> %ux%u, 1 spp",
+	ImGui::Text("%.1f fps (%.2f ms)  %ux%u -> %ux%u, %u spp",
 				io.Framerate,
 				1000.0f / io.Framerate,
 				renderContext->GetRenderWidth(),
 				renderContext->GetRenderHeight(),
 				renderContext->GetWindowWidth(),
-				renderContext->GetWindowHeight());
+				renderContext->GetWindowHeight(),
+				pathTracer_.IsReference() ? pathTracer_.GetAccumulatedSamples()
+										  : static_cast<uint>(settings_.samplesPerPixel));
 	const GPUMemoryStats memoryStats = renderContext->GetMemoryStats();
 	ImGui::Text("VRAM %s / %s (allocator %s)",
 				FormatBytes(memoryStats.local.usageBytes).text,
@@ -224,13 +234,82 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	}
 	ProfileRow(renderContext, "Tonemap");
 
+	// Without the approximations the reference ignores the firefly clamp and specular antialiasing settings.
+	const bool reference = settings_.renderMode == RenderMode::Reference;
+	const bool unbiasedReference = reference && !settings_.reference.approximations;
+
+	if (ImGui::CollapsingHeader("Render mode", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		int mode = static_cast<int>(settings_.renderMode);
+		ImGui::RadioButton("Real-time", &mode, static_cast<int>(RenderMode::RealTime));
+		ImGui::SetItemTooltip("One path per pixel per frame, denoised and upscaled by DLSS-RR unless its mode is off");
+		ImGui::SameLine();
+		ImGui::RadioButton("Reference", &mode, static_cast<int>(RenderMode::Reference));
+		ImGui::SetItemTooltip("Paths accumulated at the window's resolution without DLSS, starting over whenever the "
+							  "camera or a setting the image depends on changes");
+		settings_.renderMode = static_cast<RenderMode>(mode);
+
+		if (!reference)
+		{
+			ImGui::SliderInt("Samples per pixel##RealTime", &settings_.samplesPerPixel, 1, kMaxSamplesPerPixel);
+			ImGui::SetItemTooltip("Paths per pixel each frame, averaged. Under DLSS-RR they all start through the "
+								  "frame's jitter, so they cut the noise RR is given but add no antialiasing");
+		}
+
+		// The passes are rebuilt for a new mode before the next frame.
+		if (reference && pathTracer_.IsReference())
+		{
+			ReferenceSettings &referenceSettings = settings_.reference;
+			const uint samples = pathTracer_.GetAccumulatedSamples();
+			const float seconds = pathTracer_.GetAccumulationSeconds();
+			if (referenceSettings.samples > 0)
+			{
+				char overlay[64];
+				snprintf(overlay, sizeof(overlay), "%u / %d spp, %.1f s", samples, referenceSettings.samples, seconds);
+				ImGui::ProgressBar(static_cast<float>(samples) / static_cast<float>(referenceSettings.samples),
+								   ImVec2(-FLT_MIN, 0.0f),
+								   overlay);
+			}
+			else
+			{
+				ImGui::Text("%u spp, %.1f s", samples, seconds);
+			}
+
+			ImGui::TextUnformatted("Samples per pixel");
+			for (size_t i = 0; i < IM_ARRAYSIZE(kReferenceSampleCounts); ++i)
+			{
+				if (i > 0)
+				{
+					ImGui::SameLine();
+				}
+				ImGui::RadioButton(kReferenceSampleCounts[i].name,
+								   &referenceSettings.samples,
+								   kReferenceSampleCounts[i].value);
+			}
+			ImGui::SliderInt("Samples per frame", &referenceSettings.samplesPerFrame, 1, 16);
+			ImGui::SetItemTooltip("Paths per pixel each frame traces one after another; too many in a heavy scene "
+								  "can make a frame long enough for the driver to reset the GPU");
+			ImGui::Checkbox("Real-time approximations", &referenceSettings.approximations);
+			ImGui::SetItemTooltip("Keep the firefly clamp and specular antialiasing, as in the real-time image. "
+								  "Off: the reference converges to the unbiased image");
+			if (ImGui::Button("Restart"))
+			{
+				++referenceSettings.restartCount;
+			}
+		}
+	}
+
 	if (ImGui::CollapsingHeader("DLSS Ray Reconstruction", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		if (!rayReconstructionSupported_)
 		{
 			ImGui::TextDisabled("Not supported on this GPU/driver (see the NGX log)");
 		}
-		ImGui::BeginDisabled(!rayReconstructionSupported_);
+		else if (reference)
+		{
+			ImGui::TextDisabled("Off while rendering the reference");
+		}
+		ImGui::BeginDisabled(!rayReconstructionSupported_ || reference);
 		EnumCombo("Mode", kDLSSModes, settings_.dlssMode);
 		EnumCombo("Preset", kRRPresets, settings_.rrPreset);
 		ImGui::Checkbox("Primary surface replacement", &settings_.primarySurfaceReplacement);
@@ -325,6 +404,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	if (ImGui::CollapsingHeader("Specular antialiasing", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		SpecularAASettings &specularAA = settings_.specularAA;
+		ImGui::BeginDisabled(unbiasedReference);
 		ImGui::Checkbox("Enabled##SpecularAA", &specularAA.enabled);
 		ImGui::SetItemTooltip("Widens the glossy lobes of opaque surfaces the camera sees by how much their normals "
 							  "turn across the pixel (DLSS-RR builds only), so sub-pixel highlights stop flickering");
@@ -333,6 +413,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::Checkbox("Normal map variance", &specularAA.normalMaps);
 		ImGui::SetItemTooltip("Toksvig: also widen by the spread of normals that a normal map's mips average away");
 		ImGui::SliderFloat("Max alpha^2 added", &specularAA.maxVariance, 0.0f, 1.0f, "%.3f");
+		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 	}
 
@@ -379,11 +460,13 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		ImGui::SliderInt("Max bounces", &settings_.maxBounces, 0, 32);
+		ImGui::BeginDisabled(unbiasedReference);
 		ImGui::Checkbox("Clamp indirect", &settings_.clampIndirect);
 		ImGui::SetItemTooltip("Firefly clamp: each indirect light contribution is scaled down to at most this in its "
 							  "brightest channel (biased darker)");
 		ImGui::BeginDisabled(!settings_.clampIndirect);
 		ImGui::SliderFloat("Indirect clamp", &settings_.indirectClampValue, 0.1f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 
 		const ShaderExecutionReorderingSupport ser = renderContext->GetShaderExecutionReorderingSupport();

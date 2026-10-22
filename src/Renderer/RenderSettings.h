@@ -90,9 +90,31 @@ struct AtmosphereSettings
 	float multipleScatteringFactor = 1.0f;
 };
 
+constexpr int kMaxSamplesPerPixel = 8;
+
+enum class RenderMode
+{
+	RealTime, // one path per pixel per frame, denoised and upscaled by DLSS-RR when dlssMode is on
+	Reference, // paths accumulated at the window's resolution without DLSS
+};
+
+struct ReferenceSettings
+{
+	int samples = 1024; // paths per pixel to stop at, 0 = never stop
+	int samplesPerFrame = 1; // paths per pixel each dispatch traces in turn
+	// The firefly clamp and specular antialiasing, biased approximations for the real-time image. Off makes the
+	// reference converge to the unbiased image; on matches what DLSS-RR is given.
+	bool approximations = false;
+	// The UI bumps this to start the accumulation over.
+	uint restartCount = 0;
+};
+
 // Everything the UI can tweak; passes read it every frame.
 struct RenderSettings
 {
+	RenderMode renderMode = RenderMode::RealTime;
+	ReferenceSettings reference;
+
 	SunSettings sun;
 	LightSettings lights;
 	SpecularAASettings specularAA;
@@ -102,6 +124,9 @@ struct RenderSettings
 	float skyIntensity = 1.0f;
 
 	int maxBounces = 8;
+	// Real-time: paths per pixel each frame, averaged, 1 to kMaxSamplesPerPixel. Under DLSS-RR they all start
+	// through the frame's jitter.
+	int samplesPerPixel = 1;
 	// Firefly clamp: each contribution of indirect light (more than one scattering away from the surface the
 	// camera sees, PSR's mirrors and glass and pass-throughs not counting) is scaled down to at most
 	// indirectClampValue in its largest channel. Biased darker.

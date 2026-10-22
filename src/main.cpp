@@ -175,8 +175,11 @@ void BuildPasses(RenderContext *renderContext,
 {
 	passes.clear();
 
+	// The reference renders at the window's resolution without DLSS, leaving the DLSS mode for when it ends.
+	const bool reference = settings.renderMode == RenderMode::Reference;
 	DLSSOptimalSettings optimal;
-	const bool rayReconstruction = settings.dlssMode != DLSSMode::Off && ngx.IsRayReconstructionSupported() &&
+	const bool rayReconstruction = !reference && settings.dlssMode != DLSSMode::Off &&
+								   ngx.IsRayReconstructionSupported() &&
 								   ngx.GetOptimalSettings(DLSSFeatureKind::RayReconstruction,
 														  settings.dlssMode,
 														  renderContext->GetWindowWidth(),
@@ -188,19 +191,23 @@ void BuildPasses(RenderContext *renderContext,
 	}
 	else
 	{
-		settings.dlssMode = DLSSMode::Off;
+		if (!reference)
+		{
+			settings.dlssMode = DLSSMode::Off;
+		}
 		renderContext->SetRenderResolution(0, 0);
 	}
-	logi("Render resolution {}x{}, output {}x{}, DLSS-RR {}",
+	logi("Render resolution {}x{}, output {}x{}, {}",
 		 renderContext->GetRenderWidth(),
 		 renderContext->GetRenderHeight(),
 		 renderContext->GetWindowWidth(),
 		 renderContext->GetWindowHeight(),
-		 rayReconstruction ? "on" : "off");
+		 reference ? "reference" : rayReconstruction ? "DLSS-RR on" : "DLSS-RR off");
 
 	auto atmosphere = std::make_unique<SkyAtmospherePass>(renderContext, camera, settings);
-	auto pathTracer =
-			std::make_unique<PathTracerPass>(renderContext, gpuScene, camera, settings, *atmosphere, rayReconstruction);
+	auto pathTracer = std::make_unique<PathTracerPass>(
+			renderContext, gpuScene, camera, settings, *atmosphere, rayReconstruction, reference);
+	const PathTracerPass &pathTracerPass = *pathTracer;
 	ResourceHandle radiance = pathTracer->GetOutput();
 	passes.push_back(std::move(atmosphere));
 	if (rayReconstruction)
@@ -215,7 +222,8 @@ void BuildPasses(RenderContext *renderContext,
 		passes.push_back(std::move(pathTracer));
 	}
 	passes.push_back(std::make_unique<TonemapPass>(renderContext, radiance, settings));
-	passes.push_back(std::make_unique<ImGuiPass>(settings, camera, ngx.IsRayReconstructionSupported(), gpuScene));
+	passes.push_back(
+			std::make_unique<ImGuiPass>(settings, camera, ngx.IsRayReconstructionSupported(), gpuScene, pathTracerPass));
 }
 
 // A glTF loads from the .scene file beside it when that is at least as new, and otherwise is
@@ -330,6 +338,7 @@ int Run(const char *scenePath)
 
 	std::vector<std::unique_ptr<RenderPass>> passes;
 	BuildPasses(renderContext.get(), ngx, gpuScene, camera, settings, passes);
+	RenderMode builtRenderMode = settings.renderMode;
 	DLSSMode builtMode = settings.dlssMode;
 	DLSSRayReconstructionPreset builtPreset = settings.rrPreset;
 
@@ -341,11 +350,12 @@ int Run(const char *scenePath)
 		lastTime = now;
 
 		// The UI changes these while the previous frame is recorded, so they apply from here.
-		if (settings.dlssMode != builtMode || settings.rrPreset != builtPreset)
+		if (settings.renderMode != builtRenderMode || settings.dlssMode != builtMode || settings.rrPreset != builtPreset)
 		{
 			renderContext->WaitForGPUIdle();
 			ngx.ReleaseFeature();
 			BuildPasses(renderContext.get(), ngx, gpuScene, camera, settings, passes);
+			builtRenderMode = settings.renderMode;
 			builtMode = settings.dlssMode;
 			builtPreset = settings.rrPreset;
 		}

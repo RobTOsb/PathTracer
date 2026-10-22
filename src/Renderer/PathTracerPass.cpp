@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cstring>
 #include <math.h>
 #include <stdexcept>
 
@@ -31,9 +32,10 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 							   const Camera &camera,
 							   const RenderSettings &settings,
 							   const SkyAtmospherePass &atmosphere,
-							   bool rayReconstruction) :
+							   bool rayReconstruction,
+							   bool reference) :
 	renderContext_(renderContext), scene_(scene), camera_(camera), settings_(settings), atmosphere_(atmosphere),
-	rayReconstruction_(rayReconstruction)
+	rayReconstruction_(rayReconstruction), reference_(reference)
 {
 	serSupported_ = renderContext->GetShaderExecutionReorderingSupport().supported;
 
@@ -44,6 +46,10 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 	height_ = renderContext->GetRenderHeight();
 
 	output_ = CreateTarget(Format::R16G16B16A16_FLOAT, "PathTracer_Radiance");
+	if (reference_)
+	{
+		accumulation_ = CreateTarget(Format::R32G32B32A32_FLOAT, "PathTracer_Accumulation");
+	}
 
 	if (rayReconstruction_)
 	{
@@ -88,7 +94,8 @@ PathTracerPass::~PathTracerPass()
 								  guides_.specularHitDistance,
 								  guides_.specularMotionVectors,
 								  cameraState_,
-								  deferredBranches_ })
+								  deferredBranches_,
+								  accumulation_ })
 	{
 		if (target != InvalidResourceHandle)
 		{
@@ -166,6 +173,10 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 	if (rayReconstruction_)
 	{
 		desc.defines.push_back("DLSS_RR");
+	}
+	if (reference_)
+	{
+		desc.defines.push_back("REFERENCE");
 	}
 	if (atmosphere)
 	{
@@ -275,9 +286,12 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 											  : FLT_MAX;
 
 	// Tokuyoshi and Kaplanyan's kernel, 2 * sigma^2 of the pixel filter, and their alpha^2 cap.
+	// The reference leaves it out unless asked to keep the real-time approximations.
+	const bool approximations = !reference_ || settings_.reference.approximations;
 	const SpecularAASettings &specularAA = settings_.specularAA;
-	constants.specularAAVariance = specularAA.enabled ? 2.0f * 0.15915494f * std::max(specularAA.strength, 0.0f) : 0.0f;
-	constants.specularAANormalMapScale = specularAA.enabled && specularAA.normalMaps ? std::max(specularAA.strength, 0.0f) : 0.0f;
+	const bool specularAAEnabled = specularAA.enabled && approximations;
+	constants.specularAAVariance = specularAAEnabled ? 2.0f * 0.15915494f * std::max(specularAA.strength, 0.0f) : 0.0f;
+	constants.specularAANormalMapScale = specularAAEnabled && specularAA.normalMaps ? std::max(specularAA.strength, 0.0f) : 0.0f;
 	constants.specularAAMaxVariance = std::max(specularAA.maxVariance, 0.0f);
 
 	// Enough bits to tell every material row apart, up to the 16 that MaybeReorderThread honours.
@@ -300,7 +314,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.anisotropicSegments = static_cast<uint>(std::max(settings_.anisotropicSegments, 0));
 	// TracePath counts splits in 8 bits.
 	constants.glassReflectionSplits = static_cast<uint>(std::clamp(settings_.glassReflectionSplits, 0, 255));
-	constants.indirectClamp = settings_.clampIndirect ? std::max(settings_.indirectClampValue, 0.0f) : FLT_MAX;
+	constants.indirectClamp = settings_.clampIndirect && approximations ? std::max(settings_.indirectClampValue, 0.0f) : FLT_MAX;
 	constants.subsurfaceComponents = (settings_.subsurfaceZeroScattering ? SUBSURFACE_ZERO_SCATTERING : 0u) |
 									 (settings_.subsurfaceSingleScattering ? SUBSURFACE_SINGLE_SCATTERING : 0u) |
 									 (settings_.subsurfaceMultipleScattering ? SUBSURFACE_MULTIPLE_SCATTERING : 0u);
@@ -338,6 +352,48 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.frameIndex = renderContext->GetCurrentFrame();
 	// TracePath keeps the bounce a deferred branch resumes at in 8 bits.
 	constants.maxBounces = static_cast<uint>(std::clamp(settings_.maxBounces, 0, 254));
+	constants.samplesPerFrame = static_cast<uint>(std::clamp(settings_.samplesPerPixel, 1, kMaxSamplesPerPixel));
+
+	if (reference_)
+	{
+		// Anything the image depends on starts the sum over: the constants, but for those that change every frame
+		// whatever else does, the atmosphere's LUTs (the sun is in the constants), and the UI's restart.
+		FrameConstants key = constants;
+		key.prevViewProj = {};
+		key.prevCameraPosition = {};
+		key.frameIndex = 0;
+		key.samplesPerFrame = 0; // the reference's own, set below
+		const ReferenceSettings &reference = settings_.reference;
+		if (accumulatedSamples_ == 0 || std::memcmp(&key, &accumulationKey_, sizeof(key)) != 0 ||
+			std::memcmp(&atmosphere_.GetParameters(), &accumulationAtmosphere_, sizeof(AtmosphereParameters)) != 0 ||
+			reference.restartCount != accumulationRestartCount_)
+		{
+			accumulationKey_ = key;
+			accumulationAtmosphere_ = atmosphere_.GetParameters();
+			accumulationRestartCount_ = reference.restartCount;
+			accumulatedSamples_ = 0;
+			accumulationStart_ = std::chrono::steady_clock::now();
+			accumulationSeconds_ = 0.0f;
+		}
+
+		// Done: the output keeps the mean.
+		const uint target = static_cast<uint>(std::max(reference.samples, 0));
+		if (target > 0 && accumulatedSamples_ >= target)
+		{
+			return;
+		}
+		uint samples = static_cast<uint>(std::max(reference.samplesPerFrame, 1));
+		if (target > 0)
+		{
+			samples = std::min(samples, target - accumulatedSamples_);
+		}
+		constants.referenceSampleCount = accumulatedSamples_;
+		constants.samplesPerFrame = samples;
+		accumulatedSamples_ += samples;
+		// Up to when this frame is recorded, not when the GPU finishes it.
+		accumulationSeconds_ =
+				std::chrono::duration<float>(std::chrono::steady_clock::now() - accumulationStart_).count();
+	}
 
 	// The slot for this frame index was last read framesInFlight frames ago, and BeginFrame has
 	// already waited on that frame's fence.
@@ -399,6 +455,14 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		renderContext->SetRaytracingUAV(i, targets[i]);
 	}
 	renderContext->SetRaytracingUAV(9, deferredBranches_);
+	if (reference_)
+	{
+		renderContext->TransitionResource(accumulation_,
+										  ResourceLayout::UnorderedAccess,
+										  ResourceSync::Raytracing,
+										  ResourceAccess::UnorderedAccess);
+		renderContext->SetRaytracingUAV(1, accumulation_);
+	}
 	renderContext->DispatchRays(pipeline->shaderTable, width_, height_, 1);
 
 	renderContext->EndProfileScope();
