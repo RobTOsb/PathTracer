@@ -351,6 +351,8 @@ float FresnelHemisphericalAlbedo(float eta)
 // Spec equation [modulated_ior]: specularWeight scales F0 by altering the IOR ratio.
 float ModulatedIORRatio(float etaS, float specularWeight)
 {
+    if (specularWeight == 1.0)
+        return etaS;
     float Fs = FresnelF0(etaS);
     if (Fs < 1.0e-8)
         return 1.0;

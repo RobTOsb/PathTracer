@@ -42,6 +42,12 @@ float3 ClampIndirect(float3 contribution, bool direct)
     return direct || m <= g_Frame.indirectClamp ? contribution : contribution * (g_Frame.indirectClamp / m);
 }
 
+bool LeavesLightsToBsdf(OpenPBRContext ctx)
+{
+    return !SunIsDelta() && ctx.probDiffuse <= 0.0 && ctx.probFuzz <= 0.0 && max(ctx.alpha.x, ctx.alpha.y) <= 1.0e-4 &&
+           (ctx.probCoat <= 0.0 || ctx.coatAlpha <= 1.0e-4);
+}
+
 // The extinction of the medium the next segment crosses and the Russian roulette scale, as halves
 // for fewer registers across TraceRay.
 uint2 PackSegmentMedium(float3 extinction, float rrInvScale)
@@ -164,19 +170,26 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     // One hash covers the light sample (xy) and the Russian roulette decision (z).
     float3 lightU = Rand3(rng);
 
-    // Sampled with the rounding prevVertex keeps, so both ends of an emitter's MIS see the same pmf.
-    PackedLightSelectVertex vertex =
-        PackLightSelectVertex(MakeLightSelectVertex(hit.position, mat, ctx, wo, opaque || HasDeltaTransmission(mat), bounce));
+    // The last segment takes no BSDF sample, so it samples the lights whatever the surface.
+    bool lastSegment = bounce >= g_Frame.maxBounces;
+    bool sampleLights = lastSegment || !LeavesLightsToBsdf(ctx);
+    // Sampled with the rounding prevVertex keeps, so both ends of an emitter's MIS see the same pmf. A
+    // vertex that samples no lights needs none, since the segment it starts takes no MIS.
+    PackedLightSelectVertex vertex = (PackedLightSelectVertex)0;
+    if (sampleLights)
+        vertex = PackLightSelectVertex(
+            MakeLightSelectVertex(hit.position, mat, ctx, wo, opaque || HasDeltaTransmission(mat), bounce));
     // The light tree walk needs registers of its own, so across it the material is held packed and
     // the BSDF context not at all. Both are rebuilt after it, and everything from here on, sampling
     // and evaluation alike, uses the rebuilt pair.
     PackedMaterial packedMat = PackMaterial(mat);
-    LightSample ls = SampleLight(UnpackLightSelectVertex(vertex), lightU.xy, rng);
+    LightSample ls = (LightSample)0;
+    if (sampleLights)
+        ls = SampleLight(UnpackLightSelectVertex(vertex), lightU.xy, rng);
     mat = UnpackMaterial(packedMat, SIMPLE);
     ctx = OpenPBRSetup(mat, wo);
     float3 extinction = MediumExtinction(mat);
     bool deltaTransmission = HasDeltaTransmission(mat);
-    bool lastSegment = bounce >= g_Frame.maxBounces;
     float3 neeContribution = float3(0.0, 0.0, 0.0);
     bool traceShadowRay = false;
     if (ls.pdf > 0.0 && (!opaque || dot(ls.direction, hit.Ng) > 0.0))
@@ -282,9 +295,6 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         specularReflection = !paneSplit && bs.lobe == (CoatLeadsGuides(ctx) ? LOBE_COAT : LOBE_SPECULAR_REFLECTION);
         float lobeProbability = paneSplit ? ctx.probSpecR : glassSplit ? ctx.probSpecT : 1.0;
         throughput *= bs.weight * lobeProbability;
-        // Russian roulette on a pane's reflection is relative to the branch, as for a path of its own.
-        if (paneSplit)
-            rrInvScale = 1.0 / max(MaxComponent(throughput), 1.0e-8);
         prevBsdfPdf = bs.pdf;
         prevVertex = vertex;
         // Surface curvature is ignored. The cap stops a tiny pdf from making the width infinite.
@@ -294,6 +304,9 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         segmentExtinction = dot(bs.wi, hit.Ng) < 0.0 ? extinction : float3(0.0, 0.0, 0.0);
         dir = bs.wi;
     }
+    // Lights the next segment finds come at full weight if this vertex left them to its BSDF sample, or,
+    // through a pass-through wall, if the vertex the segment continues from did.
+    flags = SetFlag(flags, DEFERRED_SMOOTH_SEGMENT, passThrough ? smoothSegment : !sampleLights);
 
     // DLSS-RR guides: the primary surface, or the first surface past the mirrors and glass in front
     // of it. A surface that takes another lobe, or ends the path, ends the chain on itself.

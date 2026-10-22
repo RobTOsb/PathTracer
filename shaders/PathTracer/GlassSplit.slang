@@ -28,7 +28,9 @@ bool AddPaneReflection(inout PaneReflection panes, float3 albedo, float distance
 static const uint DEFERRED_PENDING = 1;
 static const uint DEFERRED_REFLECTION = 2; // solid glass's reflection, otherwise what is behind a pane
 static const uint DEFERRED_BRIGHTEST_PANE = 4; // the reflection's first hit gives the brightest pane's hit distance
-static const uint DEFERRED_SMOOTH_SEGMENT = 8; // set while the resumed reflection is on its first segment
+// Set while the path is on a segment whose start sampled no lights (the resumed reflection's first, or one
+// leaving a smooth vertex), so the lights it finds take no MIS.
+static const uint DEFERRED_SMOOTH_SEGMENT = 8;
 static const uint DEFERRED_BOUNCE_SHIFT = 24; // the bounce the branch resumes at
 static const uint DEFERRED_MASK = 0xFF00000Fu;
 
