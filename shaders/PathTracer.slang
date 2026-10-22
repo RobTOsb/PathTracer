@@ -27,8 +27,14 @@ static const uint PATH_CHAIN_ACTIVE = 0x20; // the camera state's chain follows 
 static const uint PATH_HIT_DISTANCE_PENDING = 0x40;
 static const uint PATH_PANE_HIT_PENDING = 0x80; // the brightest pane's reflection ray ends at the next hit
 static const uint PATH_DIRECT_SEGMENT = 0x100;
+// Diffuse bounces so far, 4 bits; the rest of the bounce count are specular ones.
+static const uint PATH_DIFFUSE_BOUNCES_SHIFT = 9;
+static const uint PATH_DIFFUSE_BOUNCES_MASK = 0xF;
 static const uint PATH_SPLITS_SHIFT = 16; // glass splits so far, 8 bits
 static const uint PATH_SPLITS_MASK = 0xFF;
+
+// The lobes whose samples spend the diffuse bounce budget, the others spend the specular one.
+static const uint DIFFUSE_BOUNCE_LOBES = LOBE_DIFFUSE | LOBE_DIFFUSE_TRANSMISSION | LOBE_SUBSURFACE | LOBE_FUZZ;
 
 uint SetFlag(uint flags, uint flag, bool set)
 {
@@ -181,9 +187,16 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     // One hash covers the light sample (xy) and the Russian roulette decision (z).
     float3 lightU = Rand3(rng);
 
-    // The last segment takes no BSDF sample, so it samples the lights whatever the surface.
-    bool lastSegment = bounce >= g_Frame.maxBounces;
-    bool sampleLights = lastSegment || !LeavesLightsToBsdf(ctx);
+    // A segment whose sample went past its kind's bounce budget only picks up the light it found, the
+    // MIS partner of the previous vertex's NEE.
+    uint diffuseBounces = (flags >> PATH_DIFFUSE_BOUNCES_SHIFT) & PATH_DIFFUSE_BOUNCES_MASK;
+    uint specularBounces = bounce - diffuseBounces;
+    bool emissionOnly = diffuseBounces > g_Frame.maxDiffuseBounces || specularBounces > g_Frame.maxSpecularBounces;
+    // With both budgets spent a BSDF sample could only find light, so the last segment takes none and
+    // samples the lights whatever the surface.
+    bool lastSegment = emissionOnly ||
+                       (diffuseBounces >= g_Frame.maxDiffuseBounces && specularBounces >= g_Frame.maxSpecularBounces);
+    bool sampleLights = !emissionOnly && (lastSegment || !LeavesLightsToBsdf(ctx));
     // Sampled with the rounding prevVertex keeps, so both ends of an emitter's MIS see the same pmf. A
     // vertex that samples no lights needs none, since the segment it starts takes no MIS.
     PackedLightSelectVertex vertex = (PackedLightSelectVertex)0;
@@ -305,6 +318,8 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         // guides' reflection is the coat's or the base's, whichever reflects more.
         specularReflection = !paneSplit && bs.lobe == (CoatLeadsGuides(ctx) ? LOBE_COAT : LOBE_SPECULAR_REFLECTION);
         float lobeProbability = paneSplit ? ctx.probSpecR : glassSplit ? ctx.probSpecT : 1.0;
+        if ((bs.lobe & DIFFUSE_BOUNCE_LOBES) != 0)
+            flags += 1u << PATH_DIFFUSE_BOUNCES_SHIFT;
         throughput *= bs.weight * lobeProbability;
         prevBsdfPdf = bs.pdf;
         prevVertex = vertex;
@@ -461,8 +476,9 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
     uint bounce = 0;
     for (;;)
     {
-        // maxBounces counts indirect bounces, so the primary segment comes on top.
-        for (; bounce <= g_Frame.maxBounces; ++bounce)
+        // ShadeSurface ends the path by the vertex both budgets together reach; the bounces are indirect,
+        // so the primary segment comes on top.
+        for (; bounce <= g_Frame.maxDiffuseBounces + g_Frame.maxSpecularBounces; ++bounce)
         {
             const uint rayFlags = OpacityMicromapRayFlags(bounce);
             HitPayload payload =
@@ -594,7 +610,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         segmentMedium = SEGMENT_MEDIUM_AIR;
         bounce = flags >> DEFERRED_BOUNCE_SHIFT;
         uint deferredFlags = flags & DEFERRED_MASK;
-        flags &= ~(DEFERRED_MASK | PATH_HIT_DISTANCE_PENDING);
+        // Glass splits only where the camera sees, so every bounce before the branch is specular.
+        flags &= ~(DEFERRED_MASK | PATH_HIT_DISTANCE_PENDING | (PATH_DIFFUSE_BOUNCES_MASK << PATH_DIFFUSE_BOUNCES_SHIFT));
         if ((deferredFlags & DEFERRED_REFLECTION) != 0)
         {
             // Solid glass's reflection leaves the surface the camera saw.

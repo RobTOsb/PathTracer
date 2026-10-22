@@ -459,7 +459,11 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 
 	if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen))
 	{
-		ImGui::SliderInt("Max bounces", &settings_.maxBounces, 0, 32);
+		ImGui::SliderInt("Diffuse bounces", &settings_.maxDiffuseBounces, 0, kMaxBounces);
+		ImGui::SetItemTooltip("Indirect bounces off diffuse, diffuse transmission, subsurface and fuzz lobes");
+		ImGui::SliderInt("Specular bounces", &settings_.maxSpecularBounces, 0, kMaxBounces);
+		ImGui::SetItemTooltip("Indirect bounces off specular reflection and transmission and coat lobes, and through "
+							  "thin smooth walls");
 		ImGui::BeginDisabled(unbiasedReference);
 		ImGui::Checkbox("Clamp indirect", &settings_.clampIndirect);
 		ImGui::SetItemTooltip("Firefly clamp: each indirect light contribution is scaled down to at most this in its "
@@ -543,7 +547,8 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SliderFloat("Bounce cone spread", &settings_.rayConeBsdfSpread, 0.0f, 2.0f, "%.2f");
 		ImGui::SetItemTooltip("How much each BSDF sample widens the cone, 1 = the solid angle the sample stands for, "
 							  "0 = only the camera's pixel spread");
-		ImGui::SliderInt("Anisotropic segments", &settings_.anisotropicSegments, 0, settings_.maxBounces + 1);
+		ImGui::SliderInt("Anisotropic segments", &settings_.anisotropicSegments, 0,
+						 settings_.maxDiffuseBounces + settings_.maxSpecularBounces + 1);
 		ImGui::SetItemTooltip("Path segments whose hits filter textures anisotropically (16x), the rest trilinearly. "
 							  "0 = none, 1 = camera hits only");
 		ImGui::EndDisabled();

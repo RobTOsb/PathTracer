@@ -22,7 +22,9 @@ struct FrameConstants
 	float3 skyRadiance; // constant sky colour * intensity, returned for every missed ray
 	uint frameIndex;
 
-	uint maxBounces;
+	// Bounce budgets, each counting the indirect bounces of its kind: diffuse (diffuse, diffuse transmission,
+	// subsurface and fuzz lobes) and specular (specular reflection and transmission, coat, pass-throughs).
+	uint maxDiffuseBounces;
 	uint sunIsDelta; // zero angular radius, cannot be hit by BSDF sampling
 	float2 jitter;
 
@@ -105,7 +107,7 @@ struct FrameConstants
 
 	// Paths per pixel this dispatch traces: averaged into the output, or under REFERENCE added to the sum.
 	uint samplesPerFrame;
-	uint pad0;
+	uint maxSpecularBounces; // see maxDiffuseBounces
 	uint pad1;
 	uint pad2;
 };

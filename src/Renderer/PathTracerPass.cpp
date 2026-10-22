@@ -354,8 +354,9 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		constants.atmosphereSkyVisibility = atmosphereSettings.skyVisibility ? 1u : 0u;
 	}
 	constants.frameIndex = renderContext->GetCurrentFrame();
-	// TracePath keeps the bounce a deferred branch resumes at in 8 bits.
-	constants.maxBounces = static_cast<uint>(std::clamp(settings_.maxBounces, 0, 254));
+	// TracePath keeps the diffuse bounces in 4 bits, up to one past the budget.
+	constants.maxDiffuseBounces = static_cast<uint>(std::clamp(settings_.maxDiffuseBounces, 0, kMaxBounces));
+	constants.maxSpecularBounces = static_cast<uint>(std::clamp(settings_.maxSpecularBounces, 0, kMaxBounces));
 	constants.samplesPerFrame = static_cast<uint>(std::clamp(settings_.samplesPerPixel, 1, kMaxSamplesPerPixel));
 
 	if (reference_)

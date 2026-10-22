@@ -91,6 +91,7 @@ struct AtmosphereSettings
 };
 
 constexpr int kMaxSamplesPerPixel = 8;
+constexpr int kMaxBounces = 8; // of each kind, diffuse and specular
 
 enum class RenderMode
 {
@@ -123,7 +124,11 @@ struct RenderSettings
 	float3 skyColour = { 0.45f, 0.65f, 1.0f };
 	float skyIntensity = 1.0f;
 
-	int maxBounces = 8;
+	// Indirect bounces of each kind a path may take, 0 to kMaxBounces each: diffuse (diffuse, diffuse
+	// transmission, subsurface and fuzz lobes) and specular (specular reflection and transmission, coat,
+	// pass-throughs).
+	int maxDiffuseBounces = 2;
+	int maxSpecularBounces = 8;
 	// Real-time: paths per pixel each frame, averaged, 1 to kMaxSamplesPerPixel. Under DLSS-RR they all start
 	// through the frame's jitter.
 	int samplesPerPixel = 1;
