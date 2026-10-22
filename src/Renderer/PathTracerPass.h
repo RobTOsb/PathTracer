@@ -35,7 +35,8 @@ struct PathTracerGuides
 // the SER pipeline instead. While the sky atmosphere is on, it traces with the ATMOSPHERE permutation,
 // which takes its sky and sunlight from the atmosphere's LUTs and scatters sunlight in the scene's air.
 // With RenderSettings::opacityMicromaps on a scene that has them, it traces the micromap TLAS with the
-// OPACITY_MICROMAPS permutation.
+// OPACITY_MICROMAPS permutation. With rayReconstruction and RenderSettings::primarySurfaceReplacement, the
+// guides follow mirrors and glass in the PSR permutation.
 // With reference set instead (the REFERENCE permutation) it sums RenderSettings::reference.samplesPerFrame
 // randomly jittered paths per pixel each frame into an accumulation target and outputs their mean, starting
 // over whenever the camera or anything else the image depends on changes, and stops tracing once it has
@@ -107,8 +108,10 @@ private:
 	};
 
 	const Pipeline *SelectPipeline();
-	const Pipeline *GetPipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps);
-	Pipeline CreatePipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps) const;
+	const Pipeline *GetPipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps,
+								bool psr);
+	Pipeline CreatePipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps,
+							bool psr) const;
 	ResourceHandle CreateTarget(Format format, const char *debugName) const;
 
 	RenderContext *renderContext_ = nullptr;
@@ -119,7 +122,8 @@ private:
 	const bool rayReconstruction_;
 	const bool reference_;
 
-	Pipeline pipelines_[2][2][2][2]; // indexed by shaderExecutionReordering, atmosphere, inline shadows, then opacity micromaps
+	// Indexed by shaderExecutionReordering, atmosphere, inline shadows, opacity micromaps, then primary surface replacement.
+	Pipeline pipelines_[2][2][2][2][2];
 	bool serSupported_ = false;
 	bool serFailed_ = false; // the SER pipeline did not compile, so stay on the plain one
 	bool ommFailed_ = false; // the opacity micromap pipeline did not compile, so trace without them

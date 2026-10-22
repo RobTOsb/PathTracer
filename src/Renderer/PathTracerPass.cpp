@@ -112,12 +112,14 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 {
 	const bool atmosphere = atmosphere_.IsEnabled();
 	const bool inlineShadows = settings_.inlineShadowRays;
+	// The guides are only traced for ray reconstruction.
+	const bool psr = rayReconstruction_ && settings_.primarySurfaceReplacement;
 
 	// A failed opacity micromap or SER compile is logged once, and the pipeline without them takes over.
 	if (settings_.opacityMicromaps && scene_.HasOpacityMicromaps() && !ommFailed_)
 	{
 		const bool ser = settings_.shaderExecutionReordering && serSupported_ && !serFailed_;
-		if (const Pipeline *pipeline = GetPipeline(ser, atmosphere, inlineShadows, true))
+		if (const Pipeline *pipeline = GetPipeline(ser, atmosphere, inlineShadows, true, psr))
 		{
 			return pipeline;
 		}
@@ -127,7 +129,7 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 
 	if (settings_.shaderExecutionReordering && serSupported_ && !serFailed_)
 	{
-		if (const Pipeline *pipeline = GetPipeline(true, atmosphere, inlineShadows, false))
+		if (const Pipeline *pipeline = GetPipeline(true, atmosphere, inlineShadows, false, psr))
 		{
 			return pipeline;
 		}
@@ -135,7 +137,7 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 		serFailed_ = true;
 	}
 
-	const Pipeline *pipeline = GetPipeline(false, atmosphere, inlineShadows, false);
+	const Pipeline *pipeline = GetPipeline(false, atmosphere, inlineShadows, false, psr);
 	if (pipeline == nullptr)
 	{
 		throw std::runtime_error("Failed to create the path tracing pipeline (see the shader log above).");
@@ -144,19 +146,19 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 }
 
 const PathTracerPass::Pipeline *PathTracerPass::GetPipeline(bool shaderExecutionReordering, bool atmosphere,
-															bool inlineShadows, bool opacityMicromaps)
+															bool inlineShadows, bool opacityMicromaps, bool psr)
 {
 	Pipeline &pipeline = pipelines_[shaderExecutionReordering ? 1 : 0][atmosphere ? 1 : 0][inlineShadows ? 1 : 0]
-								   [opacityMicromaps ? 1 : 0];
+								   [opacityMicromaps ? 1 : 0][psr ? 1 : 0];
 	if (pipeline.pipeline == InvalidPipelineHandle)
 	{
-		pipeline = CreatePipeline(shaderExecutionReordering, atmosphere, inlineShadows, opacityMicromaps);
+		pipeline = CreatePipeline(shaderExecutionReordering, atmosphere, inlineShadows, opacityMicromaps, psr);
 	}
 	return pipeline.pipeline != InvalidPipelineHandle ? &pipeline : nullptr;
 }
 
 PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReordering, bool atmosphere,
-														 bool inlineShadows, bool opacityMicromaps) const
+														 bool inlineShadows, bool opacityMicromaps, bool psr) const
 {
 	RaytracingPipelineDesc desc = {};
 	desc.exports = { "RayGen", "Miss", "ClosestHit", "AnyHit" };
@@ -173,6 +175,10 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 	if (rayReconstruction_)
 	{
 		desc.defines.push_back("DLSS_RR");
+	}
+	if (psr)
+	{
+		desc.defines.push_back("PSR");
 	}
 	if (reference_)
 	{
@@ -325,10 +331,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
 
-	constants.psrMaxRoughness = settings_.primarySurfaceReplacement ? settings_.psrMaxRoughness : -1.0f;
-	constants.psrMaxMinification = settings_.primarySurfaceReplacement && settings_.psrCurvedSurfaces
-										   ? std::max(settings_.psrMaxMinification, 1.0f)
-										   : -1.0f;
+	constants.psrMaxRoughness = settings_.psrMaxRoughness;
+	constants.psrMaxMinification = settings_.psrCurvedSurfaces ? std::max(settings_.psrMaxMinification, 1.0f) : -1.0f;
 	constants.specularHitDistanceHoldRoughness =
 			settings_.holdSpecularHitDistance ? settings_.holdHitDistanceMaxRoughness : -1.0f;
 

@@ -35,6 +35,17 @@ uint SetFlag(uint flags, uint flag, bool set)
     return set ? flags | flag : flags & ~flag;
 }
 
+// PATH_CHAIN_ACTIVE, which only primary surface replacement (the PSR permutation) sets, so without it
+// the chain's code compiles away.
+bool ChainActive(uint flags)
+{
+#ifdef PSR
+    return (flags & PATH_CHAIN_ACTIVE) != 0;
+#else
+    return false;
+#endif
+}
+
 
 float3 ClampIndirect(float3 contribution, bool direct)
 {
@@ -311,8 +322,12 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     // DLSS-RR guides: the primary surface, or the first surface past the mirrors and glass in front
     // of it. A surface that takes another lobe, or ends the path, ends the chain on itself.
     float psrFraction = 1.0;
+#ifdef PSR
     bool psrEvent = continuePath && !paneSplit && (fromCamera || chainActive) &&
                     (glassSplit ? CoatedSpecularRoughness(mat) <= g_Frame.psrMaxRoughness : IsPsrEvent(mat, ctx, lobe, psrFraction));
+#else
+    const bool psrEvent = false;
+#endif
     if (cameraSegment)
     {
         // Only the parts this segment changes come in. The primary surface's guides are written afresh,
@@ -457,7 +472,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
 
             // Decoded after the trace, so only the packed forms were held across it.
             const bool fromCamera = (flags & PATH_FROM_CAMERA) != 0;
-            const bool chainActive = (flags & PATH_CHAIN_ACTIVE) != 0;
+            const bool chainActive = ChainActive(flags);
             const bool hitDistanceArrived = (flags & PATH_HIT_DISTANCE_PENDING) != 0;
             const bool paneHitArrived = (flags & PATH_PANE_HIT_PENDING) != 0;
             const bool smoothSegment = (flags & DEFERRED_SMOOTH_SEGMENT) != 0;
@@ -556,7 +571,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         }
 
         // A refraction chain the path ended on leaves the glass's transmittance as its diffuse albedo.
-        if ((flags & PATH_CHAIN_ACTIVE) != 0)
+        if (ChainActive(flags))
         {
             CameraState camera = LoadCameraState(CAMERA_CHAIN | CAMERA_GUIDES | CAMERA_VIEW);
             if (camera.chain.throughGlass)

@@ -64,7 +64,7 @@ struct FrameConstants
 	uint subsurfaceComponents;
 
 	// DLSS-RR guides (DLSS_RR permutation only). Mirrors and glass at most psrMaxRoughness (perceptual) rough
-	// are described by the surface they reflect or refract, primary surface replacement; negative = off.
+	// are described by the surface they reflect or refract, primary surface replacement (PSR permutation only).
 	// Surfaces at most specularHitDistanceHoldRoughness rough keep last frame's specular hit
 	// distance when their path took another lobe, instead of reporting none; negative = off.
 	float psrMaxRoughness;

@@ -131,7 +131,7 @@ struct RenderSettings
 	// camera sees, PSR's mirrors and glass and pass-throughs not counting) is scaled down to at most
 	// indirectClampValue in its largest channel. Biased darker.
 	bool clampIndirect = true;
-	float indirectClampValue = 2.0f;
+	float indirectClampValue = 5.0f;
 	// DXR 1.2 shader execution reordering: switches to the path tracing pipeline that reorders
 	// threads by material before shading each hit. Ignored where the device has no SER.
 	bool shaderExecutionReordering = true;

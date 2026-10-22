@@ -31,6 +31,9 @@ namespace
 	constexpr int kOpacityMicromapMaxLevel = 6;
 	constexpr float kOpacityMicromapTargetEdge = 3.0f;
 	constexpr uint32_t kNoOpacityMicromaps = UINT32_MAX;
+	// glTF allows an IOR down to 1, an interface that hardly reflects or bends light at all, which the
+	// BSDF's Fresnel and refraction handle badly.
+	constexpr float kMinIor = 1.05f;
 
 	bool IsUsablePrimitive(const Scene::Primitive &primitive)
 	{
@@ -1241,6 +1244,12 @@ void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMater
 	materialGeometry_.reserve(materials.size());
 	for (GpuMaterial &packed: materials)
 	{
+		// Clamped here rather than baked, so cached scenes get it too.
+		if (UnpackGpuMaterial(packed).ior < kMinIor)
+		{
+			packed.transmissionIor = (packed.transmissionIor & 0xFFFFu) |
+									 (static_cast<uint32_t>(DirectX::PackedVector::XMConvertFloatToHalf(kMinIor)) << 16);
+		}
 		const MaterialData material = UnpackTracedMaterial(packed);
 		if (UnpackGpuMaterial(packed).alphaMode == ALPHA_MODE_BLEND)
 		{
