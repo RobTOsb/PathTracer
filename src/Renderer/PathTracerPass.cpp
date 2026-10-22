@@ -274,6 +274,12 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 											  ? lights.diffuseOnlyRoughness * lights.diffuseOnlyRoughness
 											  : FLT_MAX;
 
+	// Tokuyoshi and Kaplanyan's kernel, 2 * sigma^2 of the pixel filter, and their alpha^2 cap.
+	const SpecularAASettings &specularAA = settings_.specularAA;
+	constants.specularAAVariance = specularAA.enabled ? 2.0f * 0.15915494f * std::max(specularAA.strength, 0.0f) : 0.0f;
+	constants.specularAANormalMapScale = specularAA.enabled && specularAA.normalMaps ? std::max(specularAA.strength, 0.0f) : 0.0f;
+	constants.specularAAMaxVariance = std::max(specularAA.maxVariance, 0.0f);
+
 	// Enough bits to tell every material row apart, up to the 16 that MaybeReorderThread honours.
 	uint hintBits = 0;
 	while (hintBits < 16 && (1u << hintBits) < scene_.GetMaterialCount())

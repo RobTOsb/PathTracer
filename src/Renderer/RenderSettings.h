@@ -48,6 +48,17 @@ struct LightSettings
 	bool orientationSplits = true;
 };
 
+// Geometric specular antialiasing of the opaque surfaces the camera sees: glossy lobes widen by how much
+// the normals turn across the pixel, so highlights smaller than a pixel stop flickering with the jitter.
+struct SpecularAASettings
+{
+	bool enabled = true;
+	float strength = 1.0f; // scales the kernel, 1 = Tokuyoshi and Kaplanyan's
+	// The normal maps' variance as their mips average it away (Toksvig).
+	bool normalMaps = true;
+	float maxVariance = 0.18f; // cap on what is added to alpha^2
+};
+
 // Sky and aerial perspective of Hillaire 2020 (SkyAtmospherePass), lit by the sun. While it is on, the
 // sun's colour and intensity are taken at the top of the atmosphere and the constant sky is unused.
 struct AtmosphereSettings
@@ -84,6 +95,7 @@ struct RenderSettings
 {
 	SunSettings sun;
 	LightSettings lights;
+	SpecularAASettings specularAA;
 	AtmosphereSettings atmosphere;
 
 	float3 skyColour = { 0.45f, 0.65f, 1.0f };

@@ -132,7 +132,18 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
 
     // Material and shading basis for this hit, its textures filtered over the cone's footprint.
     cone.width += cone.spread * hit.t;
-    OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments, SIMPLE);
+    // Specular antialiasing where the camera sees the surface: how far the vertex normals turn across
+    // the pixel's footprint, stretched by 1 / cos along the slope, and the normal maps' own spread.
+    float2 specularAA = float2(0.0, 0.0);
+    if (visible)
+    {
+        float turn = HitCurvature(hit) * cone.width;
+        float cosView = dot(hit.N, wo);
+        float stretch = 1.0 + 1.0 / max(cosView * cosView, 0.01);
+        specularAA = float2(g_Frame.specularAAVariance * turn * turn * stretch, g_Frame.specularAANormalMapScale);
+    }
+    OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments,
+                                         SIMPLE, specularAA);
     if (frontFace && any(hit.emission > 0.0))
         radiance += ClampIndirect(throughput * hit.emission * emissionWeight, directArrival);
 

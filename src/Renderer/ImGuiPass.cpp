@@ -322,6 +322,20 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::EndDisabled();
 	}
 
+	if (ImGui::CollapsingHeader("Specular antialiasing", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		SpecularAASettings &specularAA = settings_.specularAA;
+		ImGui::Checkbox("Enabled##SpecularAA", &specularAA.enabled);
+		ImGui::SetItemTooltip("Widens the glossy lobes of opaque surfaces the camera sees by how much their normals "
+							  "turn across the pixel (DLSS-RR builds only), so sub-pixel highlights stop flickering");
+		ImGui::BeginDisabled(!specularAA.enabled);
+		ImGui::SliderFloat("Strength##SpecularAA", &specularAA.strength, 0.0f, 4.0f, "%.2f");
+		ImGui::Checkbox("Normal map variance", &specularAA.normalMaps);
+		ImGui::SetItemTooltip("Toksvig: also widen by the spread of normals that a normal map's mips average away");
+		ImGui::SliderFloat("Max alpha^2 added", &specularAA.maxVariance, 0.0f, 1.0f, "%.3f");
+		ImGui::EndDisabled();
+	}
+
 	if (ImGui::CollapsingHeader("Sky", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		AtmosphereSettings &atmosphere = settings_.atmosphere;

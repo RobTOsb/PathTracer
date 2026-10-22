@@ -92,6 +92,15 @@ struct FrameConstants
 	// shrink the image of the surface they end on by more than this (linear); negative = off, which
 	// leaves only the chains that barely bend the virtual image.
 	float psrMaxMinification;
+
+	// Geometric specular antialiasing of the opaque surfaces the camera sees (Tokuyoshi and Kaplanyan 2019):
+	// GGX alpha^2 grows by specularAAVariance times the squared turn of the vertex normals across the pixel,
+	// plus specularAANormalMapScale times the normal maps' variance from their mips (Toksvig), together at
+	// most specularAAMaxVariance. Zero turns either off.
+	float specularAAVariance;
+	float specularAANormalMapScale;
+	float specularAAMaxVariance;
+	float pad0;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -447,7 +456,7 @@ struct TonemapConstants
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(FrameConstants) == 480,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 496,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuMaterial) == 128,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
