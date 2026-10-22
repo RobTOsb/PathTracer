@@ -45,7 +45,7 @@ struct LightSettings
 	// makes the tree shallower at the cost of ignoring where the leaf's lights are relative to each other.
 	int maxLeafLights = 4;
 	// Light tree build: the split cost also weighs how far each side's emitter normals spread.
-	bool orientationSplits = true;
+	bool orientationSplits = false;
 };
 
 // Geometric specular antialiasing of the opaque surfaces the camera sees: glossy lobes widen by how much
@@ -92,6 +92,7 @@ struct AtmosphereSettings
 
 constexpr int kMaxSamplesPerPixel = 8;
 constexpr int kMaxBounces = 8; // of each kind, diffuse and specular
+constexpr int kMaxBloomLevels = 8; // half resolution down to 1/256
 
 enum class RenderMode
 {
@@ -169,6 +170,13 @@ struct RenderSettings
 	float peakNits = 1000.0f; // overwritten with the display's reported peak at startup
 	bool hdrGammaCorrection = true; // match the 2.2 gamma SDR displays decode with
 
+	// Bloom, blended into the HDR image after upscaling: the mean of bloomLevels ever blurrier half-resolution
+	// levels replaces bloomStrength of the image.
+	bool bloom = true;
+	float bloomStrength = 0.1f;
+	int bloomLevels = 6; // 1 to kMaxBloomLevels, each doubles the radius
+	bool bloomSun = false;
+
 	// Film grain, added after tone mapping in display-encoded space.
 	bool filmGrain = true;
 	float filmGrainStrength = 0.008f; // standard deviation in sRGB-encoded units at mid-grey
@@ -187,7 +195,7 @@ struct RenderSettings
 	float psrMaxRoughness = 0.1f;
 	// Curved mirrors and glass keep PSR too, with motion vectors traced through them by ray differentials,
 	// unless they shrink the image of the surface they show by more than psrMaxMinification (linear).
-	bool psrCurvedSurfaces = true;
+	bool psrCurvedSurfaces = false;
 	float psrMaxMinification = 2.0f;
 	// Surfaces at most this rough keep last frame's specular hit distance in frames whose path took
 	// the diffuse lobe, so the guide does not flicker between a distance and none.

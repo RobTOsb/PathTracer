@@ -464,8 +464,26 @@ struct TonemapConstants
 	uint grainSeed; // changes whenever the grain pattern should change
 };
 
+// Root constants for the bloom compute passes (bound as g_PushConstants). Generated root signatures hold
+// at most 16 dwords of root constants, which this fills.
+struct BloomConstants
+{
+	float2 inputTexelSize; // 1 / the size of the texture the pass filters (bloom level 0 for Composite)
+	float2 outputTexelSize; // 1 / the output's size
+	uint width; // output size
+	uint height;
+	float exposure; // linear multiplier, 2^EV, so the Karis average weighs luminance as it will be displayed
+	uint karisAverage; // 1: the first downsample, which weighs its boxes down by their brightness
+	float strength; // Composite: how much of the image is replaced by the bloom
+	float levelCount; // Composite: bloom levels summed into level 0
+	float2 tanHalfFov; // horizontal, vertical
+	float3 sunDirectionView; // towards the sun in the camera's (right, up, front) basis
+	float sunMaskOneMinusCos; // first downsample: 1 - cos of the angle around the sun it leaves out, 0 = none
+};
+
 #ifdef __cplusplus
 static_assert(sizeof(FrameConstants) == 512,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
 static_assert(sizeof(GpuMaterial) == 128,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");

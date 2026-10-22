@@ -232,6 +232,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	{
 		ProfileRow(renderContext, "DLSS-RR");
 	}
+	ProfileRow(renderContext, "Bloom");
 	ProfileRow(renderContext, "Tonemap");
 
 	// Without the approximations the reference ignores the firefly clamp and specular antialiasing settings.
@@ -595,6 +596,16 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 			ImGui::SliderFloat("White clip", &settings_.whiteClip, 1.0f, 1000.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
 			ImGui::SetItemTooltip("Scene value (1 = paper white) that the Neutwo curve maps exactly to its peak");
 		}
+
+		ImGui::Checkbox("Bloom", &settings_.bloom);
+		ImGui::BeginDisabled(!settings_.bloom);
+		ImGui::SliderFloat("Bloom strength", &settings_.bloomStrength, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("How much of the image the bloom replaces; it moves light around without adding any");
+		ImGui::SliderInt("Bloom levels", &settings_.bloomLevels, 1, kMaxBloomLevels);
+		ImGui::SetItemTooltip("Half-resolution levels averaged into the bloom, each twice as blurry as the last");
+		ImGui::Checkbox("Bloom the sun", &settings_.bloomSun);
+		ImGui::SetItemTooltip("Off: the sun disc seen directly is left out of the bloom, its reflections still bloom");
+		ImGui::EndDisabled();
 
 		ImGui::Checkbox("Film grain", &settings_.filmGrain);
 		ImGui::BeginDisabled(!settings_.filmGrain);
