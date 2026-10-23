@@ -282,6 +282,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 						   (!atmosphere || atmosphere_.IsSunAboveHorizon());
 	const bool lightsActive = lights.enabled && scene_.GetLightCount() > 0;
 	constants.lightCount = lightsActive ? scene_.GetLightCount() : 0u;
+	constants.staticLightCount = lightsActive ? scene_.GetStaticLightCount() : 0u;
+	constants.staticLightPowerShare = scene_.GetStaticLightPowerShare();
 	constants.lightSampling = static_cast<uint>(lights.sampling);
 	constants.lightTreeBounces = static_cast<uint>(std::max(lights.treeBounces, 0));
 	constants.sunSelectProbability = sunActive ? (lightsActive ? 0.5f : 1.0f) : 0.0f;

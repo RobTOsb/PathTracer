@@ -49,7 +49,8 @@ struct GpuLightTreeLeafEntry
 };
 
 // Power light selection, Vose's alias method over the lights' flux: entry i keeps light i with
-// probability threshold and otherwise picks alias. pmf is light i's share of the flux and aliasPmf the
+// probability threshold and otherwise picks alias. pmf is light i's share of the flux of its part of
+// the light buffer (static or dynamic emitters, see FrameConstants::staticLightCount) and aliasPmf the
 // alias's, so a pick takes one load, and so does the MIS PMF of a light (its own entry's pmf).
 struct GpuLightAliasEntry
 {

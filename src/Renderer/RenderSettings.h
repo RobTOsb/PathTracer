@@ -46,6 +46,9 @@ struct LightSettings
 	int maxLeafLights = 4;
 	// Light tree build: the split cost also weighs how far each side's emitter normals spread.
 	bool orientationSplits = false;
+	// Moves the dynamic emitters (kDynamicEmitters in main.cpp) round a circle while spinning them, which
+	// rebuilds their light tree and the TLAS every frame.
+	bool animateDynamic = true;
 };
 
 // Geometric specular antialiasing of the opaque surfaces the camera sees: glossy lobes widen by how much

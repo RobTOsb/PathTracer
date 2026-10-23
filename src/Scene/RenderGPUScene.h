@@ -8,6 +8,7 @@
 #include "PathTracerInterop.h"
 #include "ShaderInterop.h"
 
+#include <array>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -54,9 +55,38 @@ public:
 
 	void BuildAccelerationStructures();
 
-	// Builds the light tree over the emissive triangles on the first call and again whenever the
-	// settings change; otherwise it does nothing. Call after BeginFrame, as a build writes the
-	// current frame's light buffers.
+	// Picks the emissive scene instances that move, counted in instance order among those with an
+	// emissive primitive (the load logs each one). Their lights go at the end of the light buffer, in a
+	// light tree of their own under the root group's last slot, so moving them rebuilds only that tree.
+	// Call before BuildGPUScene or LoadGPUScene.
+	void SetDynamicEmitters(std::vector<uint32_t> emissiveInstances)
+	{
+		dynamicEmitterSelection_ = std::move(emissiveInstances);
+	}
+
+	// The scene instances SetDynamicEmitters picked.
+	uint32_t GetDynamicInstanceCount() const
+	{
+		return static_cast<uint32_t>(dynamicInstances_.size());
+	}
+
+	// A dynamic instance's world transform at load, a float3x4 in the InstanceGPU layout.
+	const float *GetDynamicInstanceRestTransform(uint32_t dynamicInstance) const
+	{
+		return dynamicRestTransforms_[dynamicInstance].data();
+	}
+
+	// Moves a dynamic instance: its TLAS instances follow at the next UpdateAccelerationStructures and
+	// its lights at the next UpdateLights.
+	void SetDynamicInstanceTransform(uint32_t dynamicInstance, const float (&worldMatrix)[12]);
+
+	// Rebuilds the TLASes if a dynamic instance has moved since the last call. Records on the current
+	// frame's graphics command list, so call it after BeginGraphicsCommandList and before any tracing.
+	void UpdateAccelerationStructures();
+
+	// Builds the static emitters' light tree on the first call and again whenever the settings change,
+	// and the dynamic emitters' tree then too and whenever one of them has moved; otherwise it does
+	// nothing. Call after BeginFrame, as a build writes the current frame's light buffers.
 	void UpdateLights(const LightTreeBuildSettings &settings);
 
 	bool HasGeometry() const
@@ -159,10 +189,27 @@ public:
 		return lightCount_;
 	}
 
-	// CPU time of the last light tree build.
-	float GetLightTreeBuildMs() const
+	// Lights before this index in the light buffer are static emitters, those from it on dynamic ones.
+	uint32_t GetStaticLightCount() const
 	{
-		return lightTreeBuildMs_;
+		return staticLightCount_;
+	}
+
+	// The static emitters' share of the flux, for power selection.
+	float GetStaticLightPowerShare() const
+	{
+		return staticLightPowerShare_;
+	}
+
+	// CPU time of the last build of the static and of the dynamic emitters' light tree.
+	float GetStaticLightTreeBuildMs() const
+	{
+		return staticLightTreeBuildMs_;
+	}
+
+	float GetDynamicLightTreeBuildMs() const
+	{
+		return dynamicLightTreeBuildMs_;
 	}
 
 	// Levels of node groups above the deepest light and above the average light in the last tree.
@@ -204,6 +251,11 @@ private:
 	void UploadMaterials(const std::vector<GpuMaterial> &materials, UploadBatchHandle batch);
 	// Fills the emissive lights and returns the emitter buffer's contents.
 	std::vector<uint32_t> CollectEmitters(const Scene::GLTFScene &scene, const std::vector<GpuMaterial> &materials);
+	// Moves the lights of the instances dynamicEmitterSelection_ picks to the end of the light buffer,
+	// keeping the order within each part, and renumbers them in the emitter buffer's contents.
+	void PartitionDynamicLights(std::vector<uint32_t> &emitters);
+	// The dynamic lights in world space, from the current transforms of their instances.
+	void TransformDynamicLights();
 	void UploadEmitters(const std::vector<uint32_t> &emitters, UploadBatchHandle batch);
 	// Fills the opacity micromap tables from the base colour alpha of the alpha-tested primitives.
 	void BakeOpacityMicromaps(const Scene::GLTFScene &scene, const std::vector<GpuMaterial> &materials);
@@ -274,19 +326,38 @@ private:
 		size_t parentCapacity = 0;
 		size_t leafLightCapacity = 0;
 		size_t powerCapacity = 0;
+		uint32_t staticTreeGeneration = 0; // of the static part these hold, 0 for none
 	};
 
 	// The light tree input: the emissive triangles (one-sided area lights, with the average of their
-	// emissive texture as the flux scale).
+	// emissive texture as the flux scale), the static emitters' first, then from staticLightCount_ on
+	// the dynamic ones'.
 	std::vector<GpuLight> emissiveLights_;
 	std::vector<float> emissiveFluxScales_;
+	uint32_t staticLightCount_ = 0;
 	LightTreeBuildSettings lightTreeSettings_; // of the last build
 	bool lightTreeBuilt_ = false;
+	// Kept to write the static part of the light buffers of each frame in flight, once per build.
+	LightTree staticLightTree_;
+	uint32_t staticTreeGeneration_ = 0; // counts static tree builds
+
+	// Emissive instances that move (SetDynamicEmitters), and the lights of their triangles.
+	std::vector<uint32_t> dynamicEmitterSelection_;
+	std::vector<uint32_t> dynamicInstances_; // into instances
+	std::vector<uint32_t> dynamicOfInstance_; // per scene instance, into dynamicInstances_ or UINT32_MAX
+	std::vector<std::array<float, 12>> dynamicRestTransforms_;
+	std::vector<uint8_t> dynamicRestMirrored_; // the rest transform mirrors, so CollectEmitters swapped corners
+	std::vector<GpuLight> dynamicObjectLights_; // per dynamic light, its triangle in object space
+	std::vector<uint32_t> dynamicLightInstance_; // per dynamic light, into dynamicInstances_
+	bool dynamicLightsMoved_ = false;
+	bool dynamicTLASMoved_ = false;
 
 	std::vector<LightFrameBuffers> lightFrames_;
 	uint32_t lightFrame_ = 0;
 	uint32_t lightCount_ = 0;
-	float lightTreeBuildMs_ = 0.0f;
+	float staticLightPowerShare_ = 1.0f;
+	float staticLightTreeBuildMs_ = 0.0f;
+	float dynamicLightTreeBuildMs_ = 0.0f;
 	uint32_t lightTreeMaxDepth_ = 0;
 	float lightTreeAverageDepth_ = 0.0f;
 
@@ -302,6 +373,10 @@ private:
 	uint32_t uncompressedTextures_ = 0; // left as RGBA8 by CompressBC7 (not whole 4x4 blocks, or it failed)
 
 	std::vector<AccelerationStructureHandle> blases_; // one per primitive desc, invalid for skipped primitives
+	// The TLAS instances as built, in InstanceIndex() order, for UpdateAccelerationStructures.
+	std::vector<TLASInstanceRef> tlasRefs_;
+	std::vector<TLASInstance> tlasInstances_;
+	std::vector<TLASInstance> ommTlasInstances_;
 	AccelerationStructureHandle tlas_ = InvalidAccelerationStructureHandle;
 	ResourceHandle tlasSRV_ = InvalidResourceHandle;
 

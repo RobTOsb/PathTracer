@@ -362,7 +362,19 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	{
 		LightSettings &lights = settings_.lights;
 		const uint32_t lightCount = scene_.GetLightCount();
-		ImGui::Text("%u emissive triangle(s), tree built in %.3f ms", lightCount, scene_.GetLightTreeBuildMs());
+		const uint32_t dynamicLightCount = lightCount - scene_.GetStaticLightCount();
+		ImGui::Text("%u static emissive triangle(s), tree built in %.3f ms",
+					scene_.GetStaticLightCount(),
+					scene_.GetStaticLightTreeBuildMs());
+		if (scene_.GetDynamicInstanceCount() > 0)
+		{
+			ImGui::Text("%u dynamic emissive triangle(s), tree built in %.3f ms",
+						dynamicLightCount,
+						scene_.GetDynamicLightTreeBuildMs());
+			ImGui::Checkbox("Animate dynamic emitters", &lights.animateDynamic);
+			ImGui::SetItemTooltip("Move the dynamic emitters round a circle, which rebuilds their light tree and the "
+								  "TLAS every frame");
+		}
 		ImGui::Text("Tree depth: %u max, %.1f average (4-wide)",
 					scene_.GetLightTreeMaxDepth(),
 					scene_.GetLightTreeAverageDepth());

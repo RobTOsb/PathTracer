@@ -459,14 +459,19 @@ namespace
 		return mid;
 	}
 
-	// Vose's alias method over the leaves' flux, in light order.
-	std::vector<GpuLightAliasEntry> BuildPowerTable(const std::vector<Cluster> &leaves)
+	// Vose's alias method over the leaves' flux, in light order, with the aliases offset by firstLight.
+	// Without any flux every entry keeps itself at a PMF of 0.
+	std::vector<GpuLightAliasEntry> BuildPowerTable(const std::vector<Cluster> &leaves, double total, uint32_t firstLight)
 	{
 		const size_t count = leaves.size();
-		double total = 0.0;
-		for (const Cluster &leaf: leaves)
+		if (!(total > 0.0))
 		{
-			total += leaf.flux;
+			std::vector<GpuLightAliasEntry> table(count);
+			for (uint32_t i = 0; i < static_cast<uint32_t>(count); ++i)
+			{
+				table[i] = { 1.0f, firstLight + i, 0.0f, 0.0f };
+			}
+			return table;
 		}
 
 		// Each entry's flux in units of the mean, split into the ones below it and the ones that cover them.
@@ -512,6 +517,10 @@ namespace
 		{
 			entry.aliasPmf = table[entry.alias].pmf;
 		}
+		for (GpuLightAliasEntry &entry: table)
+		{
+			entry.alias += firstLight;
+		}
 		return table;
 	}
 } // namespace
@@ -523,49 +532,53 @@ float LightTreeFlux(const GpuLight &light, float fluxScale)
 	return MakeLeaf(light, fluxScale, leaf, primitive) ? leaf.flux : 0.0f;
 }
 
+GpuLightTreeNode EmptyLightTreeNode()
+{
+	GpuLightTreeNode node = {};
+	node.radius = -FLT_MAX; // rejected by LightTreeNodeImportance as below the horizon
+	return node;
+}
+
 LightTree BuildLightTree(std::span<const GpuLight> lights,
 						 std::span<const float> fluxScales,
-						 const LightTreeBuildSettings &settings)
+						 const LightTreeBuildSettings &settings,
+						 const LightTreeLayout &layout)
 {
 	LightTree tree;
 	std::vector<Primitive> prims;
-	std::vector<Cluster> leaves;
+	std::vector<Cluster> leaves(lights.size()); // per input light, zero for those without a leaf
 	prims.reserve(lights.size());
-	leaves.reserve(lights.size());
-	tree.lights.reserve(lights.size());
-	tree.sourceIndex.reserve(lights.size());
+	tree.leafOfLight.assign(lights.size(), { 0, 0.0f });
 
 	for (uint32_t i = 0; i < static_cast<uint32_t>(lights.size()); ++i)
 	{
-		Cluster leaf = {};
 		Primitive primitive = {};
 		const float fluxScale = fluxScales.empty() ? 1.0f : fluxScales[i];
-		if (!MakeLeaf(lights[i], fluxScale, leaf, primitive))
+		if (!MakeLeaf(lights[i], fluxScale, leaves[i], primitive))
 		{
+			leaves[i] = {};
 			continue;
 		}
 
-		primitive.light = static_cast<uint32_t>(tree.lights.size());
-		tree.lights.push_back(lights[i]);
-		tree.sourceIndex.push_back(i);
+		primitive.light = i;
 		prims.push_back(primitive);
-		leaves.push_back(leaf);
-	}
-
-	const uint32_t lightCount = static_cast<uint32_t>(prims.size());
-	if (lightCount == 0)
-	{
-		return tree;
-	}
-
-	if (lightCount > LIGHT_TREE_LEAF_FIRST_MASK + 1)
-	{
-		// Leaves address their range with 29 bits.
-		return LightTree{};
+		tree.flux += leaves[i].flux;
 	}
 
 	// Still in light order here; the build below reorders prims, not leaves.
-	tree.powerTable = BuildPowerTable(leaves);
+	tree.powerTable = BuildPowerTable(leaves, tree.flux, layout.firstLight);
+
+	const uint32_t lightCount = static_cast<uint32_t>(prims.size());
+	tree.treeLights = lightCount;
+	if (lightCount == 0 || static_cast<uint64_t>(layout.firstLight) + lightCount > LIGHT_TREE_LEAF_FIRST_MASK + 1)
+	{
+		// Leaves address their range with 29 bits; past that the tree stays empty.
+		tree.nodes.assign(LIGHT_TREE_WIDTH, EmptyLightTreeNode());
+		tree.parents.push_back(layout.rootParent);
+		tree.treeLights = 0;
+		tree.flux = 0.0;
+		return tree;
+	}
 
 	// Top down binary topology. Children are allocated as adjacent pairs, so a child always has a
 	// larger index than its parent. Ranges of maxLeafLights or fewer become leaves.
@@ -626,14 +639,15 @@ LightTree BuildLightTree(std::span<const GpuLight> lights,
 
 	// Collapse into groups of LIGHT_TREE_WIDTH: a group starts as the two children of a binary node,
 	// and the member with the most lights is replaced by its own two children until the group is full
-	// or holds only leaves. Opening the largest keeps the tree shallow. Groups are appended while the
-	// nodes are visited in index order, so a child always has a larger index than its parent, which
-	// lets the bottom-up pass below run in reverse index order.
+	// (the root group at rootWidth members) or holds only leaves. Opening the largest keeps the tree
+	// shallow. Groups are appended while the nodes are visited in index order, so a child always has a
+	// larger index than its parent, which lets the bottom-up pass below run in reverse index order.
+	// Node indices are local to the tree; what is stored has the layout's offsets added.
 	std::vector<uint32_t> nodeBinary; // binary node of each node, kEmptyNode for padding
 	std::vector<uint32_t> depth; // levels of groups from the root down to the node
 	nodeBinary.reserve(2 * lightCount);
 	depth.reserve(2 * lightCount);
-	auto addGroup = [&](uint32_t binaryNode, uint32_t parent, uint32_t parentDepth)
+	auto addGroup = [&](uint32_t binaryNode, uint32_t parent, uint32_t parentDepth, uint32_t width)
 	{
 		uint32_t members[LIGHT_TREE_WIDTH];
 		uint32_t memberCount = 0;
@@ -646,7 +660,7 @@ LightTree BuildLightTree(std::span<const GpuLight> lights,
 			members[memberCount++] = binary[binaryNode].left;
 			members[memberCount++] = binary[binaryNode].left + 1;
 		}
-		while (memberCount < LIGHT_TREE_WIDTH)
+		while (memberCount < width)
 		{
 			uint32_t open = UINT32_MAX;
 			uint32_t openCount = 0;
@@ -678,9 +692,9 @@ LightTree BuildLightTree(std::span<const GpuLight> lights,
 		return first;
 	};
 
-	std::vector<uint32_t> childOrLight;
+	std::vector<uint32_t> childOrLight; // as stored, with the offsets
 	childOrLight.reserve(2 * lightCount);
-	addGroup(0, 0, 0);
+	addGroup(0, layout.rootParent, 0, std::clamp(layout.rootWidth, 2u, LIGHT_TREE_WIDTH));
 	for (uint32_t index = 0; index < static_cast<uint32_t>(nodeBinary.size()); ++index)
 	{
 		const uint32_t b = nodeBinary[index];
@@ -691,21 +705,34 @@ LightTree BuildLightTree(std::span<const GpuLight> lights,
 		else if (binary[b].left == 0)
 		{
 			const uint32_t count = binary[b].end - binary[b].begin;
-			childOrLight.push_back(LIGHT_TREE_LEAF_BIT | ((count - 1) << LIGHT_TREE_LEAF_COUNT_SHIFT) | binary[b].begin);
+			childOrLight.push_back(LIGHT_TREE_LEAF_BIT | ((count - 1) << LIGHT_TREE_LEAF_COUNT_SHIFT) |
+								   (layout.firstLight + binary[b].begin));
 			tree.maxDepth = std::max(tree.maxDepth, depth[index]);
 			tree.averageDepth += static_cast<float>(depth[index] * count);
 		}
 		else
 		{
-			childOrLight.push_back(addGroup(b, index, depth[index]));
+			const uint32_t first = addGroup(b, layout.firstNode + index, depth[index], LIGHT_TREE_WIDTH);
+			childOrLight.push_back(layout.firstNode + first);
 		}
 	}
 	tree.averageDepth /= static_cast<float>(lightCount);
 
 	// Bottom up cluster parameters (Eqs. 2 to 5), and the leaf entries: each light is picked from its
 	// leaf in proportion to its flux.
+	auto groupMembers = [&](uint32_t first, uint32_t (&members)[LIGHT_TREE_WIDTH])
+	{
+		uint32_t memberCount = 0;
+		for (uint32_t i = 0; i < LIGHT_TREE_WIDTH; ++i)
+		{
+			if (nodeBinary[first + i] != kEmptyNode)
+			{
+				members[memberCount++] = first + i;
+			}
+		}
+		return memberCount;
+	};
 	tree.leafLights.resize(lightCount);
-	tree.leafOfLight.resize(lightCount);
 	std::vector<Cluster> clusters(nodeBinary.size());
 	for (uint32_t index = static_cast<uint32_t>(nodeBinary.size()); index-- > 0;)
 	{
@@ -723,62 +750,45 @@ LightTree BuildLightTree(std::span<const GpuLight> lights,
 			{
 				const uint32_t light = prims[begin + i].light;
 				const float pmf = leaves[light].flux / clusters[index].flux;
-				tree.leafLights[begin + i] = { light, pmf };
-				tree.leafOfLight[light] = { index, pmf };
+				tree.leafLights[begin + i] = { layout.firstLight + light, pmf };
+				tree.leafOfLight[light] = { layout.firstNode + index, pmf };
 			}
 			continue;
 		}
 
-		const uint32_t first = childOrLight[index];
 		uint32_t members[LIGHT_TREE_WIDTH];
-		uint32_t memberCount = 0;
-		for (uint32_t i = 0; i < LIGHT_TREE_WIDTH; ++i)
-		{
-			if (nodeBinary[first + i] != kEmptyNode)
-			{
-				members[memberCount++] = first + i;
-			}
-		}
+		const uint32_t memberCount = groupMembers(childOrLight[index] - layout.firstNode, members);
 		clusters[index] = Combine(memberCount, [&](uint32_t i) -> const Cluster & { return clusters[members[i]]; });
 	}
 
 	// Convert average directions to the vMF axis and sharpness (Eq. 3), and fold the flux and the
 	// sharpness dependent normalisation into one amplitude so the shader does not recompute it per
 	// visit. Then pack each node; sharpness stays below about 1e4 (len <= 0.9999), within float16.
-	tree.nodes.resize(nodeBinary.size());
-	for (size_t index = 0; index < nodeBinary.size(); ++index)
+	auto pack = [](const Cluster &node, uint32_t link)
 	{
-		GpuLightTreeNode &packed = tree.nodes[index];
-		if (nodeBinary[index] == kEmptyNode)
-		{
-			packed = {};
-			packed.radius = -FLT_MAX; // rejected by LightTreeNodeImportance as below the horizon
-			continue;
-		}
-
-		const Cluster &node = clusters[index];
 		const float3 v = node.averageDirection;
 		const float len = Length(v);
 		const float3 axis = len > 0.0f ? v * (1.0f / len) : float3(0.0f, 0.0f, 1.0f);
 		const float sharpness = VmfSharpness(len);
 
+		GpuLightTreeNode packed;
 		packed.mean = node.mean;
 		packed.amplitude = node.flux / (2.0f * Pi * SGIntegral(sharpness));
-		packed.childOrLight = childOrLight[index];
+		packed.childOrLight = link;
 		packed.axis = PackOctahedralSnorm16x2(axis);
 		packed.sharpnessStdDev = PackF16Pair(sharpness, std::min(sqrtf(std::max(node.variance, 0.0f)), kMaxHalf));
 		packed.radius = node.radius;
-	}
-
-	return tree;
-}
-
-std::vector<uint32_t> BuildInputToLightMap(const LightTree &tree, size_t inputLightCount)
-{
-	std::vector<uint32_t> map(inputLightCount, kInvalidLightIndex);
-	for (uint32_t light = 0; light < static_cast<uint32_t>(tree.sourceIndex.size()); ++light)
+		return packed;
+	};
+	tree.nodes.resize(nodeBinary.size());
+	for (size_t index = 0; index < nodeBinary.size(); ++index)
 	{
-		map[tree.sourceIndex[light]] = light;
+		tree.nodes[index] = nodeBinary[index] == kEmptyNode ? EmptyLightTreeNode() : pack(clusters[index], childOrLight[index]);
 	}
-	return map;
+
+	uint32_t rootMembers[LIGHT_TREE_WIDTH];
+	const uint32_t rootMemberCount = groupMembers(0, rootMembers);
+	tree.root = pack(Combine(rootMemberCount, [&](uint32_t i) -> const Cluster & { return clusters[rootMembers[i]]; }),
+					 layout.firstNode);
+	return tree;
 }

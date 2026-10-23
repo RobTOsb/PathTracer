@@ -108,8 +108,11 @@ struct FrameConstants
 	// Paths per pixel this dispatch traces: averaged into the output, or under REFERENCE added to the sum.
 	uint samplesPerFrame;
 	uint maxSpecularBounces; // see maxDiffuseBounces
-	uint pad1;
-	uint pad2;
+	// The light buffer holds the static emitters first, then from staticLightCount on the dynamic ones.
+	// Power selection picks the static part with staticLightPowerShare, its share of the flux, then a
+	// light within the part from its own alias table.
+	uint staticLightCount;
+	float staticLightPowerShare;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of

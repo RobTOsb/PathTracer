@@ -11,16 +11,37 @@
 // Gaussian Lighting" (Tokuyoshi, Ikeda, Kulkarni and Harada 2024), Section 3.1. Traversal lives in
 // shaders/LightTree.slang.
 
+// Where a tree goes in the buffers it may share with another tree: the static emitters' tree is built
+// once with a slot of its root group left free, and the dynamic emitters' tree goes after it, under a
+// node in that slot. Every index the tree stores is a buffer index, with these offsets applied.
+struct LightTreeLayout
+{
+	uint32_t firstNode = 0; // of the root group, a multiple of LIGHT_TREE_WIDTH; 0 is the root of all
+	uint32_t firstLight = 0; // buffer index of the first input light, and the tree's first leaf slot
+	uint32_t rootWidth = LIGHT_TREE_WIDTH; // members the root group may have, the rest stay empty
+	uint32_t rootParent = 0; // node above the root group, for the PMF walk; unused at firstNode 0
+};
+
 struct LightTree
 {
-	// Groups of LIGHT_TREE_WIDTH nodes, group 0 holds the children of the implicit root.
+	// Groups of LIGHT_TREE_WIDTH nodes, the first one the root group, starting at layout.firstNode.
+	// The root group is there even without a light, all of it empty then.
 	std::vector<GpuLightTreeNode> nodes;
-	std::vector<uint32_t> parents; // parent node of each group, 0 for group 0
-	std::vector<GpuLightTreeLeafEntry> leafLights; // per leaf slot: light index and its PMF within the leaf
-	std::vector<GpuLight> lights; // the lights the leaves index, only those with non-zero flux
-	std::vector<GpuLightTreeLeafEntry> leafOfLight; // per light: its leaf node and PMF within it (LightTreePmf)
-	std::vector<GpuLightAliasEntry> powerTable; // per light: power selection by flux, see GpuLightAliasEntry
-	std::vector<uint32_t> sourceIndex; // index into the input lights for each light
+	std::vector<uint32_t> parents; // parent node of each group, layout.rootParent for the root group
+	// Per leaf slot from layout.firstLight on: light index and its PMF within the leaf. Only lights with
+	// a non-zero flux get one.
+	std::vector<GpuLightTreeLeafEntry> leafLights;
+	// Per input light: its leaf node and PMF within it (LightTreePmf). A light without a leaf has a PMF
+	// of 0 at node 0, which the walk turns into 0 after one group.
+	std::vector<GpuLightTreeLeafEntry> leafOfLight;
+	// Per input light: power selection by flux within this tree, see GpuLightAliasEntry. Aliases are
+	// buffer indices.
+	std::vector<GpuLightAliasEntry> powerTable;
+	// The node a tree it is embedded in links to: the whole tree as one cluster, with the root group as
+	// its child. Empty when flux is 0.
+	GpuLightTreeNode root = {};
+	double flux = 0.0; // of every light in the tree
+	uint32_t treeLights = 0; // lights with a leaf
 	uint32_t maxDepth = 0; // levels of groups the deepest light is under
 	float averageDepth = 0.0f; // the same averaged over the lights
 };
@@ -36,23 +57,20 @@ struct LightTreeBuildSettings
 	bool operator==(const LightTreeBuildSettings &) const = default;
 };
 
-// Builds a 4-wide tree over area lights (one-sided Lambertian triangles); other light types are
-// skipped. A binary tree is built top down first, with a binned split costing flux times surface area
-// (and the orientation measure with orientationSplits) that stops at maxLeafLights lights, and is
-// then collapsed into groups of four. Cluster parameters follow Eqs. 2 to 5. fluxScales, if not
-// empty, holds a factor per light that its flux is multiplied by, such as the average of a textured
-// area light's radiance map.
+// Builds a 4-wide tree over area lights (one-sided Lambertian triangles); other light types, and lights
+// that emit nothing, get no leaf but keep their index. A binary tree is built top down first, with a
+// binned split costing flux times surface area (and the orientation measure with orientationSplits)
+// that stops at maxLeafLights lights, and is then collapsed into groups of four. Cluster parameters
+// follow Eqs. 2 to 5. fluxScales, if not empty, holds a factor per light that its flux is multiplied
+// by, such as the average of a textured area light's radiance map.
 LightTree BuildLightTree(std::span<const GpuLight> lights,
 						 std::span<const float> fluxScales = {},
-						 const LightTreeBuildSettings &settings = {});
+						 const LightTreeBuildSettings &settings = {},
+						 const LightTreeLayout &layout = {});
 
-// The flux the tree gives a light, 0 for one that BuildLightTree would skip. The tree keeps the
-// input order of the lights it does not skip, so lights with a non-zero flux here keep their index
-// when every light before them has one too.
+// The flux the tree gives a light, 0 for one that BuildLightTree gives no leaf.
 float LightTreeFlux(const GpuLight &light, float fluxScale = 1.0f);
 
-constexpr uint32_t kInvalidLightIndex = INVALID_LIGHT_INDEX;
+// A node that LightTreeNodeImportance rejects, for the free slots of a group.
+GpuLightTreeNode EmptyLightTreeNode();
 
-// Maps each input light to its index in LightTree::lights, or kInvalidLightIndex if it was
-// skipped. Lets the path tracer find the light hit by a BSDF sampled ray.
-std::vector<uint32_t> BuildInputToLightMap(const LightTree &tree, size_t inputLightCount);
