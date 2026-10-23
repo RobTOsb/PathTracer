@@ -216,7 +216,9 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     bool deltaTransmission = HasDeltaTransmission(mat);
     float3 neeContribution = float3(0.0, 0.0, 0.0);
     bool traceShadowRay = false;
-    if (ls.pdf > 0.0 && (!opaque || dot(ls.direction, hit.Ng) > 0.0))
+    // An opaque surface reflects whatever is above its shading normal's horizon, also below its triangle's
+    // plane, where the shadow ray leaves from the smooth surface (SmoothReflectionOrigin).
+    if (ls.pdf > 0.0 && (!opaque || dot(ls.direction, mat.geometryNormal) > 0.0))
     {
         float bsdfPdf;
         float3 fCos = OpenPBREvalPdf(mat, ctx, ls.direction, bsdfPdf);
@@ -224,7 +226,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         {
             // The last segment takes no BSDF sample, which leaves NEE as the only strategy there.
             float w = ls.lightSamplingOnly || lastSegment ? 1.0 : PowerHeuristic(ls.pdf, bsdfPdf);
-            bool intoMedium = dot(ls.direction, hit.Ng) < 0.0 && !mat.geometryThinWalled;
+            bool intoMedium = !opaque && dot(ls.direction, hit.Ng) < 0.0 && !mat.geometryThinWalled;
             // The sun is FLT_MAX away. Capped, so a zero extinction cannot meet an overflowed distance
             // (0 * inf) once the compiler folds exp's log2(e) into it; any medium is far shorter.
             float3 shadowTransmittance = intoMedium ? exp(-extinction * min(ls.distance, MAX_MEDIUM_DISTANCE))
@@ -431,7 +433,9 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
 
     if (continuePath)
     {
-        origin = OffsetRay(hit.position, hit.Ng, dir);
+        // What an opaque surface reflects leaves from the smooth surface, not into the mesh, however its
+        // triangle faces. Subsurface paths go into it.
+        origin = opaque && lobe != LOBE_SUBSURFACE ? SmoothReflectionOrigin(hit, wo, dir) : OffsetRay(hit.position, hit.Ng, dir);
         // Through the medium under the surface: what leaves here comes in at other points of the
         // object, and the path goes on out of one of them.
         if (!SIMPLE && lobe == LOBE_SUBSURFACE)
@@ -452,7 +456,12 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     }
 
     if (traceShadowRay)
-        radiance += neeContribution * CastShadowRay(hit.position, hit.Ng, ls.direction, ls.distance, rayFlags);
+    {
+        // As far along as the light was from the hit point.
+        float3 shadowOrigin = opaque ? SmoothReflectionOrigin(hit, wo, ls.direction) : OffsetRay(hit.position, hit.Ng, ls.direction);
+        radiance += neeContribution * TraceShadowRay(shadowOrigin, ls.direction,
+                                                     ls.distance - dot(shadowOrigin - hit.position, ls.direction), rayFlags);
+    }
 
     SurfaceOutcome outcome;
     outcome.continuePath = continuePath;
@@ -560,7 +569,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             // Most surfaces have only the base's lobes and shade in a specialisation without the others, in far
             // fewer registers. SER orders the hits by material, so a wave mostly takes just one of the two.
             SurfaceOutcome outcome;
-            if (IsSimpleMaterial(payload.materialId & ~TANGENT_SIGN_BIT))
+            if (IsSimpleMaterial(PayloadMaterialIndex(payload.materialId)))
                 outcome = ShadeSurface<true>(payload, origin, dir, bounce, rayFlags, fromCamera, chainActive, hitDistanceArrived,
                                              paneHitArrived, smoothSegment, firstSegment, cameraSegment, medium.xyz, flags, rng,
                                              radiance, throughput, prevBsdfPdf, prevVertex, cone, segmentExtinction, rrInvScale);
@@ -767,7 +776,16 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     payload.T = OctEncode(mul(linearToWorld, objectTangent.xyz));
     // A mirroring transform flips cross(N, T), so fold its handedness into the bitangent sign.
     bool tangentNegative = (objectTangent.w < 0.0) != (handedness < 0.0);
-    payload.materialId = prim.materialIndex | (tangentNegative ? TANGENT_SIGN_BIT : 0u);
+    // The smooth surface's height above the triangle on the side the ray came from.
+    float3 viewNg = dot(Ng, WorldRayDirection()) < 0.0 ? Ng : -Ng;
+    float3 N0 = mul(cofactor, v0.normal) * handedness;
+    float3 N1 = mul(cofactor, v1.normal) * handedness;
+    float3 N2 = mul(cofactor, v2.normal) * handedness;
+    float lift = SmoothSurfaceLift(bary, e1, e2, N0 * rsqrt(max(dot(N0, N0), 1.0e-30)),
+                                   N1 * rsqrt(max(dot(N1, N1), 1.0e-30)), N2 * rsqrt(max(dot(N2, N2), 1.0e-30)),
+                                   mul(cofactor, objectNormal) * handedness, viewNg);
+    payload.materialId = prim.materialIndex | ((f32tof16(lift) & 0x7FFFu) << PAYLOAD_LIFT_SHIFT) |
+                         (tangentNegative ? TANGENT_SIGN_BIT : 0u);
     float2 uv0 = v0.texCoord;
     float2 uv1 = v1.texCoord;
     float2 uv2 = v2.texCoord;

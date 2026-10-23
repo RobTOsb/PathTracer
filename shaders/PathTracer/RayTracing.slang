@@ -20,6 +20,7 @@ struct HitInfo
     // How N turns as the hit point moves over the triangle (the derivative of the normalised interpolated
     // vertex normal), as a 2x2 matrix in the frame (T, cross(N, T)): see NormalDerivative. DLSS_RR only.
     float4 shape;
+    float smoothLift;
 };
 
 // The change of N for a small move dP of the hit point along its triangle.
@@ -64,7 +65,7 @@ struct ShadowRayPayload
 struct HitPayload
 {
     float hitT;
-    uint materialId; // bit 31 is the tangent sign
+    uint materialId;
     uint emitter;
     uint Ng; // octahedral snorm16x2
     uint N;  // octahedral snorm16x2
@@ -75,6 +76,61 @@ struct HitPayload
 };
 
 static const uint TANGENT_SIGN_BIT = 0x80000000u;
+static const uint PAYLOAD_MATERIAL_MASK = 0xFFFFu;
+static const uint PAYLOAD_LIFT_SHIFT = 16u;
+
+uint PayloadMaterialIndex(uint materialId)
+{
+    return materialId & PAYLOAD_MATERIAL_MASK;
+}
+
+float SmoothSurfaceLift(float3 bary, float3 e1, float3 e2, float3 N0, float3 N1, float3 N2, float3 n, float3 Ng)
+{
+    // Vertex 0 at the origin.
+    float3 P = e1 * bary.y + e2 * bary.z;
+    float u = bary.x;
+    float v = bary.y;
+    float a = dot(N2 - N0, -e2);
+    float b = dot(N2 - N1, e1 - e2);
+    float c = dot(N1 - N0, e1);
+    float h = a * u * (u - 1.0) + (a + b + c) * u * v + b * v * (v - 1.0);
+    if (dot(n, Ng) > 0.0)
+    {
+        float h0 = max(max(dot(e1, N0), dot(e2, N0)), 0.0);
+        float h1 = max(max(dot(-e1, N1), dot(e2 - e1, N1)), 0.0);
+        float h2 = max(max(dot(-e2, N2), dot(e1 - e2, N2)), 0.0);
+        h0 = max(dot(-P, N0) + h0, 0.0);
+        h1 = max(dot(e1 - P, N1) + h1, 0.0);
+        h2 = max(dot(e2 - P, N2) + h2, 0.0);
+        h = max(min(min(h0, h1), h2), h * 0.5);
+    }
+    else
+    {
+        float h0 = max(max(dot(-e1, N0), dot(-e2, N0)), 0.0);
+        float h1 = max(max(dot(e1, N1), dot(e1 - e2, N1)), 0.0);
+        float h2 = max(max(dot(e2, N2), dot(e2 - e1, N2)), 0.0);
+        h0 = max(dot(P, N0) + h0, 0.0);
+        h1 = max(dot(P - e1, N1) + h1, 0.0);
+        h2 = max(dot(P - e2, N2) + h2, 0.0);
+        h = min(-min(min(h0, h1), h2), h * 0.5);
+    }
+    // Along n on Ng's side: h >= 0 above, h <= 0 when n faces away. NaN from degenerate normals gives 0.
+    float lift = abs(h);
+    return lift < HALF_MAX ? lift : 0.0;
+}
+
+static const float SMOOTH_LIFT_CUTOFF = 0.1;
+
+float3 SmoothReflectionOrigin(HitInfo hit, float3 wo, float3 L)
+{
+    float3 Ng = dot(hit.Ng, wo) >= 0.0 ? hit.Ng : -hit.Ng;
+    float3 n = dot(hit.N, Ng) >= 0.0 ? hit.N : -hit.N;
+    float NgL = dot(Ng, L);
+    float NL = abs(dot(n, L));
+    float amount = NL < SMOOTH_LIFT_CUTOFF ? saturate(2.0 - (NgL + NL) / SMOOTH_LIFT_CUTOFF)
+                                           : saturate(1.0 - NgL / SMOOTH_LIFT_CUTOFF);
+    return OffsetRay(hit.position + n * (hit.smoothLift * amount), Ng);
+}
 
 // First bounce whose hits the SER pipeline reorders. Camera rays leave raygen in screen order, so
 // their hits are already about as coherent as reordering would make them.
@@ -183,7 +239,8 @@ HitInfo UnpackHit(HitPayload payload, float3 origin, float3 dir)
     hit.B = cross(hit.N, hit.T) * ((payload.materialId & TANGENT_SIGN_BIT) != 0 ? -1.0 : 1.0);
     hit.uv = payload.uv;
     hit.uvGradients = float4(UnpackHalf2(payload.uvGradients.x), UnpackHalf2(payload.uvGradients.y));
-    hit.materialId = payload.materialId & ~TANGENT_SIGN_BIT;
+    hit.materialId = PayloadMaterialIndex(payload.materialId);
+    hit.smoothLift = f16tof32((payload.materialId >> PAYLOAD_LIFT_SHIFT) & 0x7FFFu);
     hit.emitter = payload.emitter;
 #ifdef DLSS_RR
     hit.shape = float4(UnpackHalf2(payload.shape.x), UnpackHalf2(payload.shape.y));
