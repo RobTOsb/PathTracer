@@ -13,7 +13,8 @@ struct RenderSettings;
 class TonemapPass final : public RenderPass
 {
 public:
-	TonemapPass(RenderContext *renderContext, ResourceHandle hdrInput, const RenderSettings &settings);
+	// exposure: AutoExposurePass's exposure buffer.
+	TonemapPass(RenderContext *renderContext, ResourceHandle hdrInput, ResourceHandle exposure, const RenderSettings &settings);
 	~TonemapPass() override;
 
 	void Execute(RenderContext *renderContext) override;
@@ -21,6 +22,7 @@ public:
 private:
 	RenderContext *renderContext_ = nullptr;
 	ResourceHandle hdrInput_ = InvalidResourceHandle;
+	ResourceHandle exposure_ = InvalidResourceHandle;
 	const RenderSettings &settings_;
 
 	PipelineHandle pipeline_ = InvalidPipelineHandle;

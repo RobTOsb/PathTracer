@@ -4,6 +4,7 @@
 ConstantBuffer<TonemapConstants> g_PushConstants : register(b0);
 RWTexture2D<float4> g_Input : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
+RWStructuredBuffer<float> g_Exposure : register(u2); // [0] the exposure, see AutoExposurePass
 
 float Luma(float3 c)
 {
@@ -272,7 +273,7 @@ void main(uint3 id : SV_DispatchThreadID)
     if (id.x >= g_PushConstants.width || id.y >= g_PushConstants.height)
         return;
 
-    float3 colour = max(g_Input[id.xy].rgb, 0.0) * g_PushConstants.exposure;
+    float3 colour = max(g_Input[id.xy].rgb, 0.0) * g_Exposure[0];
     ToneMappingOperator op = (ToneMappingOperator)g_PushConstants.toneMapOperator;
     float clip = g_PushConstants.whiteClip;
 

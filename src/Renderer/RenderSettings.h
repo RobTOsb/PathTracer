@@ -9,9 +9,9 @@ struct SunSettings
 {
 	float azimuthDegrees = 30.0f; // rotation around +Y, 0 = towards +Z
 	float elevationDegrees = 50.0f; // angle above the horizon
-	float angularRadiusDegrees = 0.267865f; // physical sun (SUN_ANGULAR_RADIUS_DEFAULT radians)
+	float angularRadiusDegrees = 0.267865f / 2.0f; // physical sun (SUN_ANGULAR_RADIUS_DEFAULT radians)
 	float3 colour = { 1.0f, 0.95f, 0.88f };
-	float intensity = 5.0f; // irradiance scale
+	float intensity = 20.0f; // irradiance scale
 
 	// World-space direction pointing towards the sun (Y up).
 	float3 GetDirection() const
@@ -185,7 +185,11 @@ struct RenderSettings
 	float rayConeBsdfSpread = 1.0f;
 	int anisotropicSegments = 1;
 
-	float exposureEV = 0.0f;
+	float exposureEV = 0.0f; // the exposure, or with autoExposure its compensation
+	// Exposure from the luminance histogram of each frame (AutoExposurePass), adapting over time, at most
+	// maxAutoExposureEV with the compensation included.
+	bool autoExposure = true;
+	float maxAutoExposureEV = 4.0f;
 	ToneMappingOperator toneMapOperator = TONEMAP_NEUTWO;
 	float whiteClip = 100.0f; // scene value the Neutwo curve maps to its peak (1.0 = paper white)
 

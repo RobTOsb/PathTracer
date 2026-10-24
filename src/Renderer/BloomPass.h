@@ -16,7 +16,12 @@ struct BloomConstants;
 class BloomPass final : public RenderPass
 {
 public:
-	BloomPass(RenderContext *renderContext, ResourceHandle hdrInput, const Camera &camera, const RenderSettings &settings);
+	// exposure: AutoExposurePass's exposure buffer.
+	BloomPass(RenderContext *renderContext,
+			  ResourceHandle hdrInput,
+			  ResourceHandle exposure,
+			  const Camera &camera,
+			  const RenderSettings &settings);
 	~BloomPass() override;
 
 	void Execute(RenderContext *renderContext) override;
@@ -42,6 +47,7 @@ private:
 	RenderContext *renderContext_ = nullptr;
 	ResourceHandle hdrInput_ = InvalidResourceHandle;
 	ResourceHandle hdrInputSRV_ = InvalidResourceHandle;
+	ResourceHandle exposure_ = InvalidResourceHandle;
 	const Camera &camera_;
 	const RenderSettings &settings_;
 

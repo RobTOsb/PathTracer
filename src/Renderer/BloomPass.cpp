@@ -39,9 +39,10 @@ namespace
 
 BloomPass::BloomPass(RenderContext *renderContext,
 					 ResourceHandle hdrInput,
+					 ResourceHandle exposure,
 					 const Camera &camera,
 					 const RenderSettings &settings) :
-	renderContext_(renderContext), hdrInput_(hdrInput), camera_(camera), settings_(settings)
+	renderContext_(renderContext), hdrInput_(hdrInput), exposure_(exposure), camera_(camera), settings_(settings)
 {
 	downsamplePipeline_ = CreatePipeline("Downsample");
 	upsamplePipeline_ = CreatePipeline("Upsample");
@@ -147,7 +148,6 @@ void BloomPass::Execute(RenderContext *renderContext)
 	TransitionToSRV(renderContext, hdrInput_);
 
 	const int levelCount = settings_.bloom ? std::clamp(settings_.bloomLevels, 1, levelCount_) : 0;
-	const float exposure = exp2f(settings_.exposureEV);
 
 	// Down the chain, each level filtered from the one above it.
 	renderContext->SetComputePipeline(downsamplePipeline_);
@@ -162,7 +162,6 @@ void BloomPass::Execute(RenderContext *renderContext)
 		constants.outputTexelSize = float2(1.0f / level.width, 1.0f / level.height);
 		constants.width = level.width;
 		constants.height = level.height;
-		constants.exposure = exposure;
 		constants.karisAverage = i == 0 ? 1u : 0u;
 		if (i == 0)
 		{
@@ -172,6 +171,10 @@ void BloomPass::Execute(RenderContext *renderContext)
 		TransitionToUAV(renderContext, level.texture);
 		renderContext->SetComputeSRVByName("g_Input", i == 0 ? hdrInputSRV_ : levels_[i - 1].srv);
 		renderContext->SetComputeUAVByName("g_Output", level.texture);
+		if (i == 0)
+		{
+			renderContext->SetComputeUAVByName("g_Exposure", exposure_);
+		}
 		Dispatch(renderContext, constants);
 		TransitionToSRV(renderContext, level.texture);
 	}

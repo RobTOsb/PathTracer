@@ -477,9 +477,10 @@ struct GpuDeferredBranch
 };
 
 // Root constants for the tonemap compute pass (bound as g_PushConstants).
+// The exposure (a linear multiplier) that Bloom.slang and Tonemap.slang apply is not in their constants but in
+// AutoExposurePass's exposure buffer, one float.
 struct TonemapConstants
 {
-	float exposure; // linear multiplier, 2^EV
 	uint toneMapOperator; // ToneMappingOperator
 	uint width;
 	uint height;
@@ -503,8 +504,7 @@ struct BloomConstants
 	float2 outputTexelSize; // 1 / the output's size
 	uint width; // output size
 	uint height;
-	float exposure; // linear multiplier, 2^EV, so the Karis average weighs luminance as it will be displayed
-	uint karisAverage; // 1: the first downsample, which weighs its boxes down by their brightness
+	uint karisAverage; // 1: the first downsample, which weighs its boxes down by their brightness, exposed as displayed
 	float strength; // Composite: how much of the image is replaced by the bloom
 	float levelCount; // Composite: bloom levels summed into level 0
 	float2 tanHalfFov; // horizontal, vertical
@@ -512,7 +512,22 @@ struct BloomConstants
 	float sunMaskOneMinusCos; // first downsample: 1 - cos of the angle around the sun it leaves out, 0 = none
 };
 
+// Root constants of the auto exposure kernels (AutoExposure.slang). Handles are descriptor heap indices of UAVs.
+struct AutoExposureConstants
+{
+	uint2 bufferDimensions;
+	float frameTime; // seconds the key luminance adapts over, 0 = start from this frame's
+	float exposureBias; // linear, 2^EV: multiplies the auto exposure, or is the exposure while it is off
+	float maxExposure; // linear, the most the auto exposure may reach, bias included
+	uint inputBufferHandle; // RWTexture2D<float4>, the HDR image
+	uint histogramHandle; // RWStructuredBuffer<uint>, HISTOGRAM_SIZE bins
+	uint keySceneLuminanceHandle; // RWStructuredBuffer<float>, the adapted luminance
+	uint exposureHandle; // RWStructuredBuffer<float>, the result
+	uint enabled; // 0: CalculateExposure only writes exposureBias
+};
+
 #ifdef __cplusplus
+static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
 static_assert(sizeof(FrameConstants) == 608,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
 static_assert(sizeof(GpuMaterial) == 144,"GpuMaterial must match the structured buffer stride");
@@ -522,7 +537,7 @@ static_assert(sizeof(GpuCameraGuides) == 48 && sizeof(GpuSpecularChain) == 76 &&
 			  "GpuCameraState parts must match their HLSL layout");
 static_assert(sizeof(GpuCameraState) == 168, "GpuCameraState must match the structured buffer stride");
 static_assert(sizeof(GpuDeferredBranch) == 44, "GpuDeferredBranch must match the structured buffer stride");
-static_assert(sizeof(TonemapConstants) == 56, "TonemapConstants must fit the root constants");
+static_assert(sizeof(TonemapConstants) == 52, "TonemapConstants must fit the root constants");
 #endif
 
 #endif // PATH_TRACER_INTEROP_H

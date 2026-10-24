@@ -9,6 +9,7 @@ add_executable(PathTracer
     Renderer/PathTracerPass.cpp
     Renderer/SkyAtmospherePass.cpp
     Renderer/DLSSPass.cpp
+    Renderer/AutoExposurePass.cpp
     Renderer/BloomPass.cpp
     Renderer/TonemapPass.cpp
     Renderer/ImGuiPass.cpp

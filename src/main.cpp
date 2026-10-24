@@ -5,6 +5,7 @@
 #include "RenderContext.h"
 #include "Window.h"
 
+#include "Renderer/AutoExposurePass.h"
 #include "Renderer/BloomPass.h"
 #include "Renderer/DLSSPass.h"
 #include "Renderer/ImGuiPass.h"
@@ -69,10 +70,10 @@ static float QueryDisplayPeakNits(void *hwnd)
 }
 
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
-constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
+//constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\glass-of-water\\gltf\\glass_of_water_extended.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\GlassHurricaneCandleHolder\\glTF-Binary\\GlassHurricaneCandleHolder.glb";
-//constexpr const char *kDefaultScenePath = "H:\\bistro.glb";
+constexpr const char *kDefaultScenePath = "H:\\bistro.glb";
 //constexpr const char *kDefaultScenePath = "h:\\suntemple.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\SubsurfaceScene\\scene.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\SphereRoom\\SphereRoom.glb";
@@ -260,10 +261,13 @@ void BuildPasses(RenderContext *renderContext,
 	{
 		passes.push_back(std::move(pathTracer));
 	}
-	auto bloom = std::make_unique<BloomPass>(renderContext, radiance, camera, settings);
+	auto autoExposure = std::make_unique<AutoExposurePass>(renderContext, radiance, settings);
+	const ResourceHandle exposure = autoExposure->GetExposure();
+	passes.push_back(std::move(autoExposure));
+	auto bloom = std::make_unique<BloomPass>(renderContext, radiance, exposure, camera, settings);
 	radiance = bloom->GetOutput();
 	passes.push_back(std::move(bloom));
-	passes.push_back(std::make_unique<TonemapPass>(renderContext, radiance, settings));
+	passes.push_back(std::make_unique<TonemapPass>(renderContext, radiance, exposure, settings));
 	passes.push_back(
 			std::make_unique<ImGuiPass>(settings, camera, ngx.IsRayReconstructionSupported(), gpuScene, pathTracerPass));
 }

@@ -232,6 +232,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	{
 		ProfileRow(renderContext, "DLSS-RR");
 	}
+	ProfileRow(renderContext, "AutoExposure");
 	ProfileRow(renderContext, "Bloom");
 	ProfileRow(renderContext, "Tonemap");
 
@@ -335,10 +336,11 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	if (ImGui::CollapsingHeader("Sun", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		SunSettings &sun = settings_.sun;
-		ImGui::SliderFloat("Azimuth", &sun.azimuthDegrees, -180.0f, 180.0f, "%.1f deg");
+		// Drags of 0.1 degrees per pixel, finer than a slider's whole range across its width.
+		ImGui::DragFloat("Azimuth", &sun.azimuthDegrees, 0.1f, -180.0f, 180.0f, "%.1f deg", ImGuiSliderFlags_AlwaysClamp);
 		// Below the horizon the atmosphere's planet hides the sun, leaving the twilight sky.
 		const float minElevation = settings_.atmosphere.enabled ? -20.0f : 0.0f;
-		ImGui::SliderFloat("Elevation", &sun.elevationDegrees, minElevation, 180.0f, "%.1f deg");
+		ImGui::DragFloat("Elevation", &sun.elevationDegrees, 0.1f, minElevation, 180.0f, "%.1f deg", ImGuiSliderFlags_AlwaysClamp);
 		ImGui::SliderFloat("Angular radius",
 						   &sun.angularRadiusDegrees,
 						   0.0f,
@@ -352,10 +354,6 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		}
 		ImGui::ColorEdit3("Colour", &sun.colour.x);
 		ImGui::DragFloat("Intensity", &sun.intensity, 0.05f, 0.0f, 1000.0f, "%.2f");
-		if (settings_.atmosphere.enabled)
-		{
-			ImGui::TextDisabled("At the top of the atmosphere, which tints and dims it");
-		}
 	}
 
 	if (ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))
@@ -588,7 +586,15 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 							  "0 = none, 1 = camera hits only");
 		ImGui::EndDisabled();
 
-		ImGui::SliderFloat("Exposure", &settings_.exposureEV, -10.0f, 10.0f, "%.2f EV");
+		ImGui::Checkbox("Auto exposure", &settings_.autoExposure);
+		ImGui::SetItemTooltip("Exposure from each frame's luminance histogram, adapting over time");
+		ImGui::SliderFloat(settings_.autoExposure ? "Exposure compensation" : "Exposure", &settings_.exposureEV, -10.0f,
+						   10.0f, "%.2f EV");
+		if (settings_.autoExposure)
+		{
+			ImGui::SliderFloat("Max auto exposure", &settings_.maxAutoExposureEV, -10.0f, 20.0f, "%.2f EV");
+			ImGui::SetItemTooltip("The most the auto exposure may brighten the image, compensation included");
+		}
 
 		if (renderContext->GetUseHDR())
 		{
@@ -655,12 +661,12 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::EndDisabled();
 	}
 
-	if (ImGui::CollapsingHeader("Memory"))
+	if (ImGui::CollapsingHeader("Memory", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		MemoryUI(memoryStats);
 	}
 
-	if (ImGui::CollapsingHeader("Camera"))
+	if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		const float3 position = camera_.GetPosition();
 		const float3 front = camera_.GetFront();

@@ -11,8 +11,11 @@ namespace
 	constexpr uint32_t kGroupSize = 8;
 }
 
-TonemapPass::TonemapPass(RenderContext *renderContext, ResourceHandle hdrInput, const RenderSettings &settings) :
-	renderContext_(renderContext), hdrInput_(hdrInput), settings_(settings)
+TonemapPass::TonemapPass(RenderContext *renderContext,
+						 ResourceHandle hdrInput,
+						 ResourceHandle exposure,
+						 const RenderSettings &settings) :
+	renderContext_(renderContext), hdrInput_(hdrInput), exposure_(exposure), settings_(settings)
 {
 	pipeline_ = renderContext->CreateComputePipeline(PATHTRACER_SHADER_DIR "Tonemap.slang", "main");
 	if (pipeline_ == InvalidPipelineHandle)
@@ -54,7 +57,6 @@ void TonemapPass::Execute(RenderContext *renderContext)
 									  ResourceAccess::UnorderedAccess);
 
 	TonemapConstants constants = {};
-	constants.exposure = exp2f(settings_.exposureEV);
 	constants.toneMapOperator = static_cast<uint>(settings_.toneMapOperator);
 	constants.width = width_;
 	constants.height = height_;
@@ -78,6 +80,7 @@ void TonemapPass::Execute(RenderContext *renderContext)
 	renderContext->SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
 	renderContext->SetComputeUAV(0, hdrInput_);
 	renderContext->SetComputeUAV(1, ldrOutput_);
+	renderContext->SetComputeUAV(2, exposure_);
 	renderContext->Dispatch((width_ + kGroupSize - 1) / kGroupSize, (height_ + kGroupSize - 1) / kGroupSize, 1);
 
 	const ResourceHandle backBuffer = renderContext->GetCurrentBackBufferHandle();

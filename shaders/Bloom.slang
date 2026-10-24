@@ -9,6 +9,7 @@ ConstantBuffer<BloomConstants> g_PushConstants : register(b0);
 Texture2D<float4> g_Input : register(t0);
 Texture2D<float4> g_Bloom : register(t1); // Composite: bloom level 0
 RWTexture2D<float4> g_Output : register(u0);
+RWStructuredBuffer<float> g_Exposure : register(u1); // Downsample: [0] the exposure, see AutoExposurePass
 SamplerState g_LinearClamp : register(s2);
 
 float Luma(float3 c)
@@ -47,7 +48,7 @@ float3 SampleInput(float2 uv)
 // Karis's weighted average, which keeps a single firefly from blooming into a flickering blob.
 float KarisWeight(float3 box)
 {
-    return 1.0 / (1.0 + Luma(box) * g_PushConstants.exposure);
+    return 1.0 / (1.0 + Luma(box) * g_Exposure[0]);
 }
 
 // 3x3 tent around uv, t apart (one texel of the texture it reads).

@@ -1,0 +1,236 @@
+/**********************************************************************
+Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+********************************************************************/
+
+// Auto exposure, run by AutoExposurePass on the HDR image after DLSS: CalculateHistogram bins the image's
+// log luminance, CalculateExposure turns the histogram into the exposure that Bloom.slang and Tonemap.slang
+// read from the exposure buffer. With auto exposure off CalculateExposure writes the manual exposure there.
+
+#include "PathTracerInterop.h"
+
+ConstantBuffer<AutoExposureConstants> g_PushConstants : register(b0);
+
+// The luminance range the histogram covers. Paper white is 1, and sunlit surfaces in this renderer are a few
+// times that, so the top is well above it; brighter pixels (the sun disc, highlights) all count as HDR_MAX.
+#define HDR_MAX 16.0f
+#define HDR_MIN 0.0001f
+
+#define HISTOGRAM_GROUP_SIZE 16
+#define HISTOGRAM_SIZE 64
+groupshared uint lds_Histogram[HISTOGRAM_SIZE];
+
+float luminance(float3 colour)
+{
+    return dot(colour, float3(0.2126f, 0.7152f, 0.0722f));
+}
+
+[shader("compute")]
+[numthreads(HISTOGRAM_GROUP_SIZE, HISTOGRAM_GROUP_SIZE, 1)]
+void CalculateHistogram(uint2 did : SV_DispatchThreadID, uint gtid : SV_GroupIndex)
+{
+    RWTexture2D<float4> inputBuffer = ResourceDescriptorHeap[g_PushConstants.inputBufferHandle];
+    RWStructuredBuffer<uint> histogram = ResourceDescriptorHeap[g_PushConstants.histogramHandle]; // Zeroed on creation, and by CalculateExposure after reading
+
+    // Initialize the local histogram data
+#if (HISTOGRAM_GROUP_SIZE * HISTOGRAM_GROUP_SIZE) < HISTOGRAM_SIZE
+    const uint groupSize = HISTOGRAM_GROUP_SIZE * HISTOGRAM_GROUP_SIZE;
+    uint loops = (HISTOGRAM_SIZE + groupSize - 1) / groupSize;
+    for (uint i = 0; i < loops; ++i)
+    {
+        const uint lid = gtid + (i * groupSize);
+        if (lid >= HISTOGRAM_SIZE)
+        {
+            break;
+        }
+        lds_Histogram[lid] = 0;
+    }
+#else
+    if (gtid < HISTOGRAM_SIZE)
+    {
+        lds_Histogram[gtid] = 0;
+    }
+#endif
+    GroupMemoryBarrierWithGroupSync();
+
+    if (all(did < g_PushConstants.bufferDimensions))
+    {
+        float3 colour = inputBuffer[did].xyz;
+
+        // NaNs and infinities from the path tracer count with the zero value pixels.
+        float lum = all(isfinite(colour)) ? luminance(colour) : 0.0f;
+
+        // Convert to log luminance and scale it to [0, 1] based on our min and max HDR range (min is set to 0)
+        const float maxHDR = log2(HDR_MAX);
+        const float minHDR = log2(HDR_MIN);
+        const float rangeHDR = 1.0 / (maxHDR - minHDR);
+        float logLuminance = (lum > HDR_MIN) ? ((log2(lum) - minHDR) * rangeHDR) : 0.0f;
+
+        // Convert to [1, HISTOGRAM_SIZE] range where 0 stores all zero value pixels
+        uint binIndex = (lum > HDR_MIN) ? min(uint(logLuminance * float(HISTOGRAM_SIZE - 1)) + 1, HISTOGRAM_SIZE - 1) : 0;
+
+        // Add to the corresponding local histogram bucket
+        const uint minWaveHistogram = min(WaveGetLaneCount(), HISTOGRAM_SIZE);
+        // Generate bitmask with 1 bit for every active thread in the wave (should be optimised out by compiler)
+        uint4 laneMask = uint4(0xFFFFFFFFu >> (32 - min(minWaveHistogram, 32)),
+            minWaveHistogram > 32 ? 0xFFFFFFFFu >> (32 - min(minWaveHistogram - 32, 32)) : 0,
+            minWaveHistogram > 64 ? 0xFFFFFFFFu >> (32 - min(minWaveHistogram - 64, 32)) : 0,
+            minWaveHistogram > 96 ? 0xFFFFFFFFu >> (32 - min(minWaveHistogram - 96, 32)) : 0);
+        // To avoid multiple threads in a wave writing to the same location we use a ballot to determine which threads want
+        //   to write to each bin and the corresponding thread count. Then only the first thread for each output location writes
+        //   the total count for that bin.
+        for (uint i = 0; i < log2(HISTOGRAM_SIZE) + 1; ++i)
+        {
+            uint laneBit = (binIndex >> i) & 0x1;
+            uint4 ballot = WaveActiveBallot(laneBit != 0);
+            laneMask &= laneBit != 0 ? ballot : ~ballot;
+        }
+        // Lane mask should now hold a 1 bit for evey thread in the warp that wants to write to the same bin index as the current thread
+        uint selectedLane = laneMask.x != 0 ? firstbitlow(laneMask.x) : (laneMask.y != 0 ? firstbitlow(laneMask.y) + 32 : (laneMask.z != 0 ? firstbitlow(laneMask.z) + 64 : firstbitlow(laneMask.w) + 96));
+        if (WaveGetLaneIndex() == selectedLane)
+        {
+            uint matchCount = countbits(laneMask.x) + countbits(laneMask.y) + countbits(laneMask.z) + countbits(laneMask.w);
+            InterlockedAdd(lds_Histogram[binIndex], matchCount);
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // Write out the local histogram values into global memory
+#if (HISTOGRAM_GROUP_SIZE * HISTOGRAM_GROUP_SIZE) < HISTOGRAM_SIZE
+    for(uint j = 0; j < loops; ++j)
+    {
+        const uint lid = gtid + (j * groupSize);
+        if (lid >= HISTOGRAM_SIZE)
+        {
+            break;
+        }
+        const uint value = lds_Histogram[lid];
+        if (value != 0)
+        {
+            InterlockedAdd(histogram[lid], lds_Histogram[lid]);
+        }
+    }
+#else
+    if (gtid >= HISTOGRAM_SIZE)
+    {
+        return;
+    }
+
+    const uint value = lds_Histogram[gtid];
+    if (value != 0)
+    {
+        InterlockedAdd(histogram[gtid], lds_Histogram[gtid]);
+    }
+#endif
+}
+
+[shader("compute")]
+[numthreads(HISTOGRAM_SIZE, 1, 1)]
+void CalculateExposure(uint gtid : SV_GroupIndex)
+{
+    // We calculate the exposure by getting the key scene luminance value from a pre-calculated histogram of the scenes luminance (log2 space)
+    RWStructuredBuffer<uint> histogram = ResourceDescriptorHeap[g_PushConstants.histogramHandle];
+    RWStructuredBuffer<float> keySceneLuminance = ResourceDescriptorHeap[g_PushConstants.keySceneLuminanceHandle];
+    RWStructuredBuffer<float> exposureOutput = ResourceDescriptorHeap[g_PushConstants.exposureHandle];
+
+    // Auto exposure off: the manual exposure, with no histogram to read.
+    if (g_PushConstants.enabled == 0)
+    {
+        if (gtid == 0)
+        {
+            exposureOutput[0] = g_PushConstants.exposureBias;
+        }
+        return;
+    }
+
+    // Get the corresponding value from the global histogram
+    float histogramValue = (float)histogram[gtid];
+
+    const float maxHDR = log2(HDR_MAX);
+    const float minHDR = log2(HDR_MIN);
+    const float rangeHDR = maxHDR - minHDR;
+    const float rangeInterval = rangeHDR / float(HISTOGRAM_SIZE - 1);
+    float value = 0.0f;
+    if (gtid != 0)
+    {
+        // Convert back from histogram value to linear space to get weighted contribution
+        value = histogramValue * exp2((((float)gtid - 0.5f) * rangeInterval) + minHDR);
+    }
+
+    // Reset global histogram for next frame
+    histogram[gtid] = 0;
+
+    // Combine values across the wave
+    value = WaveActiveSum(value);
+
+    // Combine values across the group
+    for (uint j = WaveGetLaneCount(); j < HISTOGRAM_SIZE; j *= WaveGetLaneCount())
+    {
+        // Use local data share to combine across waves
+        if (WaveIsFirstLane())
+        {
+            const uint waveID = gtid / WaveGetLaneCount();
+            lds_Histogram[waveID] = asuint(value);
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        const uint waveCount = HISTOGRAM_SIZE / WaveGetLaneCount();
+        if (gtid >= waveCount)
+        {
+            break;
+        }
+
+        // Use the current wave to combine across group
+        value = asfloat(lds_Histogram[gtid]);
+        value = WaveActiveSum(value);
+    }
+
+    if (gtid != 0)
+    {
+        return;
+    }
+
+    // Calculate weighted sum based on number of non-zero luminance pixels
+    //  Since this is only run on thread 0 then 'histogramValue' will contain the pixels
+    //  mapped to bucket 0 which contain the non-contributing pixels
+    float numPixels = float(g_PushConstants.bufferDimensions.x * g_PushConstants.bufferDimensions.y);
+    float weightedAverage = value / max(numPixels - histogramValue, 1.0f);
+
+    // Calculate middle-grey using an exposure compensation curve
+    // Modified version from "Perceptual Effects in Real-time Tone Mapping" - Krawczyk et al
+    float dg = 1.23f - (1.0f / (1.0f + log10(weightedAverage + 6.0f)));
+
+    float ya = weightedAverage;
+    if (g_PushConstants.frameTime > 0.0f)
+    {
+        // Apply adaptation to key scene luminance
+        float oldYa = keySceneLuminance[0];
+        float dg2 = (dg * 0.4f) + ((1.0f - dg) * 0.1f);
+        ya = oldYa + (ya - oldYa) * (1.0f - exp(- g_PushConstants.frameTime / dg2));
+    }
+    keySceneLuminance[0] = ya;
+
+    // Calculate final exposure
+    float exposure = min(dg / max(ya, HDR_MIN), g_PushConstants.maxExposure);
+    exposure *= g_PushConstants.exposureBias;
+    exposure = min(exposure, g_PushConstants.maxExposure);
+    exposureOutput[0] = exposure;
+}
