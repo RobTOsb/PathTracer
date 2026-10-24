@@ -68,6 +68,21 @@ bool PsrChainBrokenByChance(OpenPBRBaseParams p, OpenPBRContext ctx, uint lobe)
     return (reflection ? fractions.y : fractions.x) >= PSR_MIN_SPECULAR_FRACTION;
 }
 
+// The lobe of smooth solid glass a chain follows where the path could take either: inside the one Fresnel
+// favours, outside the one IsPsrEvent takes. LOBE_NONE where the glass has other lobes or is too rough for PSR.
+uint PsrStrongerLobe(OpenPBRBaseParams p, OpenPBRContext ctx)
+{
+    if (p.geometryThinWalled || ctx.deltaTransmission || CoatedSpecularRoughness(p) > g_Frame.psrMaxRoughness ||
+        ctx.probDiffuse > 0.0 || ctx.probCoat > 0.0 || ctx.probFuzz > 0.0 || ctx.probSpecR <= 0.0 || ctx.probSpecT <= 0.0)
+        return LOBE_NONE;
+    if (ctx.inside)
+        return FresnelDielectric(ctx.wo.z, ctx.eta) >= 0.5 ? LOBE_SPECULAR_REFLECTION : LOBE_SPECULAR_TRANSMISSION;
+    float2 fractions = SpecularFractions(p);
+    if (fractions.y >= PSR_MIN_SPECULAR_FRACTION)
+        return LOBE_SPECULAR_TRANSMISSION;
+    return fractions.x >= PSR_MIN_SPECULAR_FRACTION ? LOBE_SPECULAR_REFLECTION : LOBE_NONE;
+}
+
 // Directional reflectance (reflection) or transmittance of a chain event, as wo sees it.
 float3 PsrEventThroughput(OpenPBRBaseParams p, OpenPBRContext ctx, float3 wo, bool reflection)
 {

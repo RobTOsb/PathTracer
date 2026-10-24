@@ -272,6 +272,9 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     // The reflection goes to g_DeferredBranches as soon as it is sampled.
     BSDFSample bs = (BSDFSample)0;
     bool reflectionDeferred = false;
+    // A chain past the camera's first surface takes the lobe it follows, so its guides do not fall back to last
+    // frame's (PsrChainBrokenByChance) whenever the path would have taken the other.
+    uint forcedLobe = chainActive && !lastSegment && g_Frame.psrStrongerLobe != 0 ? PsrStrongerLobe(mat, ctx) : uint(LOBE_NONE);
     if (!lastSegment)
     {
         [loop]
@@ -282,6 +285,8 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
                 u.x = 0.0;
             else if (glassSplit)
                 u.x = ctx.probSpecR; // the first value past the reflection's share
+            else if (forcedLobe != LOBE_NONE)
+                u.x = forcedLobe == LOBE_SPECULAR_REFLECTION ? 0.0 : ctx.probSpecR;
             BSDFSample sample = OpenPBRSample(mat, ctx, u);
             if (s != 0)
             {
@@ -319,7 +324,9 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         // A pane's reflection is not its guides' (what is behind it is), see PaneReflection. The
         // guides' reflection is the coat's or the base's, whichever reflects more.
         specularReflection = !paneSplit && bs.lobe == (CoatLeadsGuides(ctx) ? LOBE_COAT : LOBE_SPECULAR_REFLECTION);
-        float lobeProbability = paneSplit ? ctx.probSpecR : glassSplit ? ctx.probSpecT : 1.0;
+        float lobeProbability = paneSplit || forcedLobe == LOBE_SPECULAR_REFLECTION ? ctx.probSpecR
+                                : glassSplit || forcedLobe == LOBE_SPECULAR_TRANSMISSION ? ctx.probSpecT
+                                : 1.0;
         if ((bs.lobe & DIFFUSE_BOUNCE_LOBES) != 0)
             flags += 1u << PATH_DIFFUSE_BOUNCES_SHIFT;
         throughput *= bs.weight * lobeProbability;

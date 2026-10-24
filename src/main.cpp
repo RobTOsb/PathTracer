@@ -8,6 +8,7 @@
 #include "Renderer/AutoExposurePass.h"
 #include "Renderer/BloomPass.h"
 #include "Renderer/DLSSPass.h"
+#include "Renderer/GuideViewPass.h"
 #include "Renderer/ImGuiPass.h"
 #include "Renderer/PathTracerPass.h"
 #include "Renderer/RenderPass.h"
@@ -268,6 +269,10 @@ void BuildPasses(RenderContext *renderContext,
 	radiance = bloom->GetOutput();
 	passes.push_back(std::move(bloom));
 	passes.push_back(std::make_unique<TonemapPass>(renderContext, radiance, exposure, settings));
+	if (rayReconstruction)
+	{
+		passes.push_back(std::make_unique<GuideViewPass>(renderContext, pathTracerPass, settings));
+	}
 	passes.push_back(
 			std::make_unique<ImGuiPass>(settings, camera, ngx.IsRayReconstructionSupported(), gpuScene, pathTracerPass));
 }

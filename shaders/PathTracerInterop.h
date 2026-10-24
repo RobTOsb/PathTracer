@@ -122,6 +122,13 @@ struct FrameConstants
 
 	// ATMOSPHERE: the cloud layer seen past the scene's geometry and shadowing its sunlight (see Clouds.slang).
 	CloudParameters clouds;
+
+	// PSR: past the camera's first surface, a chain through smooth solid glass takes the lobe it follows rather than
+	// a random one (PsrStrongerLobe), leaving out the other's light. 0 = off.
+	uint psrStrongerLobe;
+	uint pad0;
+	uint pad1;
+	uint pad2;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -496,6 +503,35 @@ struct TonemapConstants
 	uint grainSeed; // changes whenever the grain pattern should change
 };
 
+// The DLSS-RR guide GuideViewPass shows in place of the image.
+UnscopedEnum
+enum GuideView
+{
+	GUIDE_VIEW_OFF = 0,
+	GUIDE_VIEW_DIFFUSE_ALBEDO = 1,
+	GUIDE_VIEW_SPECULAR_ALBEDO = 2,
+	GUIDE_VIEW_NORMAL = 3,
+	GUIDE_VIEW_ROUGHNESS = 4,
+	GUIDE_VIEW_DEPTH = 5,
+	GUIDE_VIEW_MOTION_VECTORS = 6,
+	GUIDE_VIEW_SPECULAR_MOTION_VECTORS = 7
+};
+
+// Root constants of GuideView.slang.
+struct GuideViewConstants
+{
+	uint2 renderSize;
+	uint2 outputSize;
+	float2 prevJitter; // last frame's FrameConstants::jitter
+	uint guide; // GuideView
+	uint change; // 1: how much the guide changed since last frame along the motion vectors, as heat
+	float gain; // scales the heat, or the depth and motion vectors' colours
+	uint historyValid; // 0: last frame showed another guide or none, so there is nothing to compare with
+	uint hdr10; // as TonemapConstants
+	float paperWhiteNits;
+	uint showHeld; // 1: tint the pixels whose guides were held this frame (PrimaryGuides::hold)
+};
+
 // Root constants for the bloom compute passes (bound as g_PushConstants). Generated root signatures hold
 // at most 16 dwords of root constants, which this fills.
 struct BloomConstants
@@ -528,7 +564,7 @@ struct AutoExposureConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
-static_assert(sizeof(FrameConstants) == 608,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 624,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
 static_assert(sizeof(GpuMaterial) == 144,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
@@ -538,6 +574,7 @@ static_assert(sizeof(GpuCameraGuides) == 48 && sizeof(GpuSpecularChain) == 76 &&
 static_assert(sizeof(GpuCameraState) == 168, "GpuCameraState must match the structured buffer stride");
 static_assert(sizeof(GpuDeferredBranch) == 44, "GpuDeferredBranch must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 52, "TonemapConstants must fit the root constants");
+static_assert(sizeof(GuideViewConstants) <= 16 * 4, "GuideViewConstants must fit the root constants");
 #endif
 
 #endif // PATH_TRACER_INTEROP_H

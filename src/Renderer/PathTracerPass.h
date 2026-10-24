@@ -73,6 +73,18 @@ public:
 		return jitter_;
 	}
 
+	// GpuCameraState per render pixel, DLSS-RR only.
+	ResourceHandle GetCameraState() const
+	{
+		return cameraState_;
+	}
+
+	// This frame's FrameConstants, once Execute has written them.
+	ResourceHandle GetFrameConstants() const
+	{
+		return frameConstants_[renderContext_->GetCurrentFrameIndex()];
+	}
+
 	uint GetWidth() const
 	{
 		return width_;

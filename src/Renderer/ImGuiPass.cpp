@@ -36,6 +36,17 @@ namespace
 		const char *name;
 	};
 
+	constexpr ComboEntry<GuideView> kGuideViews[] = {
+		{ GUIDE_VIEW_OFF, "Off" },
+		{ GUIDE_VIEW_DIFFUSE_ALBEDO, "Diffuse albedo" },
+		{ GUIDE_VIEW_SPECULAR_ALBEDO, "Specular albedo" },
+		{ GUIDE_VIEW_NORMAL, "Normal" },
+		{ GUIDE_VIEW_ROUGHNESS, "Roughness" },
+		{ GUIDE_VIEW_DEPTH, "Depth" },
+		{ GUIDE_VIEW_MOTION_VECTORS, "Motion vectors" },
+		{ GUIDE_VIEW_SPECULAR_MOTION_VECTORS, "Specular motion vectors" },
+	};
+
 	constexpr ComboEntry<DLSSMode> kDLSSModes[] = {
 		{ DLSSMode::Off, "Off" },
 		{ DLSSMode::DLAA, "DLAA" },
@@ -235,6 +246,10 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	ProfileRow(renderContext, "AutoExposure");
 	ProfileRow(renderContext, "Bloom");
 	ProfileRow(renderContext, "Tonemap");
+	if (settings_.dlssMode != DLSSMode::Off && settings_.guideView != GUIDE_VIEW_OFF)
+	{
+		ProfileRow(renderContext, "GuideView");
+	}
 
 	// Without the approximations the reference ignores the firefly clamp and specular antialiasing settings.
 	const bool reference = settings_.renderMode == RenderMode::Reference;
@@ -317,11 +332,15 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::Checkbox("Primary surface replacement", &settings_.primarySurfaceReplacement);
 		ImGui::BeginDisabled(!settings_.primarySurfaceReplacement);
 		ImGui::SliderFloat("Mirror and glass roughness", &settings_.psrMaxRoughness, 0.0f, 0.3f, "%.3f");
+		ImGui::Checkbox("Chains take the stronger lobe", &settings_.psrStrongerLobe);
+		ImGui::SetItemTooltip("Past the first surface, the path through smooth glass always takes the lobe the guides "
+							  "follow (mostly the refraction), so they never keep last frame's when it would have taken "
+							  "the other. Leaves out that other lobe's light: the glass's faint internal reflections");
 		ImGui::Checkbox("Curved mirrors and glass", &settings_.psrCurvedSurfaces);
 		ImGui::SetItemTooltip("Motion vectors traced through the curvature of the mirrors and glass (ray differentials), "
 							  "so curved ones keep PSR. Off: only those that barely bend the image keep it");
 		ImGui::BeginDisabled(!settings_.psrCurvedSurfaces);
-		ImGui::SliderFloat("Max minification", &settings_.psrMaxMinification, 1.0f, 16.0f, "%.1f");
+		ImGui::SliderFloat("Max minification", &settings_.psrMaxMinification, 1.0f, 64.0f, "%.1f");
 		ImGui::SetItemTooltip("How far a curved chain may shrink the image of the surface it shows before PSR gives up "
 							  "on it, its detail then being finer than a pixel");
 		ImGui::EndDisabled();
@@ -329,6 +348,18 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::Checkbox("Hold specular hit distance", &settings_.holdSpecularHitDistance);
 		ImGui::BeginDisabled(!settings_.holdSpecularHitDistance);
 		ImGui::SliderFloat("Hold max roughness", &settings_.holdHitDistanceMaxRoughness, 0.0f, 1.0f, "%.2f");
+		ImGui::EndDisabled();
+		EnumCombo("Guide view", kGuideViews, settings_.guideView);
+		ImGui::SetItemTooltip("Shows one of the guides given to DLSS-RR in place of the image, at render resolution");
+		ImGui::BeginDisabled(settings_.guideView == GUIDE_VIEW_OFF);
+		ImGui::Checkbox("Change since last frame", &settings_.guideViewChange);
+		ImGui::SetItemTooltip("How much the guide differs from last frame's at the point the motion vectors lead to, "
+							  "as heat: where DLSS-RR finds its history does not match. Depth is compared with where "
+							  "last frame's camera would have seen the point. Blue: came from off screen");
+		ImGui::Checkbox("Show held pixels", &settings_.guideViewHeld);
+		ImGui::SetItemTooltip("Tints magenta the pixels that kept last frame's guides this frame, because the path took "
+							  "the weaker lobe of a glass or mirror in their PSR chain");
+		ImGui::SliderFloat("Guide view gain", &settings_.guideViewGain, 0.1f, 100.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 	}

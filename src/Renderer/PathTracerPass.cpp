@@ -334,6 +334,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
 
 	constants.psrMaxRoughness = settings_.psrMaxRoughness;
+	constants.psrStrongerLobe = settings_.psrStrongerLobe ? 1u : 0u;
 	constants.psrMaxMinification = settings_.psrCurvedSurfaces ? std::max(settings_.psrMaxMinification, 1.0f) : -1.0f;
 	constants.specularHitDistanceHoldRoughness =
 			settings_.holdSpecularHitDistance ? settings_.holdHitDistanceMaxRoughness : -1.0f;

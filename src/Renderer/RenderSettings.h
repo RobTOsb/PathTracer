@@ -224,11 +224,21 @@ struct RenderSettings
 	// Curved mirrors and glass keep PSR too, with motion vectors traced through them by ray differentials,
 	// unless they shrink the image of the surface they show by more than psrMaxMinification (linear).
 	bool psrCurvedSurfaces = true;
-	float psrMaxMinification = 8.0f;
+	float psrMaxMinification = 64.0f;
+	// Past the camera's first surface, a chain through smooth glass always takes the lobe it follows, so its guides
+	// never hold last frame's; the other lobe's light (faint internal reflections) is left out.
+	bool psrStrongerLobe = true;
 	// Surfaces at most this rough keep last frame's specular hit distance in frames whose path took
 	// the diffuse lobe, so the guide does not flicker between a distance and none.
 	bool holdSpecularHitDistance = true;
 	float holdHitDistanceMaxRoughness = 0.25f;
+	// Debug: one guide in place of the image (GuideViewPass), or with guideViewChange how much it changed since
+	// last frame along the motion vectors, as heat scaled by guideViewGain. guideViewHeld tints the pixels that kept
+	// last frame's guides because their PSR chain broke by chance.
+	GuideView guideView = GUIDE_VIEW_OFF;
+	bool guideViewChange = false;
+	bool guideViewHeld = false;
+	float guideViewGain = 1.0f;
 
 	float cameraSpeed = 5.0f; // world units per second
 	// Set by the Camera panel, carried out (and cleared) by the main loop: the camera bookmark beside the
