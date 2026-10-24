@@ -462,6 +462,28 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 			ImGui::SliderFloat("Ozone scale", &atmosphere.ozoneScale, 0.0f, 10.0f, "%.2f");
 			ImGui::ColorEdit3("Ground albedo", &atmosphere.groundAlbedo.x);
 			ImGui::SliderFloat("Multiple scattering", &atmosphere.multipleScatteringFactor, 0.0f, 2.0f, "%.2f");
+
+			CloudSettings &clouds = settings_.clouds;
+			ImGui::Checkbox("Clouds", &clouds.enabled);
+			ImGui::SetItemTooltip("Volumetric clouds that the sky is seen through and that shadow the sun");
+			if (clouds.enabled)
+			{
+				ImGui::SliderFloat("Cloud base", &clouds.bottomKm, 0.0f, 10.0f, "%.2f km");
+				ImGui::SliderFloat("Cloud top", &clouds.topKm, 0.0f, 15.0f, "%.2f km");
+				ImGui::SetItemTooltip("Only cumulus reach it, stratus stay in the lowest 30%% of the layer");
+				ImGui::SliderFloat("Coverage", &clouds.coverage, 0.0f, 1.0f, "%.2f");
+				ImGui::SetItemTooltip("Added to the weather map's, from patchy at 0 to overcast at 1");
+				ImGui::SliderFloat("Cloud density", &clouds.density, 0.01f, 100.0f, "%.3g /km", ImGuiSliderFlags_Logarithmic);
+				ImGui::SetItemTooltip("Extinction where the cloud is densest");
+				ImGui::SliderFloat("Wind speed", &clouds.windSpeed, 0.0f, 100.0f, "%.1f m/s");
+				ImGui::SetItemTooltip("Still in the reference");
+				ImGui::SliderFloat("Wind direction", &clouds.windDirectionDegrees, -180.0f, 180.0f, "%.0f deg");
+				ImGui::SliderInt("View steps", &clouds.viewSteps, 1, 256);
+				ImGui::SetItemTooltip("Most march steps through the clouds of rays the camera sees through (0.2 km apart "
+									  "where fewer reach across the layer)");
+				ImGui::SliderInt("Indirect steps", &clouds.indirectSteps, 1, 128);
+				ImGui::SetItemTooltip("Most march steps through the clouds of every other ray that leaves the scene");
+			}
 		}
 		else
 		{

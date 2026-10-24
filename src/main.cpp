@@ -69,8 +69,9 @@ static float QueryDisplayPeakNits(void *hwnd)
 }
 
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
-//constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
-constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\teapot-full\\gltf\\teapot_full_extended.gltf";
+constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
+//constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\glass-of-water\\gltf\\glass_of_water_extended.gltf";
+//constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\GlassHurricaneCandleHolder\\glTF-Binary\\GlassHurricaneCandleHolder.glb";
 //constexpr const char *kDefaultScenePath = "H:\\bistro.glb";
 //constexpr const char *kDefaultScenePath = "h:\\suntemple.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\SubsurfaceScene\\scene.gltf";
@@ -242,7 +243,7 @@ void BuildPasses(RenderContext *renderContext,
 		 renderContext->GetWindowHeight(),
 		 reference ? "reference" : rayReconstruction ? "DLSS-RR on" : "DLSS-RR off");
 
-	auto atmosphere = std::make_unique<SkyAtmospherePass>(renderContext, camera, settings);
+	auto atmosphere = std::make_unique<SkyAtmospherePass>(renderContext, gpuScene, camera, settings);
 	auto pathTracer = std::make_unique<PathTracerPass>(
 			renderContext, gpuScene, camera, settings, *atmosphere, rayReconstruction, reference);
 	const PathTracerPass &pathTracerPass = *pathTracer;
@@ -431,6 +432,14 @@ int Run(const char *scenePath)
 			AnimateDynamicEmitters(gpuScene, dynamicEmitterSeconds);
 			// What the reference sums moves, so it starts over.
 			++settings.reference.restartCount;
+		}
+
+		if (settings.atmosphere.enabled && settings.clouds.enabled && settings.renderMode != RenderMode::Reference)
+		{
+			const float direction = DegreesToRadians(settings.clouds.windDirectionDegrees);
+			const float distanceKm = settings.clouds.windSpeed * 0.001f * deltaSeconds;
+			settings.clouds.windOffsetKm.x += sinf(direction) * distanceKm;
+			settings.clouds.windOffsetKm.y += cosf(direction) * distanceKm;
 		}
 
 		renderContext->BeginFrame();

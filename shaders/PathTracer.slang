@@ -551,16 +551,12 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 // A ray inside a medium that finds no way out ends there.
                 if (!inMedium)
                 {
-                    // The sky is never light sampled, so BSDF sampling gets its full contribution.
-                    float3 sky = EnvironmentRadiance(dir);
-
-                    // The sun disc is also reached by NEE, so weight it against light sampling.
+                    // The sky is never light sampled, so BSDF sampling gets its full contribution. The sun disc is
+                    // also reached by NEE, so weight it against light sampling.
                     float3 Lsun = SunRadiance(dir);
                     if (any(Lsun > 0.0))
-                    {
-                        float w = fromCamera || smoothSegment ? 1.0 : PowerHeuristic(prevBsdfPdf, LightPdf(origin, dir, hit));
-                        sky += Lsun * w;
-                    }
+                        Lsun *= fromCamera || smoothSegment ? 1.0 : PowerHeuristic(prevBsdfPdf, LightPdf(origin, dir, hit));
+                    float3 sky = SkyRadiance(origin, dir, Lsun, fromCamera || chainActive, rng);
                     radiance += ClampIndirect(throughput * sky, fromCamera || chainActive || (flags & PATH_DIRECT_SEGMENT) != 0);
                 }
                 break;

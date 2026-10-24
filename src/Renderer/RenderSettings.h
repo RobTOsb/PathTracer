@@ -48,7 +48,7 @@ struct LightSettings
 	bool orientationSplits = false;
 	// Moves the dynamic emitters (kDynamicEmitters in main.cpp) round a circle while spinning them, which
 	// rebuilds their light tree and the TLAS every frame.
-	bool animateDynamic = true;
+	bool animateDynamic = false;
 };
 
 // Geometric specular antialiasing of the opaque surfaces the camera sees: glossy lobes widen by how much
@@ -93,6 +93,26 @@ struct AtmosphereSettings
 	float multipleScatteringFactor = 1.0f;
 };
 
+// A layer of volumetric clouds in the atmosphere (Clouds.slang), atmosphere only: rays leaving the scene see the
+// sky through them and the sunlight reaching the scene is shadowed by them.
+struct CloudSettings
+{
+	bool enabled = true;
+	float bottomKm = 1.5f; // cloud base above the ground
+	float topKm = 8.0f; // top of the layer, which only cumulus reach
+	float coverage = 0.3f; // added to the weather map's, from patchy at 0 to overcast at 1
+	float density = 1.0f; // extinction per km where the cloud is densest
+	// The wind carries the clouds towards windDirectionDegrees (around +Y, 0 = towards +Z, as the sun's azimuth).
+	// The reference holds them still.
+	float windSpeed = 10.0f; // m/s
+	float windDirectionDegrees = 60.0f;
+	// Most march steps along rays that leave the scene: those the camera sees through, and the rest.
+	int viewSteps = 16;
+	int indirectSteps = 16;
+	// Kept by the main loop: how far the wind has carried the clouds in x and z.
+	float2 windOffsetKm = { 0.0f, 0.0f };
+};
+
 constexpr int kMaxSamplesPerPixel = 8;
 constexpr int kMaxBounces = 8; // of each kind, diffuse and specular
 constexpr int kMaxBloomLevels = 8; // half resolution down to 1/256
@@ -124,6 +144,7 @@ struct RenderSettings
 	LightSettings lights;
 	SpecularAASettings specularAA;
 	AtmosphereSettings atmosphere;
+	CloudSettings clouds;
 
 	float3 skyColour = { 0.45f, 0.65f, 1.0f };
 	float skyIntensity = 1.0f;

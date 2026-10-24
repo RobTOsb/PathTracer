@@ -1,5 +1,8 @@
 // Path tracer bindings and the loads that go through them. Registers must match PathTracerPass.
 // The only module that includes the interop headers, so their types are declared once.
+// FrameConstants holds the SkyAtmosphere module's CloudParameters.
+import SkyAtmosphere;
+#define SKY_ATMOSPHERE_IMPORTED
 #include "PathTracerInterop.h"
 #include "DLSSUtil.h"
 

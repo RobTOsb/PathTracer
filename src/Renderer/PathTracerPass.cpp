@@ -354,6 +354,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		constants.atmosphereInScatterSegments = static_cast<uint>(std::max(atmosphereSettings.inScatterSegments, 0));
 		constants.atmosphereVolumetricShadows = atmosphereSettings.volumetricShadows ? 1u : 0u;
 		constants.atmosphereSkyVisibility = atmosphereSettings.skyVisibility ? 1u : 0u;
+		constants.clouds = atmosphere_.GetCloudParameters();
 	}
 	constants.frameIndex = renderContext->GetCurrentFrame();
 	// TracePath keeps the diffuse bounces in 4 bits, up to one past the budget.

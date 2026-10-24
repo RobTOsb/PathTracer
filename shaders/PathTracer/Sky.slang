@@ -1,4 +1,5 @@
-// The sun, the sky and the scene's air (single scattering with volumetric shadows).
+// The sun, the sky, the clouds and the scene's air (single scattering with volumetric shadows).
+import Clouds;
 import SkyAtmosphere;
 import PathTracer.Math;
 import PathTracer.Random;
@@ -50,6 +51,63 @@ float3 EnvironmentRadiance(float3 dir)
 #else
     return g_Frame.skyRadiance;
 #endif
+}
+
+#ifdef ATMOSPHERE
+CloudLayer SceneClouds()
+{
+    CloudLayer layer = { g_Frame.clouds, g_LinearWrap, g_LinearClamp };
+    return layer;
+}
+#endif
+
+// The share of the sunlight that the clouds let through to a scene position, from their shadow map.
+float CloudShadow(float3 position)
+{
+#ifdef ATMOSPHERE
+    if (g_Frame.clouds.enabled == 0)
+        return 1.0;
+    Texture2D<float> shadowMap = ResourceDescriptorHeap[g_Frame.clouds.shadowMap];
+    return shadowMap.SampleLevel(g_LinearClamp, CloudShadowMapUv(g_Frame.clouds, position), 0.0);
+#else
+    return 1.0;
+#endif
+}
+
+// Radiance from beyond the scene along a ray from origin that leaves it: the sky and the light of the sun disc
+// already weighted for MIS (sun), with the clouds in front. Rays the camera sees through (view) march the clouds in
+// more steps.
+float3 SkyRadiance(float3 origin, float3 dir, float3 sun, bool view, inout uint rng)
+{
+    float3 sky = EnvironmentRadiance(dir);
+#ifdef ATMOSPHERE
+    CloudParameters c = g_Frame.clouds;
+    if (c.enabled != 0)
+    {
+        float3 pos = CloudSpacePosition(c, origin);
+        CloudSegment cloud = MarchClouds(SceneClouds(), pos, dir, view ? c.viewSteps : c.indirectSteps, SunIlluminance(),
+                                         EnvironmentRadiance(float3(0.0, 1.0, 0.0)), Rand3(rng));
+        if (cloud.transmittance < 1.0)
+        {
+            // The air between the origin and the cloud dims it, and scatters in the part of the sky's light that
+            // its transmittance says comes from in front of the cloud, which the cloud does not hide.
+            AtmosphereParameters atmosphere = (AtmosphereParameters)0;
+            atmosphere.bottomRadius = c.planetRadius;
+            atmosphere.topRadius = c.atmosphereTopRadius;
+            Texture2D<float4> transmittanceLut = ResourceDescriptorHeap[c.transmittanceLut];
+            float3 cloudPos = pos + dir * cloud.distance;
+            float r = length(pos);
+            float cloudR = length(cloudPos);
+            float3 toTop = transmittanceLut.SampleLevel(g_LinearClamp, TransmittanceLutUv(atmosphere, r, dot(dir, pos) / r), 0.0).rgb;
+            float3 cloudToTop =
+                transmittanceLut.SampleLevel(g_LinearClamp, TransmittanceLutUv(atmosphere, cloudR, dot(dir, cloudPos) / cloudR), 0.0).rgb;
+            float3 air = saturate(toTop / max(cloudToTop, 1.0e-6));
+            float3 front = saturate((1.0 - air) / max(1.0 - toTop, 1.0e-4));
+            return sky * (front + cloud.transmittance * (1.0 - front)) + air * cloud.inScattered + cloud.transmittance * sun;
+        }
+    }
+#endif
+    return sky + sun;
 }
 
 // Transmittance of the scene's air over distance (capped at the distance to the sky), 1 without the
@@ -115,7 +173,7 @@ float3 AtmosphereInScattering(float3 origin, float3 dir, float segmentLength, ui
             float3 sunDir = SunIsDelta() ? g_Frame.sunDirection : SampleUniformCone(g_Frame.sunDirection, g_Frame.sunOneMinusCosMax, u.yz);
             visibility = TraceShadowRay(origin + dir * s, sunDir, FLT_MAX, shadowRayFlags);
         }
-        inScattered += sunTransmittance * visibility * phaseScattering;
+        inScattered += sunTransmittance * visibility * CloudShadow(origin + dir * s) * phaseScattering;
     }
     return SunIlluminance() * inScattered * weight;
 }

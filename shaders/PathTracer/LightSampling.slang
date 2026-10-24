@@ -42,11 +42,12 @@ uint LightSelection(bool treeAllowed)
     return g_Frame.lightSampling == LIGHT_SAMPLING_TREE && treeAllowed ? LIGHT_SELECT_TREE : LIGHT_SELECT_POWER;
 }
 
-LightSample SampleSun(float2 u)
+// Sunlight reaching position, through the clouds' shadow.
+LightSample SampleSun(float3 position, float2 u)
 {
     LightSample ls;
     ls.distance = FLT_MAX;
-    ls.radiance = g_Frame.sunRadiance * SunTransmittance();
+    ls.radiance = g_Frame.sunRadiance * SunTransmittance() * CloudShadow(position);
     ls.pdf = g_Frame.sunPdf;
     ls.lightSamplingOnly = SunIsDelta();
     ls.direction = SunIsDelta() ? g_Frame.sunDirection : SampleUniformCone(g_Frame.sunDirection, g_Frame.sunOneMinusCosMax, u);
@@ -206,7 +207,7 @@ LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
     float pSun = g_Frame.sunSelectProbability;
     if (u.x < pSun)
     {
-        LightSample ls = SampleSun(float2(u.x / pSun, u.y));
+        LightSample ls = SampleSun(v.position, float2(u.x / pSun, u.y));
         ls.pdf *= pSun;
         return ls;
     }

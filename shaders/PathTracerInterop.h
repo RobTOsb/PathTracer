@@ -3,6 +3,12 @@
 
 #include "ShaderInterop.h"
 
+// CloudParameters. PathTracer/Resources.slang imports the SkyAtmosphere module, which already declares it, and
+// defines SKY_ATMOSPHERE_IMPORTED so that its types are not declared twice.
+#ifndef SKY_ATMOSPHERE_IMPORTED
+#include "SkyAtmosphereInterop.h"
+#endif
+
 // Per-frame constants for the path tracer (cbuffer packing rules apply on the GPU side).
 struct FrameConstants
 {
@@ -113,6 +119,9 @@ struct FrameConstants
 	// light within the part from its own alias table.
 	uint staticLightCount;
 	float staticLightPowerShare;
+
+	// ATMOSPHERE: the cloud layer seen past the scene's geometry and shadowing its sunlight (see Clouds.slang).
+	CloudParameters clouds;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -504,7 +513,7 @@ struct BloomConstants
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(FrameConstants) == 512,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 608,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
 static_assert(sizeof(GpuMaterial) == 144,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,

@@ -9,13 +9,17 @@
 #include <vector>
 
 class Camera;
+class RenderGPUScene;
 struct AtmosphereSettings;
 struct RenderSettings;
 
 class SkyAtmospherePass final : public RenderPass
 {
 public:
-	SkyAtmospherePass(RenderContext *renderContext, const Camera &camera, const RenderSettings &settings);
+	SkyAtmospherePass(RenderContext *renderContext,
+					  const RenderGPUScene &scene,
+					  const Camera &camera,
+					  const RenderSettings &settings);
 	~SkyAtmospherePass() override;
 
 	void Execute(RenderContext *renderContext) override;
@@ -45,6 +49,12 @@ public:
 		return sceneLighting_;
 	}
 
+	// The cloud layer of the last Execute, enabled = 0 while the clouds are off.
+	const CloudParameters &GetCloudParameters() const
+	{
+		return cloudParameters_;
+	}
+
 	// False once the planet hides the sun's centre from the camera's altitude.
 	bool IsSunAboveHorizon() const;
 
@@ -63,10 +73,20 @@ public:
 	static AtmosphereParameters MakeParameters(const AtmosphereSettings &settings);
 
 private:
-	PipelineHandle CreatePipeline(const char *entryPoint) const;
-	ResourceHandle CreateLUT(uint width, uint height, const char *debugName, ResourceHandle &srv) const;
+	PipelineHandle CreatePipeline(const char *shader, const char *entryPoint) const;
+	// A 3D texture for depth > 1.
+	ResourceHandle CreateLUT(uint width,
+							 uint height,
+							 const char *debugName,
+							 ResourceHandle &srv,
+							 Format format = Format::R16G16B16A16_FLOAT,
+							 uint depth = 1) const;
+	CloudParameters MakeCloudParameters() const;
+	void RenderCloudNoise(RenderContext *renderContext, PipelineHandle pipeline, ResourceHandle texture, const char *output,
+						  uint groupsX, uint groupsY, uint groupsZ);
 
 	RenderContext *renderContext_ = nullptr;
+	const RenderGPUScene &scene_;
 	const Camera &camera_;
 	const RenderSettings &settings_;
 
@@ -74,6 +94,10 @@ private:
 	PipelineHandle multiScatteringPipeline_ = InvalidPipelineHandle;
 	PipelineHandle skyViewPipeline_ = InvalidPipelineHandle;
 	PipelineHandle sceneLightingPipeline_ = InvalidPipelineHandle;
+	PipelineHandle shapeNoisePipeline_ = InvalidPipelineHandle;
+	PipelineHandle detailNoisePipeline_ = InvalidPipelineHandle;
+	PipelineHandle weatherMapPipeline_ = InvalidPipelineHandle;
+	PipelineHandle cloudShadowPipeline_ = InvalidPipelineHandle;
 
 	ResourceHandle transmittanceLUT_ = InvalidResourceHandle;
 	ResourceHandle transmittanceSRV_ = InvalidResourceHandle;
@@ -83,6 +107,22 @@ private:
 	ResourceHandle skyViewSRV_ = InvalidResourceHandle;
 	ResourceHandle sceneLighting_ = InvalidResourceHandle;
 	std::vector<ResourceHandle> parameterBuffers_; // one per frame in flight, CPU-written each frame
+
+	// Rendered on the first frame with clouds.
+	ResourceHandle shapeNoise_ = InvalidResourceHandle;
+	ResourceHandle shapeNoiseSRV_ = InvalidResourceHandle;
+	ResourceHandle detailNoise_ = InvalidResourceHandle;
+	ResourceHandle detailNoiseSRV_ = InvalidResourceHandle;
+	ResourceHandle weatherMap_ = InvalidResourceHandle;
+	ResourceHandle weatherMapSRV_ = InvalidResourceHandle;
+	bool cloudNoiseValid_ = false;
+	// Rendered again whenever the cloud parameters change.
+	ResourceHandle cloudShadowMap_ = InvalidResourceHandle;
+	ResourceHandle cloudShadowMapSRV_ = InvalidResourceHandle;
+	std::vector<ResourceHandle> cloudBuffers_; // one per frame in flight
+	CloudParameters cloudParameters_ = {};
+	CloudParameters shadowMapParameters_ = {}; // what the shadow map holds
+	bool shadowMapValid_ = false;
 
 	AtmosphereParameters parameters_ = {};
 	AtmosphereParameters lutParameters_ = {}; // what the transmittance and multiple scattering LUTs hold

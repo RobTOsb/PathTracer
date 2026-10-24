@@ -64,10 +64,52 @@ struct AtmosphereLUTConstants
 #define ATMOSPHERE_LIGHTING_MULTI_SCATTERING 1 // .rgb, Psi_ms for a unit sun illuminance
 #define ATMOSPHERE_LIGHTING_ROWS 2
 
+// Cloud textures of CloudTextures.slang: the shape (RGBA8) and detail (RGBA8) noise tile in 3D, the weather
+// map (RG16F) in 2D, and the shadow map (R16F) covers the scene.
+#define CLOUD_SHAPE_NOISE_SIZE 128u
+#define CLOUD_DETAIL_NOISE_SIZE 32u
+#define CLOUD_WEATHER_MAP_SIZE 512u
+#define CLOUD_SHADOW_MAP_SIZE 512u
+
+// A layer of clouds in the atmosphere (Clouds.slang), in its km with the planet centre at the origin. Written
+// by SkyAtmospherePass for its cloud kernels and carried into the path tracer by FrameConstants::clouds.
+// Textures are descriptor heap indices of SRVs.
+struct CloudParameters
+{
+	float bottomRadius; // of the cloud base
+	float topRadius; // of the highest cloud tops
+	float coverage; // added to the weather map's
+	float extinction; // per km at density 1, all of it scattering
+
+	float2 windOffset; // km the wind has carried the clouds, in x and z
+	float planetRadius; // the atmosphere's ground, which hides the clouds below the horizon
+	float atmosphereTopRadius;
+
+	float sceneHeight; // of the scene's y = 0, whose units are metres
+	uint enabled; // the rest is unused while this is 0
+	uint shapeNoise;
+	uint detailNoise;
+
+	uint weatherMap;
+	uint shadowMap;
+	uint transmittanceLut; // the atmosphere's, sampled clamped
+	uint viewSteps; // most march steps of rays from the camera and on through mirrors and glass
+
+	float3 sunDirection;
+	uint indirectSteps; // of every other ray that leaves the scene
+
+	// The shadow map holds the transmittance towards the sun from the plane y = shadowMapPlane, over a square
+	// of it that scene positions are projected onto along the sun. Scene units.
+	float2 shadowMapOrigin; // min x, z corner
+	float shadowMapInvSize; // 1 / side
+	float shadowMapPlane;
+};
+
 #ifdef __cplusplus
 static_assert(sizeof(AtmosphereParameters) % 16 == 0, "AtmosphereParameters must match the HLSL cbuffer layout");
 static_assert(sizeof(AtmosphereParameters) == 128, "AtmosphereParameters must match the HLSL cbuffer layout");
 static_assert(sizeof(AtmosphereLUTConstants) == 16, "AtmosphereLUTConstants must fit the root constants");
+static_assert(sizeof(CloudParameters) == 96, "CloudParameters must match the HLSL cbuffer layout");
 #endif
 
 #endif // SKY_ATMOSPHERE_INTEROP_H
