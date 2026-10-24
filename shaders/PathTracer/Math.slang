@@ -27,6 +27,18 @@ float2 UnpackHalf2(uint bits)
     return float2(f16tof32(bits & 0xFFFF), f16tof32(bits >> 16));
 }
 
+// A [0, 1] colour as unorm8x3, red in the low byte.
+uint PackUnorm3x8(float3 v)
+{
+    uint3 b = uint3(saturate(v) * 255.0 + 0.5);
+    return b.x | (b.y << 8) | (b.z << 16);
+}
+
+float3 UnpackUnorm3x8(uint bits)
+{
+    return float3(bits & 0xFF, (bits >> 8) & 0xFF, (bits >> 16) & 0xFF) / 255.0;
+}
+
 // Unit vector to octahedral snorm16x2, x in the low half.
 uint OctEncode(float3 n)
 {

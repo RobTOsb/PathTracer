@@ -1370,8 +1370,25 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 				(gpu.coatWeight <= 0.0f || gpu.coatRoughness <= 0.0f))
 				gpu.transmissionFlags |= TRANSMISSION_PASS_THROUGH;
 		}
-		gpu.attenuationColour = float3(1.0f, 1.0f, 1.0f);
-		gpu.attenuationDistance = FLT_MAX;
+		// KHR_materials_specular. The colour may exceed 1 (SetGltfSpecular moves the excess into the weight).
+		const float *specularColour = material.GetSpecularColour();
+		gpu.specularWeight = std::max(material.GetSpecular(), 0.0f);
+		gpu.specularColour = float3(std::max(specularColour[0], 0.0f),
+									std::max(specularColour[1], 0.0f),
+									std::max(specularColour[2], 0.0f));
+		gpu.specularTexture =
+				UploadTexture(material.GetSpecularTexture(), Format::R8G8B8A8_UNORM, "Material_Specular", batch);
+		gpu.specularColourTexture = UploadTexture(material.GetSpecularColourTexture(),
+												  Format::R8G8B8A8_UNORM_SRGB,
+												  "Material_SpecularColour",
+												  batch);
+		// KHR_materials_volume, which the shader uses in place of the base colour's tint on solid
+		// transmission. Infinite packs as no absorption.
+		const float *attenuationColour = material.GetAttenuationColour();
+		gpu.attenuationColour = float3(std::clamp(attenuationColour[0], 0.0f, 1.0f),
+									   std::clamp(attenuationColour[1], 0.0f, 1.0f),
+									   std::clamp(attenuationColour[2], 0.0f, 1.0f));
+		gpu.attenuationDistance = std::min(material.GetAttenuationDistance(), FLT_MAX);
 		// OpenPBR subsurface from EXT_materials_subsurface. Like Blender, its colour is the base colour. On a
 		// thin wall it is split between reflection and diffuse transmission to the other side by the
 		// anisotropy; in a solid object it is a scattering medium whose mean free path is radius * scale.
@@ -1492,6 +1509,10 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 	fallback.coatWeightTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.coatRoughnessTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.coatNormalTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.specularWeight = 1.0f;
+	fallback.specularColour = float3(1.0f, 1.0f, 1.0f);
+	fallback.specularTexture = INVALIDDESCRIPTORHANDLE;
+	fallback.specularColourTexture = INVALIDDESCRIPTORHANDLE;
 	materials.push_back(PackGpuMaterial(fallback));
 }
 

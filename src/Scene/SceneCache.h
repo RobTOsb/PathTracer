@@ -28,7 +28,9 @@
 // 15: KHR_materials_sheen, GpuMaterial 128 bytes.
 // 16: KHR_texture_transform and the textures' UV set baked into the vertex UVs.
 // 17: KHR_materials_clearcoat in GpuMaterial's last four dwords.
-constexpr uint32_t kSceneCacheVersion = 17;
+// 18: KHR_materials_volume attenuation colour and distance in GpuMaterial.
+// 19: KHR_materials_specular, GpuMaterial 144 bytes.
+constexpr uint32_t kSceneCacheVersion = 19;
 
 struct SceneCacheTexture
 {

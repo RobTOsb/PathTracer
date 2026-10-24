@@ -5,6 +5,10 @@ import PathTracer.Math;
 import PathTracer.RayTracing;
 import PathTracer.Resources;
 
+// kMinIor in RenderGPUScene.cpp: an interface that hardly reflects or bends light, which the BSDF's
+// Fresnel and refraction handle badly.
+static const float MIN_IOR = 1.05;
+
 // Spec default values, with an identity basis that the caller overwrites per hit.
 OpenPBRBaseParams OpenPBRDefaults()
 {
@@ -70,6 +74,26 @@ void SetTransmission(inout OpenPBRBaseParams p, MaterialData material, float tra
     }
 }
 
+// glTF specular (KHR_materials_specular) in OpenPBR terms. glTF scales the dielectric F0 by the weight and
+// tints it by the colour, F0 = min(F0(ior) colour, 1) weight, and leaves metals alone. OpenPBR's
+// specularWeight would scale metals too, so the weight goes into the IOR as its [modulated_ior] would
+// put it, which also bends refraction a little where glTF does not. A colour above 1 moves its excess
+// into the weight, and metals keep a white F82 tint. glTF's grazing reflectance (the weight, untinted)
+// becomes OpenPBR's (1, tinted). Call after SetTransmission, which sets the IOR.
+void SetGltfSpecular(inout OpenPBRBaseParams p, float weight, float3 colour)
+{
+    float excess = MaxComponent(colour);
+    if (excess > 1.0)
+    {
+        weight *= excess;
+        colour /= excess;
+    }
+    // Kept off 1 like the material's own IOR (kMinIor in RenderGPUScene.cpp), which a zero weight would
+    // otherwise reach exactly.
+    p.specularIor = max(ModulatedIORRatio(p.specularIor, max(weight, 0.0)), MIN_IOR);
+    p.specularColour = lerp(saturate(colour), float3(1.0, 1.0, 1.0), p.baseMetalness);
+}
+
 // glTF anisotropic GGX in OpenPBR terms. glTF stretches alpha along the anisotropy direction to
 // mix(r^2, 1, s^2) and keeps r^2 across it. OpenPBR (GGXAlpha) has alphaT = r'^2 sqrt(2 / (1 + (1 - a)^2))
 // and alphaB = (1 - a) alphaT, so 1 - a = alphaB / alphaT and r'^2 is the RMS of the two alphas, which
@@ -117,6 +141,7 @@ void ApplyMaterialOverrides(inout OpenPBRBaseParams p)
 void SimplifyMaterial(inout OpenPBRBaseParams p)
 {
     OpenPBRBaseParams d = OpenPBRDefaults();
+    p.specularColour = d.specularColour;
     p.specularRoughnessAnisotropy = 0.0;
     p.transmissionWeight = 0.0;
     p.transmissionColour = d.transmissionColour;
@@ -261,6 +286,13 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     p.baseMetalness = saturate(metallic);
     p.specularRoughness = saturate(roughness);
     SetTransmission(p, material, transmission, thinWalled);
+    float specularWeight = material.specularWeight;
+    float3 specularColour = material.specularColour;
+    if (!simple && material.specularTexture != INVALIDDESCRIPTORHANDLE)
+        specularWeight *= SampleTextureGrad(material.specularTexture, uv, ddx, ddy, anisotropic).a;
+    if (!simple && material.specularColourTexture != INVALIDDESCRIPTORHANDLE)
+        specularColour *= SampleTextureGrad(material.specularColourTexture, uv, ddx, ddy, anisotropic).rgb;
+    SetGltfSpecular(p, specularWeight, specularColour);
     if (anisotropyStrength > 0.0)
         SetGltfAnisotropy(p, saturate(anisotropyStrength));
     if (!simple && any(material.sheenColour > 0.0))
@@ -314,7 +346,7 @@ struct PackedMaterial
 {
     uint4 base;     // half: baseColour rgb, baseMetalness, specularRoughness, specularRoughnessAnisotropy, specularIor, transmissionWeight
     uint4 layers;   // half: transmissionColour rgb, subsurfaceWeight, subsurfaceColour rgb, subsurfaceScatterAnisotropy
-    uint4 coatFuzz; // half: coatWeight, coatRoughness, fuzzWeight, fuzzRoughness, fuzzColour rgb
+    uint4 coatFuzz; // half: coatWeight, coatRoughness, fuzzWeight, fuzzRoughness; unorm8: fuzzColour, specularColour
     float4 medium;  // transmissionDepth, subsurfaceRadius
     uint3 basis;    // octahedral: geometryNormal, geometryTangent, geometryCoatNormal
     bool thinWalled;
@@ -335,8 +367,8 @@ PackedMaterial PackMaterial(OpenPBRBaseParams p)
     m.layers = uint4(PackHalf2(p.transmissionColour.rg), PackHalf2(float2(p.transmissionColour.b, KeepNonzero(p.subsurfaceWeight))),
                      PackHalf2(p.subsurfaceColour.rg), PackHalf2(float2(p.subsurfaceColour.b, p.subsurfaceScatterAnisotropy)));
     m.coatFuzz = uint4(PackHalf2(float2(KeepNonzero(p.coatWeight), p.coatRoughness)),
-                       PackHalf2(float2(KeepNonzero(p.fuzzWeight), p.fuzzRoughness)), PackHalf2(p.fuzzColour.rg),
-                       f32tof16(p.fuzzColour.b));
+                       PackHalf2(float2(KeepNonzero(p.fuzzWeight), p.fuzzRoughness)), PackUnorm3x8(p.fuzzColour),
+                       PackUnorm3x8(p.specularColour));
     m.medium = float4(p.transmissionDepth, p.subsurfaceRadius);
     m.basis = uint3(OctEncode(p.geometryNormal), OctEncode(p.geometryTangent), OctEncode(p.geometryCoatNormal));
     m.thinWalled = p.geometryThinWalled;
@@ -373,7 +405,8 @@ OpenPBRBaseParams UnpackMaterial(PackedMaterial m, bool simple)
     h = UnpackHalf2(m.coatFuzz.y);
     p.fuzzWeight = h.x;
     p.fuzzRoughness = h.y;
-    p.fuzzColour = float3(UnpackHalf2(m.coatFuzz.z), f16tof32(m.coatFuzz.w));
+    p.fuzzColour = UnpackUnorm3x8(m.coatFuzz.z);
+    p.specularColour = UnpackUnorm3x8(m.coatFuzz.w);
 
     p.transmissionDepth = m.medium.x;
     p.subsurfaceRadius = m.medium.yzw;
@@ -389,7 +422,7 @@ OpenPBRBaseParams UnpackMaterial(PackedMaterial m, bool simple)
     SetGltfClearcoat(p, h.x, h.y, OctDecode(m.basis.z));
     if (simple)
         SimplifyMaterial(p);
-    // The only override that sets a value LoadMaterial otherwise leaves at its default.
+    // The only override that sets a value SimplifyMaterial puts back to its default.
     if ((g_Frame.materialOverrides & MATERIAL_OVERRIDE_NO_SPECULAR) != 0)
         p.specularColour = float3(0.0, 0.0, 0.0);
     return p;
@@ -427,6 +460,11 @@ float3 PassThroughTransmittance(MaterialData material, float2 uv, float3 baseCol
     p.baseMetalness = saturate(metallic);
     p.specularRoughness = 0.0;
     SetTransmission(p, material, transmission, true);
+    // The specular weight changes how much the Fresnel reflects back; its colour does not tint transmission.
+    float specularWeight = material.specularWeight;
+    if (material.specularTexture != INVALIDDESCRIPTORHANDLE)
+        specularWeight *= SampleTexture(material.specularTexture, uv).a;
+    SetGltfSpecular(p, specularWeight, material.specularColour);
     // The fuzz on top keeps some of it back too.
     if (any(material.sheenColour > 0.0))
     {

@@ -55,7 +55,7 @@ struct LightSettings
 // the normals turn across the pixel, so highlights smaller than a pixel stop flickering with the jitter.
 struct SpecularAASettings
 {
-	bool enabled = true;
+	bool enabled = false;
 	float strength = 1.0f; // scales the kernel, 1 = Tokuyoshi and Kaplanyan's
 	// The normal maps' variance as their mips average it away (Toksvig).
 	bool normalMaps = true;
@@ -198,8 +198,8 @@ struct RenderSettings
 	float psrMaxRoughness = 0.1f;
 	// Curved mirrors and glass keep PSR too, with motion vectors traced through them by ray differentials,
 	// unless they shrink the image of the surface they show by more than psrMaxMinification (linear).
-	bool psrCurvedSurfaces = false;
-	float psrMaxMinification = 2.0f;
+	bool psrCurvedSurfaces = true;
+	float psrMaxMinification = 8.0f;
 	// Surfaces at most this rough keep last frame's specular hit distance in frames whose path took
 	// the diffuse lobe, so the guide does not flicker between a distance and none.
 	bool holdSpecularHitDistance = true;

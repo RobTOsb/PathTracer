@@ -228,6 +228,12 @@ struct MaterialData
 	uint coatWeightTexture; // R multiplies coatWeight
 	uint coatRoughnessTexture; // G multiplies coatRoughness
 	uint coatNormalTexture; // tangent space like normalTexture; without one the coat follows the vertex normal
+	// KHR_materials_specular: the dielectric F0 scaled by the weight and tinted by the colour, which may
+	// exceed 1. Metals are left alone.
+	float specularWeight;
+	float3 specularColour;
+	uint specularTexture; // A multiplies specularWeight
+	uint specularColourTexture; // sRGB, RGB multiplies specularColour
 };
 
 // GpuMaterial::emissiveFlags bits above the half emissive blue.
@@ -239,9 +245,9 @@ struct MaterialData
 // base's diffuse and specular lobes (SimplifyMaterial). Set at upload, see IsSimpleMaterial.
 #define GPU_MATERIAL_SIMPLE (1u << 24)
 
-// One MaterialData per row of a StructuredBuffer, packed to 128 bytes (one aligned cache line): the
-// factors as halves (x in the low 16 bits), the coat's [0, 1] weight and roughness as unorm8, the texture
-// indices whole, since the descriptor heap holds up to a million of them. The fields are MaterialData's; PackGpuMaterial and LoadGpuMaterial
+// One MaterialData per row of a StructuredBuffer, packed to 144 bytes: the factors as halves (x in the
+// low 16 bits), the coat's [0, 1] weight and roughness as unorm8, the texture indices whole, since the
+// descriptor heap holds up to a million of them. The fields are MaterialData's; PackGpuMaterial and LoadGpuMaterial
 // (Resources.slang) convert.
 struct GpuMaterial
 {
@@ -271,6 +277,9 @@ struct GpuMaterial
 	uint coatWeightTexture;
 	uint coatRoughnessTexture;
 	uint coatNormalTexture;
+	uint2 specularColourWeight; // half4: colour, then weight
+	uint specularTexture;
+	uint specularColourTexture;
 };
 
 #ifdef __cplusplus
@@ -318,6 +327,9 @@ inline GpuMaterial PackGpuMaterial(const MaterialData &m)
 	p.coatWeightTexture = m.coatWeightTexture;
 	p.coatRoughnessTexture = m.coatRoughnessTexture;
 	p.coatNormalTexture = m.coatNormalTexture;
+	p.specularColourWeight = uint2(pair(m.specularColour.x, m.specularColour.y), pair(m.specularColour.z, m.specularWeight));
+	p.specularTexture = m.specularTexture;
+	p.specularColourTexture = m.specularColourTexture;
 	return p;
 }
 
@@ -370,17 +382,24 @@ inline MaterialData UnpackGpuMaterial(const GpuMaterial &p)
 	m.coatWeightTexture = p.coatWeightTexture;
 	m.coatRoughnessTexture = p.coatRoughnessTexture;
 	m.coatNormalTexture = p.coatNormalTexture;
+	m.specularColour = float3(lo(p.specularColourWeight.x), hi(p.specularColourWeight.x), lo(p.specularColourWeight.y));
+	m.specularWeight = hi(p.specularColourWeight.y);
+	m.specularTexture = p.specularTexture;
+	m.specularColourTexture = p.specularColourTexture;
 	return m;
 }
 
 // Whether LoadMaterial would leave every layer above the base off for this row: the same tests on the
-// same (unpacked half) values.
+// same (unpacked half) values. A specular weight factor still counts as simple (it only changes the IOR),
+// a specular colour or texture does not.
 inline bool IsSimpleMaterial(const GpuMaterial &p)
 {
 	const MaterialData m = UnpackGpuMaterial(p);
 	return !(m.transmission > 0.0f) && !(m.subsurfaceWeight > 0.0f) && !(m.coatWeight > 0.0f) &&
 		   !(m.sheenColour.x > 0.0f || m.sheenColour.y > 0.0f || m.sheenColour.z > 0.0f) &&
-		   m.anisotropy.x == 0.0f && m.anisotropy.y == 0.0f;
+		   m.anisotropy.x == 0.0f && m.anisotropy.y == 0.0f && m.specularColour.x == 1.0f &&
+		   m.specularColour.y == 1.0f && m.specularColour.z == 1.0f &&
+		   m.specularTexture == INVALIDDESCRIPTORHANDLE && m.specularColourTexture == INVALIDDESCRIPTORHANDLE;
 }
 #endif
 
@@ -487,7 +506,7 @@ struct BloomConstants
 #ifdef __cplusplus
 static_assert(sizeof(FrameConstants) == 512,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
-static_assert(sizeof(GpuMaterial) == 128,"GpuMaterial must match the structured buffer stride");
+static_assert(sizeof(GpuMaterial) == 144,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
 static_assert(sizeof(GpuCameraGuides) == 48 && sizeof(GpuSpecularChain) == 76 && sizeof(GpuPaneReflection) == 20,

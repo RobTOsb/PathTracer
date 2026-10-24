@@ -584,8 +584,9 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             if (!outcome.passThrough)
                 flags = SetFlag(flags & ~PATH_FROM_CAMERA, PATH_DIRECT_SEGMENT, fromCamera || chainActive);
 
-            // Russian roulette.
-            if (bounce >= RR_START_BOUNCE)
+            // Russian roulette, but not while a PSR chain is open: ending the path there would end the
+            // chain short, so a random scatter of pixels each frame would fall back to the glass's guides.
+            if (bounce >= RR_START_BOUNCE && !ChainActive(flags))
             {
                 float q = saturate(MaxComponent(throughput) * rrInvScale);
                 if (outcome.rrU >= q)
