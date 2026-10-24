@@ -417,7 +417,10 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
             else
             {
                 camera.chain.active = false;
-                if (!ctx.inside && ReplacePrimarySurface(camera.chain, mat, ctx, ViewedCurvature(hit, wo), dirIn, hit.Ng, wo,
+                // A chain the path left by chance keeps last frame's guides, which followed it or its like.
+                if (continuePath && PsrChainBrokenByChance(mat, ctx, lobe))
+                    camera.guides.hold = true;
+                else if (!ctx.inside && ReplacePrimarySurface(camera.chain, mat, ctx, ViewedCurvature(hit, wo), dirIn, hit.Ng, wo,
                                                          camera.cameraDir, camera.guides))
                     flags = SetFlag(flags, PATH_HIT_DISTANCE_PENDING, specularReflection);
                 else if (camera.chain.throughGlass)
@@ -691,6 +694,10 @@ void RayGen()
 
 #ifdef DLSS_RR
     CameraState camera = LoadCameraState(CAMERA_GUIDES | CAMERA_PANES | CAMERA_DIRECTION);
+    // A PSR chain that broke by chance keeps last frame's guides, so that a random few pixels of a glass
+    // object do not flip to its own surface each frame, which DLSS-RR takes for disocclusion in motion.
+    if (camera.guides.hold)
+        return;
     PrimaryGuides guides = FinishGuides(camera, origin);
 
     // Last frame's specular hit distance, loaded first so its latency hides behind the guides below.

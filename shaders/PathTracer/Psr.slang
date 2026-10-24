@@ -53,6 +53,21 @@ bool IsPsrEvent(OpenPBRBaseParams p, OpenPBRContext ctx, uint lobe, out float fr
     return fraction >= PSR_MIN_SPECULAR_FRACTION;
 }
 
+// Whether a chain that ends at this surface ended only because the path sampled the weaker of its specular
+// lobes, where the stronger one would have been an event: smooth enough, and inside glass the lobe the chain
+// follows, outside one that takes at least PSR_MIN_SPECULAR_FRACTION of the light. Which lobe a path takes
+// is random each frame, so such a frame's guides would flip between the chain's end and this surface.
+bool PsrChainBrokenByChance(OpenPBRBaseParams p, OpenPBRContext ctx, uint lobe)
+{
+    bool reflection = lobe == LOBE_SPECULAR_REFLECTION;
+    if (!(reflection || lobe == LOBE_SPECULAR_TRANSMISSION) || CoatedSpecularRoughness(p) > g_Frame.psrMaxRoughness)
+        return false;
+    if (ctx.inside)
+        return reflection != (FresnelDielectric(ctx.wo.z, ctx.eta) >= 0.5);
+    float2 fractions = SpecularFractions(p);
+    return (reflection ? fractions.y : fractions.x) >= PSR_MIN_SPECULAR_FRACTION;
+}
+
 // Directional reflectance (reflection) or transmittance of a chain event, as wo sees it.
 float3 PsrEventThroughput(OpenPBRBaseParams p, OpenPBRContext ctx, float3 wo, bool reflection)
 {

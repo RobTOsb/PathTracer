@@ -26,6 +26,8 @@ struct PrimaryGuides
     // for the virtual position's own reprojection, which only flat mirrors move like.
     float2 chainMotion;
     bool hasChainMotion;
+    // The PSR chain broke by chance this frame (PsrChainBrokenByChance), so RayGen keeps last frame's guides.
+    bool hold;
 };
 
 PrimaryGuides DefaultGuides(float3 dir)
@@ -42,6 +44,7 @@ PrimaryGuides DefaultGuides(float3 dir)
     g.curvature = 0.0;
     g.chainMotion = float2(0.0, 0.0);
     g.hasChainMotion = false;
+    g.hold = false;
     return g;
 }
 

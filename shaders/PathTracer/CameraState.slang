@@ -39,6 +39,7 @@ CameraState DefaultCameraState(float3 cameraDir)
 // GpuCameraGuides::flags
 static const uint CAMERA_GUIDES_SKY = 1; // position is a direction (w = 0)
 static const uint CAMERA_GUIDES_CHAIN_MOTION = 2; // PrimaryGuides::hasChainMotion
+static const uint CAMERA_GUIDES_HOLD = 4; // PrimaryGuides::hold
 // GpuSpecularChain::flags
 static const uint CAMERA_CHAIN_PARITY_ODD = 1;
 static const uint CAMERA_CHAIN_THROUGH_GLASS = 2;
@@ -70,7 +71,7 @@ GpuCameraGuides PackGuides(PrimaryGuides g)
                       PackHalf2(g.specularAlbedo.yz));
     p.roughnessCurvature = PackHalf2(float2(g.roughness, g.curvature));
     p.specularHitDistance = g.specularHitDistance;
-    p.flags = (sky ? CAMERA_GUIDES_SKY : 0) | (g.hasChainMotion ? CAMERA_GUIDES_CHAIN_MOTION : 0);
+    p.flags = (sky ? CAMERA_GUIDES_SKY : 0) | (g.hasChainMotion ? CAMERA_GUIDES_CHAIN_MOTION : 0) | (g.hold ? CAMERA_GUIDES_HOLD : 0);
     p.chainMotion = g.chainMotion;
     return p;
 }
@@ -91,6 +92,7 @@ PrimaryGuides UnpackGuides(GpuCameraGuides p)
     g.curvature = roughnessCurvature.y;
     g.specularHitDistance = p.specularHitDistance;
     g.hasChainMotion = (p.flags & CAMERA_GUIDES_CHAIN_MOTION) != 0;
+    g.hold = (p.flags & CAMERA_GUIDES_HOLD) != 0;
     g.chainMotion = p.chainMotion;
     return g;
 }
