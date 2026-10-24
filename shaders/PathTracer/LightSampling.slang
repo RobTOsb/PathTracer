@@ -247,6 +247,7 @@ LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
     }
 
     ls = SampleBufferLight(g_Lights[lightIndex], v.position, Rand3(rng).xy);
+    ls.radiance *= LightEmissionScale(lightIndex);
     ls.pdf *= pmf * (1.0 - pSun);
     return ls;
 }

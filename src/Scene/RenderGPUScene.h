@@ -80,6 +80,21 @@ public:
 	// its lights at the next UpdateLights.
 	void SetDynamicInstanceTransform(uint32_t dynamicInstance, const float (&worldMatrix)[12]);
 
+	// The scene instances with an emissive primitive, numbered as SetDynamicEmitters counts them.
+	uint32_t GetEmissiveInstanceCount() const
+	{
+		return static_cast<uint32_t>(emissiveInstances_.size());
+	}
+
+	// The dynamic instance an emissive instance is, or UINT32_MAX for a static one.
+	uint32_t GetDynamicInstanceOfEmitter(uint32_t emissiveInstance) const
+	{
+		return emissiveInstance < emissiveInstances_.size() ? dynamicOfInstance_[emissiveInstances_[emissiveInstance]]
+															: UINT32_MAX;
+	}
+
+	void SetEmissionScale(uint32_t emissiveInstance, float scale);
+
 	// Rebuilds the TLASes if a dynamic instance has moved since the last call. Records on the current
 	// frame's graphics command list, so call it after BeginGraphicsCommandList and before any tracing.
 	void UpdateAccelerationStructures();
@@ -184,6 +199,18 @@ public:
 		return emitterBuffer_;
 	}
 
+	// Per light, its emissive instance (uint): where its scale is in the emission scale buffer.
+	ResourceHandle GetLightEmitterBuffer() const
+	{
+		return lightEmitterBuffer_;
+	}
+
+	// Per emissive instance, the factor SetEmissionScale gave its emission (float).
+	ResourceHandle GetEmissionScaleBuffer() const
+	{
+		return lightFrames_.empty() ? InvalidResourceHandle : lightFrames_[lightFrame_].emissionScales;
+	}
+
 	uint32_t GetLightCount() const
 	{
 		return lightCount_;
@@ -252,7 +279,8 @@ private:
 	// Fills the emissive lights and returns the emitter buffer's contents.
 	std::vector<uint32_t> CollectEmitters(const Scene::GLTFScene &scene, const std::vector<GpuMaterial> &materials);
 	// Moves the lights of the instances dynamicEmitterSelection_ picks to the end of the light buffer,
-	// keeping the order within each part, and renumbers them in the emitter buffer's contents.
+	// keeping the order within each part, and renumbers them in the emitter buffer's contents. Also numbers
+	// the emissive instances and resets their emission scales.
 	void PartitionDynamicLights(std::vector<uint32_t> &emitters);
 	// The dynamic lights in world space, from the current transforms of their instances.
 	void TransformDynamicLights();
@@ -306,6 +334,7 @@ private:
 	ResourceHandle materialBuffer_ = InvalidResourceHandle;
 	ResourceHandle instanceBuffer_ = InvalidResourceHandle;
 	ResourceHandle emitterBuffer_ = InvalidResourceHandle;
+	ResourceHandle lightEmitterBuffer_ = InvalidResourceHandle;
 	uint32_t primitiveBufferIndex_ = InvalidResourceDescriptorIndex;
 	uint32_t materialBufferIndex_ = InvalidResourceDescriptorIndex;
 
@@ -320,12 +349,14 @@ private:
 		ResourceHandle parents = InvalidResourceHandle;
 		ResourceHandle leafLights = InvalidResourceHandle;
 		ResourceHandle power = InvalidResourceHandle;
+		ResourceHandle emissionScales = InvalidResourceHandle; // written whole on every update
 		size_t lightCapacity = 0;
 		size_t nodeCapacity = 0;
 		size_t leafCapacity = 0;
 		size_t parentCapacity = 0;
 		size_t leafLightCapacity = 0;
 		size_t powerCapacity = 0;
+		size_t emissionScaleCapacity = 0;
 		uint32_t staticTreeGeneration = 0; // of the static part these hold, 0 for none
 	};
 
@@ -340,6 +371,14 @@ private:
 	// Kept to write the static part of the light buffers of each frame in flight, once per build.
 	LightTree staticLightTree_;
 	uint32_t staticTreeGeneration_ = 0; // counts static tree builds
+	// Kept for updates that only change emission scales, which still write the dynamic part.
+	LightTree dynamicLightTree_;
+
+	// Per emissive instance, its scene instance and SetEmissionScale's factor.
+	std::vector<uint32_t> emissiveInstances_;
+	std::vector<float> emissionScales_;
+	std::vector<uint32_t> lightEmitters_; // per light, its emissive instance
+	bool emissionScalesChanged_ = false;
 
 	// Emissive instances that move (SetDynamicEmitters), and the lights of their triangles.
 	std::vector<uint32_t> dynamicEmitterSelection_;
@@ -350,6 +389,7 @@ private:
 	std::vector<GpuLight> dynamicObjectLights_; // per dynamic light, its triangle in object space
 	std::vector<uint32_t> dynamicLightInstance_; // per dynamic light, into dynamicInstances_
 	bool dynamicLightsMoved_ = false;
+	bool dynamicLightsRescaled_ = false; // a dynamic instance's emission scale changed
 	bool dynamicTLASMoved_ = false;
 
 	std::vector<LightFrameBuffers> lightFrames_;

@@ -28,6 +28,8 @@
 #include <iomanip>
 #include <math.h>
 #include <memory>
+#include <numeric>
+#include <random>
 #include <stdio.h>
 #include <string>
 #include <vector>
@@ -72,7 +74,7 @@ static float QueryDisplayPeakNits(void *hwnd)
 
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
 constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
-//constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\glass-of-water\\gltf\\glass_of_water_extended.gltf";
+//constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\breakfast-room\\gltf\\breakfast_room_extended.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\GlassHurricaneCandleHolder\\glTF-Binary\\GlassHurricaneCandleHolder.glb";
 //constexpr const char *kDefaultScenePath = "H:\\bistro.glb";
 //constexpr const char *kDefaultScenePath = "h:\\suntemple.glb";
@@ -80,30 +82,61 @@ constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gl
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\SphereRoom\\SphereRoom.glb";
 //constexpr const char *kDefaultScenePath = "h:\\SanMiguel.glb";
 
-// Emissive instances, numbered as the load logs them, whose lights move and so get a light tree of
-// their own. Intel Sponza: 0 is the textured plane (2 triangles), 1 the sphere (329,616).
-constexpr uint32_t kDynamicEmitters[] = { 0 };
-// Each one circles where it was loaded at this radius (scene units), turning once about the vertical
-// through its origin per lap.
-constexpr float kDynamicEmitterRadius = 1.0f;
-constexpr float kDynamicEmitterPeriod = 6.0f; // seconds per lap
+// Intel Sponza's emissive instances, numbered as the load logs them: from 0 the lamps' bulbs, then a
+// 1 m quad in master_material with the bulb material (left alone), the textured plane and the red sphere.
+constexpr uint32_t kBulbEmitterCount = 22;
+constexpr uint32_t kQuadEmitter = 23;
+constexpr uint32_t kSphereEmitter = 24;
+// The quad spins about the vertical through its centre, once per period.
+constexpr float kQuadSpinPeriod = 6.0f; // seconds
+// The sphere's emission swings between its glTF strength and this share of it, once per period.
+constexpr float kSpherePulsePeriod = 8.0f; // seconds
+constexpr float kSpherePulseMin = 0.0f;
+// Each bulb stays lit, then dark, for a random time in these ranges (seconds).
+constexpr float kBulbLitMin = 0.3f;
+constexpr float kBulbLitMax = 4.0f;
+constexpr float kBulbDarkMin = 0.05f;
+constexpr float kBulbDarkMax = 0.8f;
 
 constexpr uint kFramesInFlight = 2;
 constexpr uint kSwapchainImageCount = 3;
 constexpr float kMouseSensitivity = 0.15f; // degrees per pixel
 
-void AnimateDynamicEmitters(RenderGPUScene &gpuScene, float seconds)
+// Emissive instances whose lights get a light tree of their own, rebuilt whenever they move or change
+// brightness: the quad and the bulbs, so that dark bulbs get no light samples. The sphere (329,616
+// triangles) would take too long to rebuild every frame, so it stays static and only its emission scales.
+std::vector<uint32_t> DynamicEmitters()
 {
-	const uint32_t count = gpuScene.GetDynamicInstanceCount();
-	for (uint32_t i = 0; i < count; ++i)
+	std::vector<uint32_t> emitters(kBulbEmitterCount);
+	std::iota(emitters.begin(), emitters.end(), 0u);
+	emitters.push_back(kQuadEmitter);
+	return emitters;
+}
+
+struct LightAnimation
+{
+	float seconds = 0.0f; // of animation, which stops while it is switched off
+	std::mt19937 random{ 1 };
+	// Per bulb: lit or not, and the time left until it switches.
+	std::vector<bool> bulbLit;
+	std::vector<float> bulbSecondsLeft;
+};
+
+void AnimateLights(RenderGPUScene &gpuScene, LightAnimation &animation, float deltaSeconds)
+{
+	animation.seconds += deltaSeconds;
+	const uint32_t emitterCount = gpuScene.GetEmissiveInstanceCount();
+
+	const uint32_t quad = gpuScene.GetDynamicInstanceOfEmitter(kQuadEmitter);
+	if (quad != UINT32_MAX)
 	{
-		// Spread out round the circle so that several do not move as one.
-		const float angle = 2.0f * Pi * (seconds / kDynamicEmitterPeriod + static_cast<float>(i) / count);
+		const float angle = 2.0f * Pi * animation.seconds / kQuadSpinPeriod;
 		const float c = cosf(angle);
 		const float s = sinf(angle);
-		// Row vectors (p' = p A + t, see InstanceGPU): the rest transform, then a turn about +Y.
+		// Row vectors (p' = p A + t, see InstanceGPU): the rest transform, then a turn about +Y, which
+		// leaves the centre (the object space origin) at t.
 		const float rotation[3][3] = { { c, 0.0f, -s }, { 0.0f, 1.0f, 0.0f }, { s, 0.0f, c } };
-		const float *rest = gpuScene.GetDynamicInstanceRestTransform(i);
+		const float *rest = gpuScene.GetDynamicInstanceRestTransform(quad);
 		float m[12];
 		for (int r = 0; r < 3; ++r)
 		{
@@ -112,11 +145,40 @@ void AnimateDynamicEmitters(RenderGPUScene &gpuScene, float seconds)
 				m[4 * r + col] = rest[4 * r] * rotation[0][col] + rest[4 * r + 1] * rotation[1][col] +
 								 rest[4 * r + 2] * rotation[2][col];
 			}
+			m[4 * r + 3] = rest[4 * r + 3];
 		}
-		m[3] = rest[3] + kDynamicEmitterRadius * (c - 1.0f);
-		m[7] = rest[7];
-		m[11] = rest[11] + kDynamicEmitterRadius * s;
-		gpuScene.SetDynamicInstanceTransform(i, m);
+		gpuScene.SetDynamicInstanceTransform(quad, m);
+	}
+
+	if (kSphereEmitter < emitterCount)
+	{
+		const float pulse = 0.5f + 0.5f * cosf(2.0f * Pi * animation.seconds / kSpherePulsePeriod);
+		gpuScene.SetEmissionScale(kSphereEmitter, kSpherePulseMin + (1.0f - kSpherePulseMin) * pulse);
+	}
+
+	auto randomSeconds = [&](float lo, float hi) { return std::uniform_real_distribution<float>(lo, hi)(animation.random); };
+	const uint32_t bulbs = std::min(kBulbEmitterCount, emitterCount);
+	if (animation.bulbLit.size() != bulbs)
+	{
+		// All lit, each for its own time, so that they do not switch together.
+		animation.bulbLit.assign(bulbs, true);
+		animation.bulbSecondsLeft.resize(bulbs);
+		for (float &secondsLeft: animation.bulbSecondsLeft)
+		{
+			secondsLeft = randomSeconds(0.0f, kBulbLitMax);
+		}
+	}
+	for (uint32_t i = 0; i < bulbs; ++i)
+	{
+		float &secondsLeft = animation.bulbSecondsLeft[i];
+		secondsLeft -= deltaSeconds;
+		while (secondsLeft <= 0.0f)
+		{
+			const bool lit = !animation.bulbLit[i];
+			animation.bulbLit[i] = lit;
+			secondsLeft += lit ? randomSeconds(kBulbLitMin, kBulbLitMax) : randomSeconds(kBulbDarkMin, kBulbDarkMax);
+		}
+		gpuScene.SetEmissionScale(i, animation.bulbLit[i] ? 1.0f : 0.0f);
 	}
 }
 
@@ -342,7 +404,7 @@ int Run(const char *scenePath)
 	renderContext->InitialiseImgui(window.GetNativeWindow());
 
 	RenderGPUScene gpuScene(renderContext.get());
-	gpuScene.SetDynamicEmitters({ std::begin(kDynamicEmitters), std::end(kDynamicEmitters) });
+	gpuScene.SetDynamicEmitters(DynamicEmitters());
 	if (!LoadScene(scenePath, gpuScene))
 	{
 		return 1;
@@ -395,7 +457,7 @@ int Run(const char *scenePath)
 	DLSSRayReconstructionPreset builtPreset = settings.rrPreset;
 
 	auto lastTime = std::chrono::steady_clock::now();
-	float dynamicEmitterSeconds = 0.0f; // of animation, which stops while it is switched off
+	LightAnimation lightAnimation;
 	while (window.ProcessEvents())
 	{
 		const auto now = std::chrono::steady_clock::now();
@@ -435,11 +497,10 @@ int Run(const char *scenePath)
 		}
 		settings.cameraBookmarkRequest = RenderSettings::CameraBookmarkRequest::None;
 
-		if (settings.lights.animateDynamic && gpuScene.GetDynamicInstanceCount() > 0)
+		if (settings.lights.animate && gpuScene.GetEmissiveInstanceCount() > 0)
 		{
-			dynamicEmitterSeconds += deltaSeconds;
-			AnimateDynamicEmitters(gpuScene, dynamicEmitterSeconds);
-			// What the reference sums moves, so it starts over.
+			AnimateLights(gpuScene, lightAnimation, deltaSeconds);
+			// What the reference sums changes, so it starts over.
 			++settings.reference.restartCount;
 		}
 

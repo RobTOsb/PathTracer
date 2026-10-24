@@ -362,7 +362,7 @@ RenderGPUScene::~RenderGPUScene()
 		}
 	}
 	for (ResourceHandle buffer:
-		 { vertexBuffer_, primitiveBuffer_, materialBuffer_, instanceBuffer_, emitterBuffer_, ommIndexBuffer_ })
+		 { vertexBuffer_, primitiveBuffer_, materialBuffer_, instanceBuffer_, emitterBuffer_, lightEmitterBuffer_, ommIndexBuffer_ })
 	{
 		if (buffer != InvalidResourceHandle)
 		{
@@ -376,7 +376,8 @@ void RenderGPUScene::DestroyLights()
 {
 	for (LightFrameBuffers &frame: lightFrames_)
 	{
-		for (ResourceHandle buffer: { frame.lights, frame.nodes, frame.leaves, frame.parents, frame.leafLights, frame.power })
+		for (ResourceHandle buffer:
+			 { frame.lights, frame.nodes, frame.leaves, frame.parents, frame.leafLights, frame.power, frame.emissionScales })
 		{
 			if (buffer != InvalidResourceHandle)
 			{
@@ -391,9 +392,11 @@ void RenderGPUScene::DestroyLights()
 
 void RenderGPUScene::UpdateLights(const LightTreeBuildSettings &settings)
 {
-	// The static emitters' tree only changes with its settings, the dynamic emitters' also when they move.
+	// The static emitters' tree only changes with its settings, the dynamic emitters' also when they move
+	// or their emission scales change. Other emission scales only need writing.
 	const bool rebuildStatic = !lightTreeBuilt_ || settings != lightTreeSettings_;
-	if (!rebuildStatic && !dynamicLightsMoved_)
+	const bool rebuildDynamic = rebuildStatic || dynamicLightsMoved_ || dynamicLightsRescaled_;
+	if (!rebuildDynamic && !emissionScalesChanged_)
 	{
 		return;
 	}
@@ -416,22 +419,36 @@ void RenderGPUScene::UpdateLights(const LightTreeBuildSettings &settings)
 	}
 
 	// After the static tree's nodes, its lights and its leaf slots, which are one per static light.
-	LightTree dynamicTree;
-	if (dynamic)
+	if (rebuildDynamic)
+	{
+		dynamicLightTree_ = {};
+	}
+
+	if (rebuildDynamic && dynamic)
 	{
 		const auto start = std::chrono::steady_clock::now();
 		if (dynamicLightsMoved_)
 		{
 			TransformDynamicLights();
 		}
+		// Picked by the flux they emit now, so a light that is off gets no samples.
+		std::vector<float> dynamicFluxScales(fluxScales.begin() + staticLightCount_, fluxScales.end());
+		for (size_t j = 0; j < dynamicFluxScales.size(); ++j)
+		{
+			dynamicFluxScales[j] *= emissionScales_[lightEmitters_[staticLightCount_ + j]];
+		}
 		LightTreeLayout layout;
 		layout.firstNode = static_cast<uint32_t>(staticLightTree_.nodes.size());
 		layout.firstLight = staticLightCount_;
 		layout.rootParent = LIGHT_TREE_WIDTH - 1;
-		dynamicTree = BuildLightTree(lights.subspan(staticLightCount_), fluxScales.subspan(staticLightCount_), settings, layout);
+		dynamicLightTree_ = BuildLightTree(lights.subspan(staticLightCount_), dynamicFluxScales, settings, layout);
 		dynamicLightTreeBuildMs_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
 	}
+	
+	const LightTree &dynamicTree = dynamicLightTree_;
 	dynamicLightsMoved_ = false;
+	dynamicLightsRescaled_ = false;
+	emissionScalesChanged_ = false;
 
 	const double flux = staticLightTree_.flux + dynamicTree.flux;
 	staticLightPowerShare_ = flux > 0.0 ? static_cast<float>(staticLightTree_.flux / flux) : (staticLightCount_ > 0 ? 1.0f : 0.0f);
@@ -474,6 +491,12 @@ void RenderGPUScene::UpdateLights(const LightTreeBuildSettings &settings)
 														   staticLightCount_ + dynamicTree.leafLights.size(),
 														   "Scene_LightTreeLeafLights");
 	recreated |= ReserveLightBuffer<GpuLightAliasEntry>(renderContext_, frame.power, frame.powerCapacity, lights.size(), "Scene_LightPower");
+	ReserveLightBuffer<float>(renderContext_,
+							  frame.emissionScales,
+							  frame.emissionScaleCapacity,
+							  emissionScales_.size(),
+							  "Scene_EmissionScales");
+	WriteLightRange<float>(renderContext_, frame.emissionScales, 0, emissionScales_);
 
 	if (recreated || frame.staticTreeGeneration != staticTreeGeneration_)
 	{
@@ -503,6 +526,18 @@ void RenderGPUScene::SetDynamicInstanceTransform(uint32_t dynamicInstance, const
 	std::memcpy(instances[dynamicInstances_[dynamicInstance]].worldMatrix, worldMatrix, sizeof(worldMatrix));
 	dynamicLightsMoved_ = true;
 	dynamicTLASMoved_ = true;
+}
+
+void RenderGPUScene::SetEmissionScale(uint32_t emissiveInstance, float scale)
+{
+	scale = std::max(scale, 0.0f);
+	if (emissiveInstance >= emissionScales_.size() || emissionScales_[emissiveInstance] == scale)
+	{
+		return;
+	}
+	emissionScales_[emissiveInstance] = scale;
+	emissionScalesChanged_ = true;
+	dynamicLightsRescaled_ |= GetDynamicInstanceOfEmitter(emissiveInstance) != UINT32_MAX;
 }
 
 void RenderGPUScene::TransformDynamicLights()
@@ -538,7 +573,9 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 	dynamicObjectLights_.clear();
 	dynamicLightInstance_.clear();
 	dynamicLightsMoved_ = false;
+	dynamicLightsRescaled_ = false;
 	dynamicTLASMoved_ = false;
+	emissiveInstances_.clear();
 
 	const uint32_t lightCount = static_cast<uint32_t>(emissiveLights_.size());
 	staticLightCount_ = lightCount;
@@ -575,12 +612,15 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 	forEachLight([&](uint32_t instance, uint32_t &) { ++instanceLights[instance]; });
 
 	uint32_t ordinal = 0;
+	std::vector<uint32_t> emissiveOfInstance(instances.size(), UINT32_MAX);
 	for (uint32_t instance = 0; instance < static_cast<uint32_t>(instances.size()); ++instance)
 	{
 		if (!emissive[instance])
 		{
 			continue;
 		}
+		emissiveOfInstance[instance] = ordinal;
+		emissiveInstances_.push_back(instance);
 		const bool dynamic = std::find(dynamicEmitterSelection_.begin(), dynamicEmitterSelection_.end(), ordinal) !=
 							 dynamicEmitterSelection_.end();
 		const float *m = instances[instance].worldMatrix;
@@ -602,8 +642,17 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 		}
 		++ordinal;
 	}
+	// Every emissive instance at its loaded emission, and each light's instance in the final order.
+	emissionScales_.assign(emissiveInstances_.size(), 1.0f);
+	emissionScalesChanged_ = true;
+	auto findLightEmitters = [&]
+	{
+		lightEmitters_.assign(lightCount, 0);
+		forEachLight([&](uint32_t instance, uint32_t &light) { lightEmitters_[light] = emissiveOfInstance[instance]; });
+	};
 	if (dynamicInstances_.empty())
 	{
+		findLightEmitters();
 		return;
 	}
 
@@ -647,6 +696,7 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 	emissiveLights_ = std::move(lights);
 	emissiveFluxScales_ = std::move(fluxScales);
 	forEachLight([&](uint32_t, uint32_t &light) { light = newIndex[light]; });
+	findLightEmitters();
 	lightTreeBuilt_ = false;
 }
 
@@ -1687,6 +1737,13 @@ void RenderGPUScene::UploadEmitters(const std::vector<uint32_t> &emitters, Uploa
 								  sizeof(uint32_t),
 								  "Scene_Emitters",
 								  batch);
+	// At least one entry, so the shader's binding stays valid without lights.
+	const uint32_t noLight = 0;
+	lightEmitterBuffer_ = UploadStream(lightEmitters_.empty() ? &noLight : lightEmitters_.data(),
+									   std::max<size_t>(lightEmitters_.size(), 1) * sizeof(uint32_t),
+									   sizeof(uint32_t),
+									   "Scene_LightEmitters",
+									   batch);
 }
 
 void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const std::vector<GpuMaterial> &materials)

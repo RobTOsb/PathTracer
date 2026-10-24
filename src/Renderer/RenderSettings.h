@@ -46,16 +46,16 @@ struct LightSettings
 	int maxLeafLights = 4;
 	// Light tree build: the split cost also weighs how far each side's emitter normals spread.
 	bool orientationSplits = false;
-	// Moves the dynamic emitters (kDynamicEmitters in main.cpp) round a circle while spinning them, which
-	// rebuilds their light tree and the TLAS every frame.
-	bool animateDynamic = false;
+	// Animates the scene's emitters (AnimateLights in main.cpp): the quad spins, which rebuilds the TLAS,
+	// the sphere pulses and the bulbs flash, and the dynamic emitters' light tree is rebuilt every frame.
+	bool animate = true;
 };
 
 // Geometric specular antialiasing of the opaque surfaces the camera sees: glossy lobes widen by how much
 // the normals turn across the pixel, so highlights smaller than a pixel stop flickering with the jitter.
 struct SpecularAASettings
 {
-	bool enabled = false;
+	bool enabled = true;
 	float strength = 1.0f; // scales the kernel, 1 = Tokuyoshi and Kaplanyan's
 	// The normal maps' variance as their mips average it away (Toksvig).
 	bool normalMaps = true;

@@ -136,19 +136,23 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     // Front-face emission found by BSDF sampling is MIS weighted against NEE at the previous vertex
     // unless the triangle has no light (degenerate or black) or light buffer NEE is off. The weight's
     // light tree walk needs only the packed hit, so it comes before the material, which is then not
-    // held across it.
+    // held across it. The weight also carries the light's emission scale, as NEE's radiance does.
     float3 wo = -dir;
     bool frontFace = dot(OctDecode(payload.Ng), wo) > 0.0;
     // Light found here is direct for a surface the camera sees, or for the one the segment left.
     bool visible = fromCamera || chainActive;
     bool directArrival = visible || (flags & PATH_DIRECT_SEGMENT) != 0;
     float emissionWeight = 1.0;
-    if (frontFace && !fromCamera && !smoothSegment && g_Frame.lightCount > 0 && payload.emitter != INVALID_LIGHT_INDEX)
+    if (frontFace && payload.emitter != INVALID_LIGHT_INDEX)
     {
         uint lightIndex = g_Emitters[payload.emitter];
         if (lightIndex != INVALID_LIGHT_INDEX)
-            emissionWeight = PowerHeuristic(prevBsdfPdf, EmitterLightPdf(UnpackLightSelectVertex(prevVertex), lightIndex, dir,
-                                                                         origin + dir * payload.hitT));
+        {
+            emissionWeight = LightEmissionScale(lightIndex);
+            if (!fromCamera && !smoothSegment && g_Frame.lightCount > 0)
+                emissionWeight *= PowerHeuristic(prevBsdfPdf, EmitterLightPdf(UnpackLightSelectVertex(prevVertex), lightIndex,
+                                                                              dir, origin + dir * payload.hitT));
+        }
     }
 
     HitInfo hit = UnpackHit(payload, origin, dir);

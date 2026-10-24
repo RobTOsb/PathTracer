@@ -78,6 +78,8 @@ StructuredBuffer<uint> g_Emitters : register(t8);
 StructuredBuffer<uint> g_LightTreeParents : register(t9);
 StructuredBuffer<GpuLightTreeLeafEntry> g_LightTreeLeafLights : register(t10);
 StructuredBuffer<GpuLightAliasEntry> g_LightPower : register(t13);
+StructuredBuffer<uint> g_LightEmitters : register(t14);    // per light, its emissive instance
+StructuredBuffer<float> g_EmissionScales : register(t15); // per emissive instance, see RenderGPUScene::SetEmissionScale
 
 #ifdef ATMOSPHERE
 Texture2D<float4> g_SkyViewLUT : register(t11);
@@ -88,6 +90,12 @@ SamplerState g_LinearClamp : register(s2);
 PrimitiveDesc LoadPrimitive(uint index)
 {
     return g_Primitives[index];
+}
+
+// What the light's instance emits now, relative to the material (animated lights dim and switch off).
+float LightEmissionScale(uint lightIndex)
+{
+    return g_EmissionScales[g_LightEmitters[lightIndex]];
 }
 
 // The two float16 values of a GpuMaterial field, low half in x (Math's UnpackHalf2, which imports this).

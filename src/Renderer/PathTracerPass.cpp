@@ -452,6 +452,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	renderContext->SetRaytracingSRV(9, scene_.GetLightTreeParentBuffer());
 	renderContext->SetRaytracingSRV(10, scene_.GetLightTreeLeafLightBuffer());
 	renderContext->SetRaytracingSRV(13, scene_.GetLightPowerBuffer());
+	renderContext->SetRaytracingSRV(14, scene_.GetLightEmitterBuffer());
+	renderContext->SetRaytracingSRV(15, scene_.GetEmissionScaleBuffer());
 	
 	if (atmosphere)
 	{
