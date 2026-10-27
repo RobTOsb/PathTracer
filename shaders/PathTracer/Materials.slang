@@ -445,6 +445,32 @@ float4 LoadBaseColourAlpha(MaterialData material, float2 uv)
     return albedo;
 }
 
+// Blended surfaces of less alpha than an 8-bit texel's least are not there at all, so the any-hit shaders cut
+// them like a mask and the path never shades them.
+static const float BLEND_MIN_OPACITY = 1.0 / 255.0;
+
+// The alpha below which a candidate hit is cut, 0 for an opaque material, which never is.
+float AlphaCutoff(MaterialData material)
+{
+    if (material.alphaMode == ALPHA_MODE_MASK)
+        return material.alphaCutoff;
+    return material.alphaMode == ALPHA_MODE_BLEND ? BLEND_MIN_OPACITY : 0.0;
+}
+
+// How much of a blended surface is there at the hit, its alpha filtered over a ray cone coneWidth wide as
+// LoadMaterial's textures are; 1 for any other.
+float LoadOpacity(HitInfo hit, float coneWidth, bool anisotropic)
+{
+    MaterialData material = LoadGpuMaterial(hit.materialId);
+    if (material.alphaMode != ALPHA_MODE_BLEND)
+        return 1.0;
+    float alpha = material.baseColour.a;
+    if (material.albedoTexture != INVALIDDESCRIPTORHANDLE)
+        alpha *= SampleTextureGrad(material.albedoTexture, hit.uv, hit.uvGradients.xy * coneWidth, hit.uvGradients.zw * coneWidth,
+                                   anisotropic).a;
+    return saturate(alpha);
+}
+
 // What a pass-through surface lets a shadow ray through.
 float3 PassThroughTransmittance(MaterialData material, float2 uv, float3 baseColour, float faceCosine)
 {
@@ -485,8 +511,8 @@ float3 PassThroughTransmittance(MaterialData material, float2 uv, float3 baseCol
     return ThinDeltaTransmittance(p, faceCosine);
 }
 
-// What a candidate triangle lets a shadow ray along dir through: pass-through surfaces some, anything
-// else nothing. False for a cut-out, which the ray ignores.
+// What a candidate triangle lets a shadow ray along dir through: pass-through surfaces some, blended ones
+// what of them is not there, anything else nothing. False for a cut-out, which the ray ignores.
 bool ShadowCandidateTransmittance(PrimitiveDesc prim, uint primitiveIndex, float2 barycentrics, float3x3 linearToWorld,
                                   float3 dir, out float3 transmitted)
 {
@@ -496,10 +522,16 @@ bool ShadowCandidateTransmittance(PrimitiveDesc prim, uint primitiveIndex, float
     float2 uv = InterpolateTexCoord(tri, Barycentrics(barycentrics));
     float4 albedo = LoadBaseColourAlpha(material, uv);
 
-    if (material.alphaMode == ALPHA_MODE_MASK && albedo.a < material.alphaCutoff)
+    if (albedo.a < AlphaCutoff(material))
         return false;
 
     if ((material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
         transmitted = PassThroughTransmittance(material, uv, albedo.rgb, FaceCosine(tri, linearToWorld, dir));
+    // The surface at its opacity, as the path's straight-through lobe has it.
+    if (material.alphaMode == ALPHA_MODE_BLEND)
+    {
+        float opacity = saturate(albedo.a);
+        transmitted = transmitted * opacity + (1.0 - opacity);
+    }
     return true;
 }

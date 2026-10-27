@@ -129,7 +129,9 @@ struct FrameConstants
 	// Firefly clamp of direct light: as indirectClamp, for light the surface the camera sees scatters (see
 	// ClampFirefly). Light the camera sees, also in a mirror-like surface, is never clamped. FLT_MAX = off.
 	float directClamp;
-	uint pad0;
+	// DLSS-RR: at most this many splits of the camera ray at alpha-blended surfaces (see TracePath), which share
+	// their count with glassReflectionSplits. Past them a blended surface is there or not by chance.
+	uint blendLayerSplits;
 	uint pad1;
 };
 
@@ -473,6 +475,7 @@ struct GpuCameraState
 	uint2 transmittance; // half: camera transmittance rgb, then unused
 	float distance;
 	float3 cameraDirection; // the camera ray's, rather than held in registers through the path
+	uint3 layerAlbedos; // half: diffuse rgb, specular rgb of the blended layers the guides do not describe
 };
 
 // One per render pixel: the branch a glass split leaves for later (PathTracer/GlassSplit.slang).
@@ -483,6 +486,7 @@ struct GpuDeferredBranch
 	float3 throughput;
 	float coneSpread;
 	float3 direction;
+	float rrInvScale; // the branch's Russian roulette scale, see TracePath
 };
 
 // Root constants for the tonemap compute pass (bound as g_PushConstants).
@@ -573,8 +577,8 @@ static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
 static_assert(sizeof(GpuCameraGuides) == 48 && sizeof(GpuSpecularChain) == 76 && sizeof(GpuPaneReflection) == 20,
 			  "GpuCameraState parts must match their HLSL layout");
-static_assert(sizeof(GpuCameraState) == 168, "GpuCameraState must match the structured buffer stride");
-static_assert(sizeof(GpuDeferredBranch) == 44, "GpuDeferredBranch must match the structured buffer stride");
+static_assert(sizeof(GpuCameraState) == 180, "GpuCameraState must match the structured buffer stride");
+static_assert(sizeof(GpuDeferredBranch) == 48, "GpuDeferredBranch must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 52, "TonemapConstants must fit the root constants");
 static_assert(sizeof(GuideViewConstants) <= 16 * 4, "GuideViewConstants must fit the root constants");
 #endif

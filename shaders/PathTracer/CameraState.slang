@@ -14,16 +14,20 @@ struct CameraState
     PrimaryGuides guides; // all but the reflector, which FinishGuides sets
     SpecularChain chain;
     PaneReflection panes;
-    float3 transmittance; // of the walls in front of the primary surface
+    float3 transmittance; // of the walls and blended layers in front of the primary surface
     float distance; // camera to the latest hit through those walls
     float3 cameraDir; // the camera ray's direction
+    // The albedos of the blended layers in front of the guides' surface, or behind the one that took them,
+    // through what is in front of each (see TracePath). FinishGuides adds them to the guides'.
+    float3 layerDiffuseAlbedo;
+    float3 layerSpecularAlbedo;
 };
 
 // Parts of the camera state, loaded and stored on their own so a segment only moves what it touches.
 static const uint CAMERA_GUIDES = 1;
 static const uint CAMERA_CHAIN = 2;
 static const uint CAMERA_PANES = 4;
-static const uint CAMERA_VIEW = 8; // transmittance and distance
+static const uint CAMERA_VIEW = 8; // transmittance, distance and the layers' albedos
 static const uint CAMERA_DIRECTION = 16;
 static const uint CAMERA_ALL = 31;
 
@@ -172,6 +176,9 @@ void StoreCameraState(CameraState s, uint parts)
     {
         g_CameraState[i].transmittance = uint2(PackHalf2(s.transmittance.xy), PackHalf2(float2(s.transmittance.z, 0.0)));
         g_CameraState[i].distance = s.distance;
+        g_CameraState[i].layerAlbedos =
+                uint3(PackHalf2(s.layerDiffuseAlbedo.xy), PackHalf2(float2(s.layerDiffuseAlbedo.z, s.layerSpecularAlbedo.x)),
+                      PackHalf2(s.layerSpecularAlbedo.yz));
     }
     if ((parts & CAMERA_DIRECTION) != 0)
         g_CameraState[i].cameraDirection = s.cameraDir;
@@ -195,6 +202,11 @@ CameraState LoadCameraState(uint parts)
         uint2 transmittance = g_CameraState[i].transmittance;
         s.transmittance = float3(UnpackHalf2(transmittance.x), UnpackHalf2(transmittance.y).x);
         s.distance = g_CameraState[i].distance;
+        uint3 layers = g_CameraState[i].layerAlbedos;
+        float2 layers0 = UnpackHalf2(layers.x);
+        float2 layers1 = UnpackHalf2(layers.y);
+        s.layerDiffuseAlbedo = float3(layers0, layers1.x);
+        s.layerSpecularAlbedo = float3(layers1.y, UnpackHalf2(layers.z));
     }
     if ((parts & CAMERA_DIRECTION) != 0)
         s.cameraDir = g_CameraState[i].cameraDirection;
@@ -217,11 +229,14 @@ void StorePaneHitDistance(float hitDistance)
 #endif
 }
 
-// The guides once the path is done. The specular guides follow the reflection on the guides' surface,
-// or on the brightest split pane in front of it if that reflects more.
+// The guides once the path is done, with the blended layers' albedos. The specular guides follow the reflection
+// on the guides' surface, or on the brightest split pane in front of it if that reflects more. s needs
+// CAMERA_GUIDES, CAMERA_PANES, CAMERA_VIEW and CAMERA_DIRECTION.
 PrimaryGuides FinishGuides(CameraState s, float3 cameraOrigin)
 {
     PrimaryGuides guides = s.guides;
+    guides.diffuseAlbedo += s.layerDiffuseAlbedo;
+    guides.specularAlbedo += s.layerSpecularAlbedo;
     guides.reflector = guides.position;
     guides.reflectorRoughness = guides.roughness;
     if (s.panes.luminance > 0.0)

@@ -29,7 +29,8 @@ struct MaterialGeometryFlags
 	{
 		const bool passThrough = (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0;
 		isOpaque = material.alphaMode == ALPHA_MODE_OPAQUE && !passThrough;
-		noDuplicateAnyHit = passThrough;
+		// Shadow rays multiply in what these let through, once per triangle.
+		noDuplicateAnyHit = passThrough || material.alphaMode == ALPHA_MODE_BLEND;
 	}
 
 	bool isOpaque;

@@ -40,18 +40,6 @@ namespace
 		return primitive.IsValid() && primitive.HasIndices() && primitive.GetIndexCount() >= 3;
 	}
 
-	// The material as the shaders see it: blended surfaces are traced as masked at half their opacity.
-	MaterialData UnpackTracedMaterial(const GpuMaterial &packed)
-	{
-		MaterialData material = UnpackGpuMaterial(packed);
-		if (material.alphaMode == ALPHA_MODE_BLEND)
-		{
-			material.alphaMode = ALPHA_MODE_MASK;
-			material.alphaCutoff = 0.5f * material.baseColour.w;
-		}
-		return material;
-	}
-
 	// Transforms a point by the scene's row-major 3x4 layout (3x3 for row vectors, translation in
 	// the 4th column of each row; see Scene::ComposeTRS).
 	float3 TransformPoint(const float *m, float x, float y, float z)
@@ -1579,11 +1567,7 @@ void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMater
 			packed.transmissionIor = (packed.transmissionIor & 0xFFFFu) |
 									 (static_cast<uint32_t>(DirectX::PackedVector::XMConvertFloatToHalf(kMinIor)) << 16);
 		}
-		const MaterialData material = UnpackTracedMaterial(packed);
-		if (UnpackGpuMaterial(packed).alphaMode == ALPHA_MODE_BLEND)
-		{
-			packed = PackGpuMaterial(material);
-		}
+		const MaterialData material = UnpackGpuMaterial(packed);
 		// Derived here rather than baked, so cached scenes get it too.
 		if (IsSimpleMaterial(packed))
 		{
@@ -1648,7 +1632,10 @@ std::vector<uint32_t> RenderGPUScene::CollectEmitters(const Scene::GLTFScene &sc
 		const TLASInstanceRef &ref = tlasInstances[i];
 		const uint32_t materialIndex = primitiveDescs[ref.primitive].materialIndex;
 		const MaterialData material = UnpackGpuMaterial(materials[materialIndex]);
-		const float3 emissive = material.emissive;
+		// A blended emitter is only there by its alpha, which the light has its factor of; a texture's alpha
+		// would need the albedo texture in the light, so NEE leaves that out.
+		const float3 emissive = material.alphaMode == ALPHA_MODE_BLEND ? material.emissive * std::clamp(material.baseColour.w, 0.0f, 1.0f)
+																	   : material.emissive;
 		if (!(emissive.x > 0.0f || emissive.y > 0.0f || emissive.z > 0.0f))
 		{
 			continue;
@@ -1788,8 +1775,9 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 		{
 			continue;
 		}
-		const MaterialData material = UnpackTracedMaterial(materials[desc.materialIndex]);
-		// Pass-through surfaces always need the shadow any-hit shader for what they let through.
+		const MaterialData material = UnpackGpuMaterial(materials[desc.materialIndex]);
+		// Only masks: blended and pass-through surfaces always need the shadow any-hit shader for what they
+		// let through.
 		if (material.alphaMode != ALPHA_MODE_MASK || (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
 		{
 			continue;
