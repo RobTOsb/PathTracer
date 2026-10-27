@@ -40,6 +40,9 @@ RWTexture2D<float> g_Depth : register(u5);            // hardware depth, reverse
 RWTexture2D<float> g_SpecularHitDistance : register(u6); // kept across frames for the hold, see InitialSpecularHitDistance
 RWTexture2D<float2> g_SpecularMotionVectors : register(u7); // render pixels, current to previous, of the reflection
 RWStructuredBuffer<GpuCameraState> g_CameraState : register(u8); // per pixel, see PathTracer/CameraState.slang
+// Per TLAS instance (InstanceIndex()), last frame's ObjectToWorld3x4() as three rows, for the motion of moving
+// geometry (RenderGPUScene::GetPreviousTransformBuffer).
+StructuredBuffer<float4> g_PreviousTransforms : register(t16);
 #endif
 // The reference's sum of every path so far per pixel (RGBA32F); PathTracerPass binds it only under REFERENCE.
 #ifdef REFERENCE

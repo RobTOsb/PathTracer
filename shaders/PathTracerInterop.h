@@ -444,7 +444,7 @@ struct GpuCameraGuides
 	uint roughnessCurvature; // half2
 	float specularHitDistance;
 	uint flags; // CAMERA_GUIDES_* in CameraState.slang
-	float2 chainMotion;
+	float2 motion;
 };
 
 // Only an active chain is stored.

@@ -20,7 +20,9 @@
 
 namespace
 {
+	// HitPayload in PathTracer/RayTracing.slang, which carries the hit's motion under DLSS_RR.
 	constexpr uint32_t kMaxPayloadSizeInBytes = 48;
+	constexpr uint32_t kMaxPayloadSizeInBytesRR = 56;
 
 	// Halton phases before the jitter repeats. The DLSS guide asks for 8 * (output / render)^2, so
 	// 72 at Ultra Performance, and the RR guide for at least 32 with no reason to limit it.
@@ -169,7 +171,7 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 		desc.exports.insert(desc.exports.end(), { "ShadowMiss", "ShadowClosestHit", "ShadowAnyHit" });
 		desc.hitGroups.push_back(RaytracingHitGroup{ "ShadowHitGroup", "ShadowClosestHit", "ShadowAnyHit", "" });
 	}
-	desc.maxPayloadSizeInBytes = kMaxPayloadSizeInBytes;
+	desc.maxPayloadSizeInBytes = rayReconstruction_ ? kMaxPayloadSizeInBytesRR : kMaxPayloadSizeInBytes;
 	desc.maxAttributeSizeInBytes = 8; // triangle barycentrics
 	desc.maxTraceRecursionDepth = 1; // primary and shadow rays are both traced from raygen
 	if (rayReconstruction_)
@@ -457,7 +459,11 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	renderContext->SetRaytracingSRV(13, scene_.GetLightPowerBuffer());
 	renderContext->SetRaytracingSRV(14, scene_.GetLightEmitterBuffer());
 	renderContext->SetRaytracingSRV(15, scene_.GetEmissionScaleBuffer());
-	
+	if (rayReconstruction_)
+	{
+		renderContext->SetRaytracingSRV(16, scene_.GetPreviousTransformBuffer());
+	}
+
 	if (atmosphere)
 	{
 		renderContext->SetRaytracingSRV(11, atmosphere_.GetSkyViewLUT());

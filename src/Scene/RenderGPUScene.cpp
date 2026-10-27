@@ -390,6 +390,10 @@ RenderGPUScene::~RenderGPUScene()
 			renderContext_->DestroyResource(buffer);
 		}
 	}
+	for (ResourceHandle buffer: previousTransforms_)
+	{
+		renderContext_->DestroyResource(buffer);
+	}
 	DestroyLights();
 }
 
@@ -542,11 +546,72 @@ void RenderGPUScene::UpdateLights(const LightTreeBuildSettings &settings)
 	}
 }
 
-void RenderGPUScene::SetDynamicInstanceTransform(uint32_t dynamicInstance, const float (&worldMatrix)[12])
+void RenderGPUScene::Animate(float seconds)
 {
-	std::memcpy(instances[dynamicInstances_[dynamicInstance]].worldMatrix, worldMatrix, sizeof(worldMatrix));
-	dynamicLightsMoved_ = true;
-	dynamicTLASMoved_ = true;
+	if (animatedNodes_.empty())
+	{
+		return;
+	}
+	const float time = animationDuration_ > 0.0f ? seconds - floorf(seconds / animationDuration_) * animationDuration_ : 0.0f;
+
+	// The rest pose, with what the channels animate replaced.
+	struct Pose
+	{
+		float translation[3];
+		float rotation[4];
+		float scale[3];
+		bool animated;
+	};
+	std::vector<Pose> poses(animatedNodes_.size());
+	for (size_t i = 0; i < animatedNodes_.size(); ++i)
+	{
+		const AnimatedNode &node = animatedNodes_[i];
+		Pose &pose = poses[i];
+		std::copy(std::begin(node.translation), std::end(node.translation), pose.translation);
+		std::copy(std::begin(node.rotation), std::end(node.rotation), pose.rotation);
+		std::copy(std::begin(node.scale), std::end(node.scale), pose.scale);
+		pose.animated = false;
+	}
+	for (const AnimationChannel &channel: animationChannels_)
+	{
+		Pose &pose = poses[channel.node];
+		float *target = channel.path == Scene::AnimationPath::Translation ? pose.translation
+						: channel.path == Scene::AnimationPath::Rotation  ? pose.rotation
+																		  : pose.scale;
+		float value[4];
+		Scene::SampleAnimation(channel.path,
+							   channel.interpolation,
+							   animationTimes_.data() + channel.firstTime,
+							   animationValues_.data() + channel.firstValue,
+							   channel.keyCount,
+							   time,
+							   value);
+		std::copy(value, value + Scene::AnimationPathComponents(channel.path), target);
+		pose.animated = true;
+	}
+
+	// Parents come first, so their world matrices are ready for their children.
+	std::vector<std::array<float, 12>> worlds(animatedNodes_.size());
+	for (size_t i = 0; i < animatedNodes_.size(); ++i)
+	{
+		const AnimatedNode &node = animatedNodes_[i];
+		const Pose &pose = poses[i];
+		float composed[12];
+		if (pose.animated)
+		{
+			Scene::ComposeTRS(pose.translation, pose.rotation, pose.scale, composed);
+		}
+		const float *local = pose.animated ? composed : node.localMatrix;
+		const float *parent = node.parent == kStaticParent ? node.parentMatrix : worlds[node.parent].data();
+		Scene::ComposeAffine(local, parent, worlds[i].data());
+		if (node.instance != UINT32_MAX)
+		{
+			std::copy(worlds[i].begin(), worlds[i].end(), instances[node.instance].worldMatrix);
+		}
+	}
+
+	dynamicTLASMoved_ = !dynamicInstances_.empty();
+	dynamicLightsMoved_ = !dynamicObjectLights_.empty();
 }
 
 void RenderGPUScene::SetEmissionScale(uint32_t emissiveInstance, float scale)
@@ -587,15 +652,10 @@ void RenderGPUScene::TransformDynamicLights()
 
 void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 {
-	dynamicInstances_.clear();
-	dynamicOfInstance_.assign(instances.size(), UINT32_MAX);
-	dynamicRestTransforms_.clear();
-	dynamicRestMirrored_.clear();
 	dynamicObjectLights_.clear();
 	dynamicLightInstance_.clear();
 	dynamicLightsMoved_ = false;
 	dynamicLightsRescaled_ = false;
-	dynamicTLASMoved_ = false;
 	emissiveInstances_.clear();
 
 	const uint32_t lightCount = static_cast<uint32_t>(emissiveLights_.size());
@@ -633,6 +693,7 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 	forEachLight([&](uint32_t instance, uint32_t &) { ++instanceLights[instance]; });
 
 	uint32_t ordinal = 0;
+	uint32_t dynamicEmitters = 0;
 	std::vector<uint32_t> emissiveOfInstance(instances.size(), UINT32_MAX);
 	for (uint32_t instance = 0; instance < static_cast<uint32_t>(instances.size()); ++instance)
 	{
@@ -642,8 +703,8 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 		}
 		emissiveOfInstance[instance] = ordinal;
 		emissiveInstances_.push_back(instance);
-		const bool dynamic = std::find(dynamicEmitterSelection_.begin(), dynamicEmitterSelection_.end(), ordinal) !=
-							 dynamicEmitterSelection_.end();
+		const bool dynamic = dynamicOfInstance_[instance] != UINT32_MAX;
+		dynamicEmitters += dynamic ? 1 : 0;
 		const float *m = instances[instance].worldMatrix;
 		logi("GPUScene: emissive instance {} (scene instance {} at {:.2f}, {:.2f}, {:.2f}): {} triangle light(s), {}",
 			 ordinal,
@@ -653,14 +714,6 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 			 m[11],
 			 instanceLights[instance],
 			 dynamic ? "dynamic" : "static");
-		if (dynamic)
-		{
-			dynamicOfInstance_[instance] = static_cast<uint32_t>(dynamicInstances_.size());
-			dynamicInstances_.push_back(instance);
-			std::array<float, 12> &rest = dynamicRestTransforms_.emplace_back();
-			std::copy(m, m + 12, rest.begin());
-			dynamicRestMirrored_.push_back(Determinant3x3(m) < 0.0f);
-		}
 		++ordinal;
 	}
 	// Every emissive instance at its loaded emission, and each light's instance in the final order.
@@ -671,7 +724,7 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 		lightEmitters_.assign(lightCount, 0);
 		forEachLight([&](uint32_t instance, uint32_t &light) { lightEmitters_[light] = emissiveOfInstance[instance]; });
 	};
-	if (dynamicInstances_.empty())
+	if (dynamicEmitters == 0)
 	{
 		findLightEmitters();
 		return;
@@ -691,10 +744,11 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 	}
 	staticLightCount_ = next;
 
+	// The instances are at rest while the scene loads.
 	std::vector<std::array<float, 12>> objectFromWorld;
-	for (const std::array<float, 12> &rest: dynamicRestTransforms_)
+	for (uint32_t instance: dynamicInstances_)
 	{
-		objectFromWorld.push_back(InvertAffine(rest.data()));
+		objectFromWorld.push_back(InvertAffine(instances[instance].worldMatrix));
 	}
 	for (uint32_t light = 0; light < lightCount; ++light)
 	{
@@ -814,7 +868,8 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene, const std::fil
 		logw("GPUScene: skipped {} primitive(s) missing indices or a required attribute", skippedPrimitives);
 	}
 
-	FillInstances(scene);
+	BuildAnimation(scene, FillInstances(scene));
+	PrepareAnimation();
 	ComputeBounds(scene);
 
 	SceneCacheWriter writer;
@@ -905,6 +960,10 @@ void RenderGPUScene::SerialiseTables(Archive &archive,
 	archive.Table(ommMicromaps_);
 	archive.Table(ommIndices_);
 	archive.Table(ommIndexOffsets_);
+	archive.Table(animatedNodes_);
+	archive.Table(animationChannels_);
+	archive.Table(animationTimes_);
+	archive.Table(animationValues_);
 	archive.Value(boundsMin_);
 	archive.Value(boundsMax_);
 }
@@ -1015,6 +1074,28 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 			return false;
 		}
 	}
+	for (size_t i = 0; i < animatedNodes_.size(); ++i)
+	{
+		const AnimatedNode &node = animatedNodes_[i];
+		if ((node.parent != kStaticParent && node.parent >= i) ||
+			(node.instance != UINT32_MAX && node.instance >= instances.size()))
+		{
+			return false;
+		}
+	}
+	for (const AnimationChannel &channel: animationChannels_)
+	{
+		if (channel.node >= animatedNodes_.size() || channel.path > Scene::AnimationPath::Scale ||
+			channel.interpolation > Scene::AnimationInterpolation::CubicSpline || channel.keyCount == 0 ||
+			static_cast<uint64_t>(channel.firstTime) + channel.keyCount > animationTimes_.size() ||
+			static_cast<uint64_t>(channel.firstValue) + static_cast<uint64_t>(channel.keyCount) *
+																 Scene::AnimationValuesPerKey(channel.interpolation) *
+																 Scene::AnimationPathComponents(channel.path) >
+					animationValues_.size())
+		{
+			return false;
+		}
+	}
 	return !materials.empty() && emissiveLights_.size() == emissiveFluxScales_.size();
 }
 
@@ -1041,6 +1122,10 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 		ommData_.clear();
 		ommMicromaps_.clear();
 		ommIndexOffsets_.clear();
+		animatedNodes_.clear();
+		animationChannels_.clear();
+		animationTimes_.clear();
+		animationValues_.clear();
 		ReleaseStaging();
 		return false;
 	}
@@ -1100,6 +1185,7 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 
 	RemapTextures(materials, emissiveLights_, [&](uint32_t slot) { return descriptorOfSlot[slot]; });
 	UploadMaterials(materials, batch);
+	PrepareAnimation();
 	PartitionDynamicLights(emitters);
 	UploadEmitters(emitters, batch);
 	UploadOpacityMicromapIndices(batch);
@@ -1122,9 +1208,10 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 	return true;
 }
 
-void RenderGPUScene::FillInstances(const Scene::GLTFScene &scene)
+std::vector<uint32_t> RenderGPUScene::FillInstances(const Scene::GLTFScene &scene)
 {
 	instances.clear();
+	std::vector<uint32_t> instanceOfNode(scene.GetInstanceCount(), UINT32_MAX);
 	for (size_t i = 0; i < scene.GetInstanceCount(); ++i)
 	{
 		const Scene::Instance &node = scene.GetInstance(i);
@@ -1137,7 +1224,136 @@ void RenderGPUScene::FillInstances(const Scene::GLTFScene &scene)
 		InstanceGPU instance = {};
 		std::memcpy(instance.worldMatrix, node.GetWorldMatrix(), sizeof(instance.worldMatrix));
 		instance.meshIndex = static_cast<uint32_t>(meshIndex);
+		instanceOfNode[i] = static_cast<uint32_t>(instances.size());
 		instances.push_back(instance);
+	}
+	return instanceOfNode;
+}
+
+void RenderGPUScene::BuildAnimation(const Scene::GLTFScene &scene, const std::vector<uint32_t> &instanceOfNode)
+{
+	animatedNodes_.clear();
+	animationChannels_.clear();
+	animationTimes_.clear();
+	animationValues_.clear();
+
+	// The nodes the channels animate. Those given as a matrix have no parts for a channel to replace.
+	const size_t nodeCount = scene.GetInstanceCount();
+	std::vector<uint8_t> targeted(nodeCount, 0);
+	for (size_t a = 0; a < scene.GetAnimationCount(); ++a)
+	{
+		const Scene::Animation &animation = scene.GetAnimation(a);
+		for (const Scene::AnimationChannel &channel: animation.GetChannels())
+		{
+			const Scene::Instance &node = scene.GetInstance(channel.node);
+			if (node.HasMatrix())
+			{
+				logw("GPUScene: animation '{}' targets node '{}', whose transform is a matrix, so it is left out",
+					 animation.GetName(),
+					 node.GetName());
+				continue;
+			}
+			targeted[channel.node] = 1;
+		}
+	}
+
+	// Depth first from the roots, so the table lists every moving node after its parent. A node moves with
+	// its own channels or a parent's.
+	std::vector<std::vector<uint32_t>> children(nodeCount);
+	std::vector<uint32_t> stack;
+	for (uint32_t n = 0; n < static_cast<uint32_t>(nodeCount); ++n)
+	{
+		const int32_t parent = scene.GetParentIndex(n);
+		if (parent >= 0)
+		{
+			children[parent].push_back(n);
+		}
+		else
+		{
+			stack.push_back(n);
+		}
+	}
+	std::vector<uint32_t> animatedOfNode(nodeCount, UINT32_MAX);
+	while (!stack.empty())
+	{
+		const uint32_t n = stack.back();
+		stack.pop_back();
+		const int32_t parent = scene.GetParentIndex(n);
+		const uint32_t animatedParent = parent >= 0 ? animatedOfNode[parent] : kStaticParent;
+		if (targeted[n] || animatedParent != kStaticParent)
+		{
+			const Scene::Instance &source = scene.GetInstance(n);
+			AnimatedNode &node = animatedNodes_.emplace_back();
+			node.parent = animatedParent;
+			node.instance = instanceOfNode[n];
+			std::copy(source.GetTranslation(), source.GetTranslation() + 3, node.translation);
+			std::copy(source.GetRotation(), source.GetRotation() + 4, node.rotation);
+			std::copy(source.GetScale(), source.GetScale() + 3, node.scale);
+			std::copy(source.GetLocalMatrix(), source.GetLocalMatrix() + 12, node.localMatrix);
+			std::copy(source.GetParentMatrix(), source.GetParentMatrix() + 12, node.parentMatrix);
+			animatedOfNode[n] = static_cast<uint32_t>(animatedNodes_.size() - 1);
+		}
+		stack.insert(stack.end(), children[n].begin(), children[n].end());
+	}
+
+	for (size_t a = 0; a < scene.GetAnimationCount(); ++a)
+	{
+		const Scene::Animation &animation = scene.GetAnimation(a);
+		uint32_t channels = 0;
+		for (const Scene::AnimationChannel &channel: animation.GetChannels())
+		{
+			if (!targeted[channel.node])
+			{
+				continue;
+			}
+			AnimationChannel &entry = animationChannels_.emplace_back();
+			entry.node = animatedOfNode[channel.node];
+			entry.path = channel.path;
+			entry.interpolation = channel.interpolation;
+			entry.keyCount = static_cast<uint32_t>(channel.times.size());
+			entry.firstTime = static_cast<uint32_t>(animationTimes_.size());
+			entry.firstValue = static_cast<uint32_t>(animationValues_.size());
+			animationTimes_.insert(animationTimes_.end(), channel.times.begin(), channel.times.end());
+			animationValues_.insert(animationValues_.end(), channel.values.begin(), channel.values.end());
+			++channels;
+		}
+		logi("GPUScene: animation '{}': {} channel(s), {:.2f} s", animation.GetName(), channels, animation.GetDuration());
+	}
+}
+
+void RenderGPUScene::PrepareAnimation()
+{
+	animationDuration_ = 0.0f;
+	for (const AnimationChannel &channel: animationChannels_)
+	{
+		animationDuration_ = std::max(animationDuration_, animationTimes_[channel.firstTime + channel.keyCount - 1]);
+	}
+
+	dynamicInstances_.clear();
+	dynamicOfInstance_.assign(instances.size(), UINT32_MAX);
+	dynamicRestMirrored_.clear();
+	dynamicLastFrameTransforms_.clear();
+	dynamicTLASMoved_ = false;
+	for (const AnimatedNode &node: animatedNodes_)
+	{
+		if (node.instance == UINT32_MAX)
+		{
+			continue;
+		}
+		dynamicOfInstance_[node.instance] = static_cast<uint32_t>(dynamicInstances_.size());
+		dynamicInstances_.push_back(node.instance);
+		const float *m = instances[node.instance].worldMatrix;
+		dynamicRestMirrored_.push_back(Determinant3x3(m) < 0.0f);
+		std::copy(m, m + 12, dynamicLastFrameTransforms_.emplace_back().begin());
+	}
+
+	if (!animationChannels_.empty())
+	{
+		logi("GPUScene: {} animation channel(s) over {:.2f} s move {} node(s), {} of them instances",
+			 animationChannels_.size(),
+			 animationDuration_,
+			 animatedNodes_.size(),
+			 dynamicInstances_.size());
 	}
 }
 
@@ -1620,7 +1836,7 @@ void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMater
 void RenderGPUScene::UpdateInstances(const Scene::GLTFScene &scene)
 {
 	const size_t previousCount = instances.size();
-	FillInstances(scene);
+	(void) FillInstances(scene);
 	if (instanceBuffer_ != InvalidResourceHandle && instances.size() == previousCount)
 	{
 		renderContext_->UpdateUploadBuffer(instanceBuffer_,
@@ -2168,6 +2384,32 @@ void RenderGPUScene::BuildAccelerationStructures()
 	tlasInstances_ = std::move(tlasInstances);
 	ommTlasInstances_ = anyMicromaps ? std::move(ommTlasInstances) : std::vector<TLASInstance>();
 	omm2StateTlasInstances_ = anyMaskMicromaps ? std::move(omm2StateTlasInstances) : std::vector<TLASInstance>();
+	dynamicTlasInstances_.clear();
+	for (uint32_t i = 0; i < static_cast<uint32_t>(tlasRefs_.size()); ++i)
+	{
+		if (dynamicOfInstance_[tlasRefs_[i].instance] != UINT32_MAX)
+		{
+			dynamicTlasInstances_.push_back(i);
+		}
+	}
+
+	// Every TLAS instance starts where it is, in each frame in flight's buffer.
+	std::vector<float> transforms;
+	transforms.reserve(tlasInstances_.size() * 12);
+	for (const TLASInstance &instance: tlasInstances_)
+	{
+		const float *transform = &instance.transform[0][0];
+		transforms.insert(transforms.end(), transform, transform + 12);
+	}
+	BufferDesc transformDesc = {};
+	transformDesc.sizeInBytes = transforms.size() * sizeof(float);
+	transformDesc.structureByteStride = 4 * sizeof(float);
+	transformDesc.debugName = "Scene_PreviousTransforms";
+	previousTransforms_.resize(renderContext_->GetFramesInFlight());
+	for (ResourceHandle &buffer: previousTransforms_)
+	{
+		buffer = renderContext_->CreateUploadBuffer(transformDesc, ResourceViewType::ShaderResource, transforms.data());
+	}
 	renderContext_->UAVBarrierForAccelerationStructures();
 	tlasSRV_ = renderContext_->GetAccelerationStructureSRV(tlas_);
 	if (anyMicromaps)
@@ -2190,19 +2432,36 @@ void RenderGPUScene::BuildAccelerationStructures()
 
 void RenderGPUScene::UpdateAccelerationStructures()
 {
-	if (!dynamicTLASMoved_ || tlas_ == InvalidAccelerationStructureHandle)
+	if (tlas_ == InvalidAccelerationStructureHandle)
+	{
+		return;
+	}
+
+	// The dynamic instances' transforms that last frame traced go to this frame's buffer, whose other rows
+	// never change, whether they have moved since or not.
+	previousTransformFrame_ = renderContext_->GetCurrentFrameIndex();
+	const ResourceHandle previousTransforms = previousTransforms_[previousTransformFrame_];
+	for (uint32_t i: dynamicTlasInstances_)
+	{
+		float transform[12];
+		Scene::RowMajorToBLASTransform(dynamicLastFrameTransforms_[dynamicOfInstance_[tlasRefs_[i].instance]].data(), transform);
+		renderContext_->UpdateUploadBuffer(previousTransforms, transform, i * sizeof(transform), sizeof(transform));
+	}
+	for (size_t d = 0; d < dynamicInstances_.size(); ++d)
+	{
+		const float *m = instances[dynamicInstances_[d]].worldMatrix;
+		std::copy(m, m + 12, dynamicLastFrameTransforms_[d].begin());
+	}
+
+	if (!dynamicTLASMoved_)
 	{
 		return;
 	}
 	dynamicTLASMoved_ = false;
 
-	for (size_t i = 0; i < tlasRefs_.size(); ++i)
+	for (uint32_t i: dynamicTlasInstances_)
 	{
 		const uint32_t instance = tlasRefs_[i].instance;
-		if (dynamicOfInstance_[instance] == UINT32_MAX)
-		{
-			continue;
-		}
 		float transform[12];
 		Scene::RowMajorToBLASTransform(instances[instance].worldMatrix, transform);
 		std::memcpy(tlasInstances_[i].transform, transform, sizeof(tlasInstances_[i].transform));

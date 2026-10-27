@@ -387,6 +387,16 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::DragFloat("Intensity", &sun.intensity, 0.05f, 0.0f, 1000.0f, "%.2f");
 	}
 
+	if (scene_.HasAnimation() && ImGui::CollapsingHeader("Animation", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		AnimationSettings &animation = settings_.animation;
+		ImGui::Text("%u instance(s) move", scene_.GetDynamicInstanceCount());
+		ImGui::Checkbox("Play", &animation.play);
+		ImGui::SetItemTooltip("Rebuilds the TLAS every frame, and the light tree of the emitters that move");
+		ImGui::SliderFloat("Playback speed", &animation.speed, 0.0f, 4.0f, "%.2fx");
+		ImGui::SliderFloat("Time", &animation.seconds, 0.0f, scene_.GetAnimationDuration(), "%.2f s");
+	}
+
 	if (ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		LightSettings &lights = settings_.lights;
@@ -395,17 +405,11 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::Text("%u static emissive triangle(s), tree built in %.3f ms",
 					scene_.GetStaticLightCount(),
 					scene_.GetStaticLightTreeBuildMs());
-		if (scene_.GetDynamicInstanceCount() > 0)
+		if (dynamicLightCount > 0)
 		{
 			ImGui::Text("%u dynamic emissive triangle(s), tree built in %.3f ms",
 						dynamicLightCount,
 						scene_.GetDynamicLightTreeBuildMs());
-		}
-		if (scene_.GetEmissiveInstanceCount() > 0)
-		{
-			ImGui::Checkbox("Animate emitters", &lights.animate);
-			ImGui::SetItemTooltip("Spin the quad, pulse the sphere and flash the bulbs, which rebuilds the dynamic "
-								  "emitters' light tree and the TLAS every frame");
 		}
 		ImGui::Text("Tree depth: %u max, %.1f average (4-wide)",
 					scene_.GetLightTreeMaxDepth(),

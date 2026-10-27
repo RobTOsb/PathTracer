@@ -31,7 +31,7 @@ struct LightSettings
 	LightSamplingMode sampling = LIGHT_SAMPLING_TREE;
 	// Light tree: path vertices before this bounce (0 = primary hit) walk the tree, later ones select by
 	// flux, which costs one lookup instead of a walk per light sample and per emitter hit's MIS.
-	int treeBounces = 2;
+	int treeBounces = 1;
 	// Light tree: skip the glossy importance for lobes at least this rough (perceptual roughness).
 	bool diffuseOnlyRoughLobes = true;
 	float diffuseOnlyRoughness = 0.7f;
@@ -46,9 +46,16 @@ struct LightSettings
 	int maxLeafLights = 4;
 	// Light tree build: the split cost also weighs how far each side's emitter normals spread.
 	bool orientationSplits = false;
-	// Animates the scene's emitters (AnimateLights in main.cpp): the quad spins, which rebuilds the TLAS,
-	// the sphere pulses and the bulbs flash, and the dynamic emitters' light tree is rebuilt every frame.
-	bool animate = false;
+};
+
+// The scene's glTF animations (RenderGPUScene::Animate), which play together and loop, except in the reference.
+// While they play, the TLAS is rebuilt every frame, and so is the light tree of the emitters they move.
+struct AnimationSettings
+{
+	bool play = true;
+	float speed = 1.0f;
+	// Into the animations: the main loop advances it while they play, and the UI can set it.
+	float seconds = 0.0f;
 };
 
 // Geometric specular antialiasing of the opaque surfaces the camera sees: glossy lobes widen by how much
@@ -142,6 +149,7 @@ struct RenderSettings
 
 	SunSettings sun;
 	LightSettings lights;
+	AnimationSettings animation;
 	SpecularAASettings specularAA;
 	AtmosphereSettings atmosphere;
 	CloudSettings clouds;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Animation.h"
 #include "GPUScene.h"
 #include "RenderContext.h"
 
@@ -61,32 +62,30 @@ public:
 
 	void BuildAccelerationStructures();
 
-	// Picks the emissive scene instances that move, counted in instance order among those with an
-	// emissive primitive (the load logs each one). Their lights go at the end of the light buffer, in a
-	// light tree of their own under the root group's last slot, so moving them rebuilds only that tree.
-	// Call before BuildGPUScene or LoadGPUScene.
-	void SetDynamicEmitters(std::vector<uint32_t> emissiveInstances)
+	// The scene's glTF animations, which play together: whether there are any, and the time of the last key
+	// of any (they loop over it).
+	bool HasAnimation() const
 	{
-		dynamicEmitterSelection_ = std::move(emissiveInstances);
+		return !animationChannels_.empty();
 	}
 
-	// The scene instances SetDynamicEmitters picked.
+	float GetAnimationDuration() const
+	{
+		return animationDuration_;
+	}
+
+	// Poses the animated nodes at this many seconds into the animations. The scene instances they move are
+	// the dynamic ones: their TLAS instances follow at the next UpdateAccelerationStructures and their lights,
+	// which have a light tree of their own under the root group's last slot, at the next UpdateLights.
+	void Animate(float seconds);
+
+	// The scene instances an animation moves, through their own node or a parent.
 	uint32_t GetDynamicInstanceCount() const
 	{
 		return static_cast<uint32_t>(dynamicInstances_.size());
 	}
 
-	// A dynamic instance's world transform at load, a float3x4 in the InstanceGPU layout.
-	const float *GetDynamicInstanceRestTransform(uint32_t dynamicInstance) const
-	{
-		return dynamicRestTransforms_[dynamicInstance].data();
-	}
-
-	// Moves a dynamic instance: its TLAS instances follow at the next UpdateAccelerationStructures and
-	// its lights at the next UpdateLights.
-	void SetDynamicInstanceTransform(uint32_t dynamicInstance, const float (&worldMatrix)[12]);
-
-	// The scene instances with an emissive primitive, numbered as SetDynamicEmitters counts them.
+	// The scene instances with an emissive primitive, numbered in instance order (the load logs each one).
 	uint32_t GetEmissiveInstanceCount() const
 	{
 		return static_cast<uint32_t>(emissiveInstances_.size());
@@ -101,9 +100,17 @@ public:
 
 	void SetEmissionScale(uint32_t emissiveInstance, float scale);
 
-	// Rebuilds the TLASes if a dynamic instance has moved since the last call. Records on the current
-	// frame's graphics command list, so call it after BeginGraphicsCommandList and before any tracing.
+	// Rebuilds the TLASes if a dynamic instance has moved since the last call, and keeps last frame's
+	// transforms for the motion vectors. Records on the current frame's graphics command list, so call it
+	// once per frame after BeginGraphicsCommandList and before any tracing.
 	void UpdateAccelerationStructures();
+
+	// Per TLAS instance (InstanceIndex()), last frame's object-to-world transform as three float4 rows of
+	// the float3x4 that ObjectToWorld3x4() gives, for the motion vectors of moving geometry.
+	ResourceHandle GetPreviousTransformBuffer() const
+	{
+		return previousTransforms_.empty() ? InvalidResourceHandle : previousTransforms_[previousTransformFrame_];
+	}
 
 	// Builds the static emitters' light tree on the first call and again whenever the settings change,
 	// and the dynamic emitters' tree then too and whenever one of them has moved; otherwise it does
@@ -287,12 +294,38 @@ private:
 	// The TLAS instances in the order BuildAccelerationStructures adds them, which is their InstanceIndex().
 	std::vector<TLASInstanceRef> EnumerateTLASInstances() const;
 
+	// A node an animation moves, through its own channels or a parent's. The table lists parents before
+	// their children.
+	struct AnimatedNode
+	{
+		uint32_t parent; // into animatedNodes_, or kStaticParent for a parent that does not move
+		uint32_t instance; // into instances, or UINT32_MAX for a node without a mesh
+		// The local transform at rest, in parts for the channels to replace, and whole for nodes without any.
+		float translation[3];
+		float rotation[4]; // quaternion xyzw
+		float scale[3];
+		float localMatrix[12];
+		float parentMatrix[12]; // the world matrix of a parent that does not move, identity for a root
+	};
+	static constexpr uint32_t kStaticParent = UINT32_MAX;
+
+	// A glTF animation channel, its keys in animationTimes_ and animationValues_ (see Scene::SampleAnimation).
+	struct AnimationChannel
+	{
+		uint32_t node; // into animatedNodes_
+		Scene::AnimationPath path;
+		Scene::AnimationInterpolation interpolation;
+		uint32_t keyCount;
+		uint32_t firstTime;
+		uint32_t firstValue;
+	};
+
 	void UploadStreams(UploadBatchHandle batch);
 	void BuildMaterials(const Scene::GLTFScene &scene, UploadBatchHandle &batch, std::vector<GpuMaterial> &materials);
 	void UploadMaterials(const std::vector<GpuMaterial> &materials, UploadBatchHandle batch);
 	// Fills the emissive lights and returns the emitter buffer's contents.
 	std::vector<uint32_t> CollectEmitters(const Scene::GLTFScene &scene, const std::vector<GpuMaterial> &materials);
-	// Moves the lights of the instances dynamicEmitterSelection_ picks to the end of the light buffer,
+	// Moves the lights of the dynamic instances to the end of the light buffer,
 	// keeping the order within each part, and renumbers them in the emitter buffer's contents. Also numbers
 	// the emissive instances and resets their emission scales.
 	void PartitionDynamicLights(std::vector<uint32_t> &emitters);
@@ -326,7 +359,12 @@ private:
 	ResourceHandle UploadStream(
 			const void *data, uint64_t sizeInBytes, uint32_t stride, const char *debugName, UploadBatchHandle batch);
 	void ComputeBounds(const Scene::GLTFScene &scene);
-	void FillInstances(const Scene::GLTFScene &scene);
+	// Returns each node's scene instance, UINT32_MAX for those without a mesh.
+	std::vector<uint32_t> FillInstances(const Scene::GLTFScene &scene);
+	// Fills the animation tables from the glTF's animations.
+	void BuildAnimation(const Scene::GLTFScene &scene, const std::vector<uint32_t> &instanceOfNode);
+	// From the animation tables, their duration and the dynamic instances. Call before PartitionDynamicLights.
+	void PrepareAnimation();
 	void DestroyLights();
 
 	RenderContext *renderContext_ = nullptr;
@@ -394,12 +432,19 @@ private:
 	std::vector<uint32_t> lightEmitters_; // per light, its emissive instance
 	bool emissionScalesChanged_ = false;
 
-	// Emissive instances that move (SetDynamicEmitters), and the lights of their triangles.
-	std::vector<uint32_t> dynamicEmitterSelection_;
+	// The animations, kept in the scene cache.
+	std::vector<AnimatedNode> animatedNodes_;
+	std::vector<AnimationChannel> animationChannels_;
+	std::vector<float> animationTimes_;
+	std::vector<float> animationValues_;
+	float animationDuration_ = 0.0f;
+
+	// The scene instances that move, and the lights of their triangles.
 	std::vector<uint32_t> dynamicInstances_; // into instances
 	std::vector<uint32_t> dynamicOfInstance_; // per scene instance, into dynamicInstances_ or UINT32_MAX
-	std::vector<std::array<float, 12>> dynamicRestTransforms_;
 	std::vector<uint8_t> dynamicRestMirrored_; // the rest transform mirrors, so CollectEmitters swapped corners
+	// Per dynamic instance, its world transform when UpdateAccelerationStructures last ran.
+	std::vector<std::array<float, 12>> dynamicLastFrameTransforms_;
 	std::vector<GpuLight> dynamicObjectLights_; // per dynamic light, its triangle in object space
 	std::vector<uint32_t> dynamicLightInstance_; // per dynamic light, into dynamicInstances_
 	bool dynamicLightsMoved_ = false;
@@ -432,6 +477,10 @@ private:
 	std::vector<TLASInstance> tlasInstances_;
 	std::vector<TLASInstance> ommTlasInstances_;
 	std::vector<TLASInstance> omm2StateTlasInstances_;
+	std::vector<uint32_t> dynamicTlasInstances_; // into tlasRefs_, those of the dynamic instances
+	// GetPreviousTransformBuffer's, one per frame in flight. Only the dynamic instances' rows change.
+	std::vector<ResourceHandle> previousTransforms_;
+	uint32_t previousTransformFrame_ = 0;
 	AccelerationStructureHandle tlas_ = InvalidAccelerationStructureHandle;
 	ResourceHandle tlasSRV_ = InvalidResourceHandle;
 

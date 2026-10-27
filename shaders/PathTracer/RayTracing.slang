@@ -21,6 +21,9 @@ struct HitInfo
     // vertex normal), as a 2x2 matrix in the frame (T, cross(N, T)): see NormalDerivative. DLSS_RR only.
     float4 shape;
     float smoothLift;
+    // Where the hit point was last frame less where it is, for the motion vectors of moving geometry. DLSS_RR
+    // hits that compute the shape only.
+    float3 motion;
 };
 
 // The change of N for a small move dP of the hit point along its triangle.
@@ -73,6 +76,9 @@ struct HitPayload
     float2 uv;
     uint2 uvGradients; // half4
     uint2 shape; // half4: HitInfo::shape; on the way in, x nonzero to compute it
+#ifdef DLSS_RR
+    uint2 motion; // half3: HitInfo::motion, computed along with the shape
+#endif
 };
 
 static const uint TANGENT_SIGN_BIT = 0x80000000u;
@@ -262,8 +268,10 @@ HitInfo UnpackHit(HitPayload payload, float3 origin, float3 dir)
     hit.emitter = payload.emitter;
 #ifdef DLSS_RR
     hit.shape = float4(UnpackHalf2(payload.shape.x), UnpackHalf2(payload.shape.y));
+    hit.motion = float3(UnpackHalf2(payload.motion.x), UnpackHalf2(payload.motion.y).x);
 #else
     hit.shape = float4(0.0, 0.0, 0.0, 0.0);
+    hit.motion = float3(0.0, 0.0, 0.0);
 #endif
     hit.emission = float3(0.0, 0.0, 0.0);
     hit.Ns = hit.N; // LoadMaterial applies the normal map

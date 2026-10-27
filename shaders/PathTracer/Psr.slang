@@ -337,8 +337,8 @@ bool ReplacePrimarySurface(SpecularChain chain, OpenPBRBaseParams surface, OpenP
     if (hasMotion ? minification > g_Frame.psrMaxMinification
                   : chain.pixelDeflection * chain.length > PSR_MAX_VIRTUAL_DEPTH_JITTER * pathLength)
         return false;
-    guides.hasChainMotion = hasMotion;
-    guides.chainMotion = motion;
+    guides.hasMotion = hasMotion;
+    guides.motion = motion;
 
     // The chain's transform is a rotation or reflection, which preserves the angle between wo and the
     // normal, so the reflectance seen in virtual space is the real one.

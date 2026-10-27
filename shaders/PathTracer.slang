@@ -489,7 +489,12 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
             // Until the path continues with a specular reflection: no reflection data, or last frame's.
             camera.guides.specularHitDistance = InitialSpecularHitDistance(camera.guides.roughness);
             camera.guides.curvature = ViewedCurvature(hit, wo);
-            camera.guides.hasChainMotion = false;
+            // A moving object's point was elsewhere last frame, which RayGen's camera motion leaves out.
+            camera.guides.hasMotion = any(hit.motion != 0.0);
+            if (camera.guides.hasMotion)
+                camera.guides.motion = CalculateMotionVector(float4(hit.position, 1.0), float4(hit.position + hit.motion, 1.0),
+                                                             g_Frame.prevViewProj, g_Frame.viewProj,
+                                                             float2(DispatchRaysDimensions().xy));
             ReflectanceGuides(mat, ctx, wo, camera.guides);
             camera.guides.diffuseAlbedo *= seenScale;
             camera.guides.specularAlbedo *= seenScale;
@@ -852,10 +857,11 @@ void RayGen()
     // Last frame's specular hit distance, loaded first so its latency hides behind the guides below.
     float heldHitDistance = g_SpecularHitDistance[pixel];
 
-    // Static scene, so the primary point was in the same place last frame and only the camera
-    // moved. CalculateMotionVector works in NDC, whose +y is up in D3D, while DLSS wants +y down.
-    float2 motion = guides.hasChainMotion
-                    ? guides.chainMotion
+    // Unless the guides have a motion vector of their own (a moving object, a curved PSR chain), the primary
+    // point was in the same place last frame and only the camera moved. CalculateMotionVector works in NDC,
+    // whose +y is up in D3D, while DLSS wants +y down.
+    float2 motion = guides.hasMotion
+                    ? guides.motion
                     : CalculateMotionVector(guides.position, guides.position, g_Frame.prevViewProj, g_Frame.viewProj, float2(dims));
     motion.y = -motion.y;
 
@@ -974,6 +980,14 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     float3 dNdB = w1 * dot(g1, B) + w2 * dot(g2, B);
     float4 shape = clamp(float4(dot(T, dNdT), dot(T, dNdB), dot(B, dNdT), dot(B, dNdB)), -HALF_MAX, HALF_MAX);
     payload.shape = uint2(PackHalf2(shape.xy), PackHalf2(shape.zw));
+
+    // The same point of the object under last frame's transform. Both transforms take the same steps, so a
+    // static instance's motion is zero.
+    float4 objectPosition = float4(p0 + (p1 - p0) * bary.y + (p2 - p0) * bary.z, 1.0);
+    uint row = 3 * InstanceIndex();
+    float3x4 previousToWorld = float3x4(g_PreviousTransforms[row], g_PreviousTransforms[row + 1], g_PreviousTransforms[row + 2]);
+    float3 motion = clamp(mul(previousToWorld, objectPosition) - mul(ObjectToWorld3x4(), objectPosition), -HALF_MAX, HALF_MAX);
+    payload.motion = uint2(PackHalf2(motion.xy), PackHalf2(float2(motion.z, 0.0)));
 #else
     payload.shape = uint2(0, 0);
 #endif

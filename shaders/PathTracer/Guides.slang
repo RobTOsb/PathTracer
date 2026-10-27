@@ -22,10 +22,11 @@ struct PrimaryGuides
     float4 reflector;
     float reflectorRoughness;
     float curvature; // the reflector's signed mean curvature as the camera sees it, positive for a convex mirror
-    // Motion vector of the surface a curved chain of mirrors and glass ends on (see ChainMotionVector),
-    // for the virtual position's own reprojection, which only flat mirrors move like.
-    float2 chainMotion;
-    bool hasChainMotion;
+    // The surface's own motion vector, where it does not move like a static point at position would: a
+    // moving object's, or that of the surface a curved chain of mirrors and glass ends on (see
+    // ChainMotionVector), whose virtual position only flat mirrors move like.
+    float2 motion;
+    bool hasMotion;
     // The PSR chain broke by chance this frame (PsrChainBrokenByChance), so RayGen keeps last frame's guides.
     bool hold;
 };
@@ -42,8 +43,8 @@ PrimaryGuides DefaultGuides(float3 dir)
     g.reflector = g.position;
     g.reflectorRoughness = 0.0;
     g.curvature = 0.0;
-    g.chainMotion = float2(0.0, 0.0);
-    g.hasChainMotion = false;
+    g.motion = float2(0.0, 0.0);
+    g.hasMotion = false;
     g.hold = false;
     return g;
 }
