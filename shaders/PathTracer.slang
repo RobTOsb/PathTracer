@@ -154,7 +154,7 @@ struct SurfaceOutcome
 // material, whose specialisation drops every lobe but the base's and so holds far fewer registers.
 // arrivedExtinction is the medium the segment crossed, segmentExtinction comes back as the next one's.
 SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 origin, inout float3 dir, uint bounce,
-                                               uint rayFlags, bool fromCamera, bool chainActive, bool hitDistanceArrived,
+                                               bool fromCamera, bool chainActive, bool hitDistanceArrived,
                                                bool paneHitArrived, bool smoothSegment, bool firstSegment, bool cameraSegment,
                                                float3 arrivedExtinction, inout uint flags, inout uint rng, inout float3 radiance,
                                                inout float3 throughput, inout float prevBsdfPdf,
@@ -591,7 +591,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
             SubsurfaceExit exit = (SubsurfaceExit)0;
             if (dot(dir, hit.Ng) < 0.0)
                 radiance += ClampFirefly(SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput,
-                                                           rayFlags, bounce + 1, rng, exit),
+                                                           bounce + 1, rng, exit),
                                          false, visible);
             continuePath = exit.valid;
             origin = exit.origin;
@@ -608,7 +608,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         // As far along as the light was from the hit point.
         float3 shadowOrigin = opaque ? SmoothReflectionOrigin(hit, wo, ls.direction) : OffsetRay(hit.position, hit.Ng, ls.direction);
         radiance += neeContribution * TraceShadowRay(shadowOrigin, ls.direction,
-                                                     ls.distance - dot(shadowOrigin - hit.position, ls.direction), rayFlags);
+                                                     ls.distance - dot(shadowOrigin - hit.position, ls.direction));
     }
 
     SurfaceOutcome outcome;
@@ -673,7 +673,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 // whatever lies beyond. Rays that leave the scene cross atmosphereMissDistance of it.
                 float segmentLength = hit.hit ? hit.t : g_Frame.atmosphereMissDistance;
                 if (bounce < g_Frame.atmosphereInScatterSegments)
-                    radiance += ClampFirefly(throughput * AtmosphereInScattering(origin, dir, segmentLength, rayFlags, rng),
+                    radiance += ClampFirefly(throughput * AtmosphereInScattering(origin, dir, segmentLength, rng),
                                              SeenSegment(flags, fromCamera, chainActive), DirectSegment(flags, fromCamera, chainActive));
                 throughput *= AtmosphereTransmittance(segmentLength);
             }
@@ -718,11 +718,11 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             // fewer registers. SER orders the hits by material, so a wave mostly takes just one of the two.
             SurfaceOutcome outcome;
             if (IsSimpleMaterial(PayloadMaterialIndex(payload.materialId)))
-                outcome = ShadeSurface<true>(payload, origin, dir, bounce, rayFlags, fromCamera, chainActive, hitDistanceArrived,
+                outcome = ShadeSurface<true>(payload, origin, dir, bounce, fromCamera, chainActive, hitDistanceArrived,
                                              paneHitArrived, smoothSegment, firstSegment, cameraSegment, medium.xyz, flags, rng,
                                              radiance, throughput, prevBsdfPdf, prevVertex, cone, segmentExtinction, rrInvScale);
             else
-                outcome = ShadeSurface<false>(payload, origin, dir, bounce, rayFlags, fromCamera, chainActive, hitDistanceArrived,
+                outcome = ShadeSurface<false>(payload, origin, dir, bounce, fromCamera, chainActive, hitDistanceArrived,
                                               paneHitArrived, smoothSegment, firstSegment, cameraSegment, medium.xyz, flags, rng,
                                               radiance, throughput, prevBsdfPdf, prevVertex, cone, segmentExtinction, rrInvScale);
 

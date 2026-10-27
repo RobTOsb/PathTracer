@@ -32,15 +32,18 @@ namespace
 	constexpr float kOpacityMicromapTargetEdge = 3.0f;
 	// BLEND_MIN_OPACITY in PathTracer/Materials.slang: the alpha below which a blended surface is cut.
 	constexpr float kBlendMinOpacity = 1.0f / 255.0f;
+	constexpr float kBlendShadowOpacity = 0.5f;
 	// D3D12_RAYTRACING_OPACITY_MICROMAP_STATE, two bits per micro-triangle in 4-state micromaps.
 	constexpr uint8_t kMicroTriangleTransparent = 0;
 	constexpr uint8_t kMicroTriangleOpaque = 1;
+	constexpr uint8_t kMicroTriangleUnknownTransparent = 2;
 	constexpr uint8_t kMicroTriangleUnknownOpaque = 3;
 
-	// A blended surface's micromap from its two cuts, in place of the first: transparent where nothing of
+	// A blended surface's micromap from its three cuts, in place of the first: transparent where nothing of
 	// it is there, opaque where all of it is (null opaque: nowhere), unknown between, for the any-hit
-	// shaders to blend. The states pair up two bits at a time, whatever order they are in.
-	void CombineBlendMicromap(uint8_t *there, const uint8_t *opaque, size_t size)
+	// shaders to blend. An unknown one leans the way its shadow cut does (null shadow: transparent), which is
+	// what 2-state shadow rays take it as. The states pair up two bits at a time, whatever order they are in.
+	void CombineBlendMicromap(uint8_t *there, const uint8_t *opaque, const uint8_t *shadow, size_t size)
 	{
 		for (size_t i = 0; i < size; ++i)
 		{
@@ -49,9 +52,12 @@ namespace
 			{
 				const uint8_t thereState = (there[i] >> shift) & 3;
 				const uint8_t opaqueState = opaque != nullptr ? (opaque[i] >> shift) & 3 : kMicroTriangleTransparent;
+				// The low bit is set for opaque and unknown-opaque alike.
+				const bool shadowOpaque = shadow != nullptr && ((shadow[i] >> shift) & 1) != 0;
 				const uint8_t state = thereState == kMicroTriangleTransparent ? kMicroTriangleTransparent
 									  : opaqueState == kMicroTriangleOpaque	  ? kMicroTriangleOpaque
-																			  : kMicroTriangleUnknownOpaque;
+									  : shadowOpaque						  ? kMicroTriangleUnknownOpaque
+																			  : kMicroTriangleUnknownTransparent;
 				combined |= static_cast<uint8_t>(state << shift);
 			}
 			there[i] = combined;
@@ -1816,14 +1822,15 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 	};
 
 	// Each micromap before compaction: its level and offset, and the triangle and plane it comes from.
-	// A blended surface's is cut twice: plane where nothing of it is there, opaquePlane (null if it never
-	// is) where all of it is, see CombineBlendMicromap. It never reads them in 2-state mode
-	// (MaterialGeometryFlags::opacityMicromap2State).
+	// A blended surface's is cut three times: plane where nothing of it is there, opaquePlane (null if it
+	// never is) where all of it is and shadowPlane (null if it never reaches it) at kBlendShadowOpacity, see
+	// CombineBlendMicromap. Only shadow rays read it in 2-state mode (MaterialGeometryFlags::opacityMicromap2State).
 	struct Entry
 	{
 		float uv[3][2];
 		const AlphaPlane *plane;
 		const AlphaPlane *opaquePlane;
+		const AlphaPlane *shadowPlane;
 		bool blended;
 	};
 	std::vector<uint8_t> levels;
@@ -1881,6 +1888,9 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 		const AlphaPlane *plane = planeFor(desc.materialIndex, *texture, cutoff / factor);
 		const AlphaPlane *opaquePlane =
 				blended && factor >= 1.0f ? planeFor(desc.materialIndex, *texture, 1.0f / factor) : nullptr;
+		const AlphaPlane *shadowPlane = blended && factor >= kBlendShadowOpacity
+												? planeFor(desc.materialIndex, *texture, kBlendShadowOpacity / factor)
+												: nullptr;
 
 		// One micromap per distinct UV triangle, at a level for its texel area.
 		const GpuVertex *vertices = &vertices_[desc.vertexOffset];
@@ -1916,6 +1926,7 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 			}
 			entry.plane = plane;
 			entry.opaquePlane = opaquePlane;
+			entry.shadowPlane = shadowPlane;
 			entry.blended = blended;
 		}
 		for (int index: primitiveIndices)
@@ -1955,23 +1966,33 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 						  return;
 					  }
 					  const size_t size = meshopt_opacityMapEntrySize(levels[e], kOpacityMicromapStates);
-					  std::vector<uint8_t> opaque;
-					  if (entry.opaquePlane != nullptr)
+					  auto rasterise = [&](const AlphaPlane *plane, std::vector<uint8_t> &states)
 					  {
-						  opaque.resize(size);
-						  meshopt_opacityMapRasterize(opaque.data(),
+						  if (plane == nullptr)
+						  {
+							  return;
+						  }
+						  states.resize(size);
+						  meshopt_opacityMapRasterize(states.data(),
 													  levels[e],
 													  kOpacityMicromapStates,
 													  entry.uv[0],
 													  entry.uv[1],
 													  entry.uv[2],
-													  entry.opaquePlane->data,
-													  entry.opaquePlane->stride,
-													  entry.opaquePlane->pitch,
-													  entry.opaquePlane->width,
-													  entry.opaquePlane->height);
-					  }
-					  CombineBlendMicromap(&data[offsets[e]], opaque.empty() ? nullptr : opaque.data(), size);
+													  plane->data,
+													  plane->stride,
+													  plane->pitch,
+													  plane->width,
+													  plane->height);
+					  };
+					  std::vector<uint8_t> opaque;
+					  std::vector<uint8_t> shadow;
+					  rasterise(entry.opaquePlane, opaque);
+					  rasterise(entry.shadowPlane, shadow);
+					  CombineBlendMicromap(&data[offsets[e]],
+										   opaque.empty() ? nullptr : opaque.data(),
+										   shadow.empty() ? nullptr : shadow.data(),
+										   size);
 				  });
 
 	// Across the whole scene: one copy of each distinct micromap, and special indices for those in one state.

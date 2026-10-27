@@ -110,6 +110,10 @@ bool IsSimpleMaterial(uint index)
     return (g_Materials[index].emissiveFlags.y & GPU_MATERIAL_SIMPLE) != 0;
 }
 
+// TEMPORARY test: every blended material is read as a mask cut at 0.5, the cut its micromaps' unknown
+// micro-triangles already lean by (kBlendShadowOpacity), so the baked scene cache is unchanged.
+static const bool FORCE_BLEND_AS_MASK = false;
+
 // UnpackGpuMaterial's shader side. Fields the caller does not read are never loaded or converted.
 MaterialData LoadGpuMaterial(uint index)
 {
@@ -176,6 +180,11 @@ MaterialData LoadGpuMaterial(uint index)
     m.specularWeight = specularColourWeight1.y;
     m.specularTexture = p.specularTexture;
     m.specularColourTexture = p.specularColourTexture;
+    if (FORCE_BLEND_AS_MASK && m.alphaMode == ALPHA_MODE_BLEND)
+    {
+        m.alphaMode = uint(ALPHA_MODE_MASK);
+        m.alphaCutoff = 0.5;
+    }
     return m;
 }
 

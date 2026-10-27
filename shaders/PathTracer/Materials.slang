@@ -457,6 +457,15 @@ float AlphaCutoff(MaterialData material)
     return material.alphaMode == ALPHA_MODE_BLEND ? BLEND_MIN_OPACITY : 0.0;
 }
 
+static const float BLEND_SHADOW_OPACITY = 0.5;
+
+float ShadowAlphaCutoff(MaterialData material)
+{
+    if (material.alphaMode == ALPHA_MODE_BLEND && material.albedoTexture != INVALIDDESCRIPTORHANDLE)
+        return BLEND_SHADOW_OPACITY;
+    return AlphaCutoff(material);
+}
+
 // How much of a blended surface is there at the hit, its alpha filtered over a ray cone coneWidth wide as
 // LoadMaterial's textures are; 1 for any other.
 float LoadOpacity(HitInfo hit, float coneWidth, bool anisotropic)
@@ -511,8 +520,9 @@ float3 PassThroughTransmittance(MaterialData material, float2 uv, float3 baseCol
     return ThinDeltaTransmittance(p, faceCosine);
 }
 
-// What a candidate triangle lets a shadow ray along dir through: pass-through surfaces some, blended ones
-// what of them is not there, anything else nothing. False for a cut-out, which the ray ignores.
+// What a candidate triangle lets a shadow ray along dir through: pass-through surfaces some, blended ones of a
+// single alpha what of them is not there, anything else nothing. False for a cut-out (ShadowAlphaCutoff), which
+// the ray ignores.
 bool ShadowCandidateTransmittance(PrimitiveDesc prim, uint primitiveIndex, float2 barycentrics, float3x3 linearToWorld,
                                   float3 dir, out float3 transmitted)
 {
@@ -522,13 +532,13 @@ bool ShadowCandidateTransmittance(PrimitiveDesc prim, uint primitiveIndex, float
     float2 uv = InterpolateTexCoord(tri, Barycentrics(barycentrics));
     float4 albedo = LoadBaseColourAlpha(material, uv);
 
-    if (albedo.a < AlphaCutoff(material))
+    if (albedo.a < ShadowAlphaCutoff(material))
         return false;
 
     if ((material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
         transmitted = PassThroughTransmittance(material, uv, albedo.rgb, FaceCosine(tri, linearToWorld, dir));
     // The surface at its opacity, as the path's straight-through lobe has it.
-    if (material.alphaMode == ALPHA_MODE_BLEND)
+    if (material.alphaMode == ALPHA_MODE_BLEND && material.albedoTexture == INVALIDDESCRIPTORHANDLE)
     {
         float opacity = saturate(albedo.a);
         transmitted = transmitted * opacity + (1.0 - opacity);

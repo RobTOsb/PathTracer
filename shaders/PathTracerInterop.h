@@ -80,8 +80,8 @@ struct FrameConstants
 	uint glassReflectionSplits;
 	float subsurfaceRadiusScale; // multiplies every material's subsurface radius
 
-	// Opacity micromaps (OPACITY_MICROMAPS permutation only): path vertices from this bounce on (0 = the
-	// camera ray) trace the TLAS at opacityMicromap2StateScene, whose masks take their micromaps' unknown
+	// Opacity micromaps (OPACITY_MICROMAPS permutation only): path rays from this bounce on (0 = the
+	// camera ray; shadow rays are always 2-state) trace the TLAS at opacityMicromap2StateScene, whose masks take their micromaps' unknown
 	// micro-triangles as opaque or transparent instead of running the alpha test. UINT_MAX = never.
 	uint opacityMicromap2StateBounce;
 	// LIGHT_SAMPLING_TREE: path vertices before this bounce (0 = the primary hit) select lights with the
@@ -133,7 +133,8 @@ struct FrameConstants
 	// their count with glassReflectionSplits. Past them a blended surface is there or not by chance.
 	uint blendLayerSplits;
 	// OPACITY_MICROMAPS: bindless index of that TLAS. Blended surfaces keep 4-state micromaps in it, since a ray
-	// flag (RAY_FLAG_FORCE_OMM_2_STATE) would force 2-state on them too, which their shadows cannot take.
+	// flag (RAY_FLAG_FORCE_OMM_2_STATE) would force 2-state on them too, which camera and bounce rays cannot take.
+	// Shadow rays use that flag on every bounce and trace the scene TLAS instead.
 	uint opacityMicromap2StateScene;
 };
 

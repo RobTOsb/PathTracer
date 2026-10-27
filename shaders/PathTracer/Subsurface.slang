@@ -198,7 +198,7 @@ struct SubsurfaceExit
 // LOBE_SUBSURFACE there into dirIn with the given throughput. exit is how the path goes on, from path
 // vertex exitBounce, which decides how the exits select lights.
 float3 SubsurfaceScatter(OpenPBRBaseParams mat, float3 position, float3 Ng, float3 N, uint materialIndex, float3 dirIn,
-                         float3 throughput, uint shadowRayFlags, uint exitBounce, inout uint rng, out SubsurfaceExit exit)
+                         float3 throughput, uint exitBounce, inout uint rng, out SubsurfaceExit exit)
 {
     SubsurfaceMedium m = GetSubsurfaceMedium(mat);
     uint components = g_Frame.subsurfaceComponents;
@@ -295,7 +295,7 @@ float3 SubsurfaceScatter(OpenPBRBaseParams mat, float3 position, float3 Ng, floa
         {
             float w = ls.lightSamplingOnly ? 1.0 : PowerHeuristic(ls.pdf, cosLight / PI);
             float3 contribution = weight * ls.radiance * AtmosphereTransmittance(ls.distance) * (cosLight / PI * w / ls.pdf);
-            radiance += contribution * CastShadowRay(hitPosition, hit.Ng, ls.direction, ls.distance, shadowRayFlags);
+            radiance += contribution * CastShadowRay(hitPosition, hit.Ng, ls.direction, ls.distance);
         }
 
         // Weighted reservoir pick of the exit the path leaves by, in proportion to its weight's luminance.

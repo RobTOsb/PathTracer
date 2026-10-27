@@ -125,7 +125,7 @@ float3 AtmosphereTransmittance(float distance)
 // Sunlight the air scatters towards origin along a segment, estimated at one distance along it. The
 // single scattering is shadowed by a ray towards the sun, the LUT's multiple scattering by one in a
 // random direction.
-float3 AtmosphereInScattering(float3 origin, float3 dir, float segmentLength, uint shadowRayFlags, inout uint rng)
+float3 AtmosphereInScattering(float3 origin, float3 dir, float segmentLength, inout uint rng)
 {
     float3 sigmaT = g_Frame.atmosphereExtinction;
     float sigmaMean = (sigmaT.x + sigmaT.y + sigmaT.z) * (1.0 / 3.0);
@@ -158,7 +158,7 @@ float3 AtmosphereInScattering(float3 origin, float3 dir, float segmentLength, ui
         // directions that reach it lights the point, estimated by one uniform direction on the sphere
         // (a cone of 1 - cos = 2).
         float2 v = Rand3(rng).xy;
-        inScattered *= TraceShadowRay(origin + dir * s, SampleUniformCone(float3(0.0, 1.0, 0.0), 2.0, v), FLT_MAX, shadowRayFlags);
+        inScattered *= TraceShadowRay(origin + dir * s, SampleUniformCone(float3(0.0, 1.0, 0.0), 2.0, v), FLT_MAX);
     }
     float3 sunTransmittance = SunTransmittance();
     if (any(sunTransmittance > 0.0))
@@ -171,7 +171,7 @@ float3 AtmosphereInScattering(float3 origin, float3 dir, float segmentLength, ui
         {
             // Towards a point on the disc, so the light shafts get the sun's penumbrae.
             float3 sunDir = SunIsDelta() ? g_Frame.sunDirection : SampleUniformCone(g_Frame.sunDirection, g_Frame.sunOneMinusCosMax, u.yz);
-            visibility = TraceShadowRay(origin + dir * s, sunDir, FLT_MAX, shadowRayFlags);
+            visibility = TraceShadowRay(origin + dir * s, sunDir, FLT_MAX);
         }
         inScattered += sunTransmittance * visibility * CloudShadow(origin + dir * s) * phaseScattering;
     }

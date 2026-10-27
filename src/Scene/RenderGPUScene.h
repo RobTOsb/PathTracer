@@ -32,7 +32,8 @@ struct MaterialGeometryFlags
 		// Shadow rays multiply in what these let through, once per triangle.
 		noDuplicateAnyHit = passThrough || material.alphaMode == ALPHA_MODE_BLEND;
 		// A mask's unknown micro-triangles may be taken as opaque or transparent. A blended surface's are
-		// partly there, which only its any-hit shaders get right.
+		// partly there, which only its any-hit shaders get right for camera and bounce rays (shadow rays force
+		// 2-state on every micromap, see TraceShadowRay).
 		opacityMicromap2State = material.alphaMode == ALPHA_MODE_MASK;
 	}
 

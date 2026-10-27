@@ -32,7 +32,8 @@
 // 19: KHR_materials_specular, GpuMaterial 144 bytes.
 // 20: alpha-blended primitives get no opacity micromaps (they were baked as masks at half their alpha).
 // 21: alpha-blended primitives get micromaps again: transparent where alpha < 1/255, unknown where partly there.
-constexpr uint32_t kSceneCacheVersion = 21;
+// 22: a blended surface's unknown micro-triangles lean the way its alpha cut at 0.5 does, for 2-state shadow rays.
+constexpr uint32_t kSceneCacheVersion = 22;
 
 struct SceneCacheTexture
 {

@@ -577,7 +577,8 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 						 8,
 						 settings_.opacityMicromap2StateBounce < 0 ? "never" : "%d");
 		ImGui::SetItemTooltip("Rays from path vertices at this bounce on (0 = camera rays) read the masks' micromaps "
-							  "in 2-state mode and skip their alpha test entirely. Blended surfaces keep theirs");
+							  "in 2-state mode and skip their alpha test entirely. Blended surfaces keep theirs. Shadow "
+							  "rays always read every micromap in 2-state mode");
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 		if (!micromaps)

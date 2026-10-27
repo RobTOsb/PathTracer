@@ -5,8 +5,14 @@ import PathTracer.Math;
 import PathTracer.RayTracing;
 import PathTracer.Resources;
 
-// Visibility of the light from 0 (occluded) to 1 (unoccluded) per channel. rayFlags: OpacityMicromapRayFlags.
-float3 TraceShadowRay(float3 origin, float3 directionToLight, float tracingDistance, uint rayFlags)
+#ifdef OPACITY_MICROMAPS
+static const uint SHADOW_RAY_FLAGS = RAY_FLAG_FORCE_OMM_2_STATE;
+#else
+static const uint SHADOW_RAY_FLAGS = RAY_FLAG_NONE;
+#endif
+
+// Visibility of the light from 0 (occluded) to 1 (unoccluded) per channel.
+float3 TraceShadowRay(float3 origin, float3 directionToLight, float tracingDistance)
 {
     RayDesc ray;
     ray.Origin = origin;
@@ -17,7 +23,7 @@ float3 TraceShadowRay(float3 origin, float3 directionToLight, float tracingDista
 #ifdef INLINE_SHADOWS
     // Opaque triangles commit themselves and end the search; the rest come here as ShadowAnyHit would.
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
-    query.TraceRayInline(SceneFor(rayFlags), RayFlags(rayFlags), 0xFF, ray);
+    query.TraceRayInline(g_Scene, SHADOW_RAY_FLAGS, 0xFF, ray);
     float3 visibility = float3(1.0, 1.0, 1.0);
     while (query.Proceed())
     {
@@ -35,7 +41,7 @@ float3 TraceShadowRay(float3 origin, float3 directionToLight, float tracingDista
     ShadowRayPayload payload;
     payload.visibility = float3(1.0f, 1.0f, 1.0f);
 
-    TraceRay(SceneFor(rayFlags), RayFlags(rayFlags) | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX,
+    TraceRay(g_Scene, SHADOW_RAY_FLAGS | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX,
              ray, payload);
 
     return payload.visibility;
@@ -44,9 +50,7 @@ float3 TraceShadowRay(float3 origin, float3 directionToLight, float tracingDista
 
 // Shadow ray from a surface, offset to whichever side the light is on (below it for transmission).
 // The caller already skips back-facing light directions on opaque surfaces.
-float3 CastShadowRay(float3 hitPosition, float3 surfaceNormal, float3 directionToLight, float tracingDistance,
-                     uint rayFlags)
+float3 CastShadowRay(float3 hitPosition, float3 surfaceNormal, float3 directionToLight, float tracingDistance)
 {
-    return TraceShadowRay(OffsetRay(hitPosition, surfaceNormal, directionToLight), directionToLight, tracingDistance,
-                          rayFlags);
+    return TraceShadowRay(OffsetRay(hitPosition, surfaceNormal, directionToLight), directionToLight, tracingDistance);
 }
