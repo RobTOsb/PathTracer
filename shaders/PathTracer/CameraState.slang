@@ -44,6 +44,7 @@ CameraState DefaultCameraState(float3 cameraDir)
 static const uint CAMERA_GUIDES_SKY = 1; // position is a direction (w = 0)
 static const uint CAMERA_GUIDES_MOTION = 2; // PrimaryGuides::hasMotion
 static const uint CAMERA_GUIDES_HOLD = 4; // PrimaryGuides::hold
+static const uint CAMERA_GUIDES_REPLACED = 8; // PrimaryGuides::replaced
 // GpuSpecularChain::flags
 static const uint CAMERA_CHAIN_PARITY_ODD = 1;
 static const uint CAMERA_CHAIN_THROUGH_GLASS = 2;
@@ -75,8 +76,10 @@ GpuCameraGuides PackGuides(PrimaryGuides g)
                       PackHalf2(g.specularAlbedo.yz));
     p.roughnessCurvature = PackHalf2(float2(g.roughness, g.curvature));
     p.specularHitDistance = g.specularHitDistance;
-    p.flags = (sky ? CAMERA_GUIDES_SKY : 0) | (g.hasMotion ? CAMERA_GUIDES_MOTION : 0) | (g.hold ? CAMERA_GUIDES_HOLD : 0);
-    p.motion = g.motion;
+    p.flags = (sky ? CAMERA_GUIDES_SKY : 0) | (g.hasMotion ? CAMERA_GUIDES_MOTION : 0) | (g.hold ? CAMERA_GUIDES_HOLD : 0) |
+              (g.replaced ? CAMERA_GUIDES_REPLACED : 0);
+    // A chain's end has no displacement, a surface no motion vector of its own, so they share the space.
+    p.motion = g.hasMotion ? asuint(g.motion) : uint2(PackHalf2(g.displacement.xy), PackHalf2(float2(g.displacement.z, 0.0)));
     return p;
 }
 
@@ -97,7 +100,9 @@ PrimaryGuides UnpackGuides(GpuCameraGuides p)
     g.specularHitDistance = p.specularHitDistance;
     g.hasMotion = (p.flags & CAMERA_GUIDES_MOTION) != 0;
     g.hold = (p.flags & CAMERA_GUIDES_HOLD) != 0;
-    g.motion = p.motion;
+    g.replaced = (p.flags & CAMERA_GUIDES_REPLACED) != 0;
+    g.motion = g.hasMotion ? asfloat(p.motion) : float2(0.0, 0.0);
+    g.displacement = g.hasMotion ? float3(0.0, 0.0, 0.0) : float3(UnpackHalf2(p.motion.x), UnpackHalf2(p.motion.y).x);
     return g;
 }
 
@@ -247,6 +252,7 @@ PrimaryGuides FinishGuides(CameraState s, float3 cameraOrigin)
         {
             guides.reflector = float4(cameraOrigin + s.cameraDir * s.panes.distance, 1.0);
             guides.reflectorRoughness = 0.0;
+            guides.reflectorIsPane = true;
             guides.roughness = 0.0;
             guides.curvature = s.panes.curvature;
             guides.specularHitDistance = s.panes.hitDistance;

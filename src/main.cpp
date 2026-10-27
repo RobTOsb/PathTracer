@@ -312,7 +312,7 @@ int Run(const char *scenePath)
 	}
 
 	// The acceleration structures are built once in their own submission before the first frame.
-	// Animating the scene then only rebuilds the TLAS, in the frames it moves.
+	// Animating the scene then only rebuilds the TLASes of the frames that trace it in a new pose.
 	renderContext->BeginFrame();
 	renderContext->BeginGraphicsCommandList();
 	renderContext->SetDescriptorHeaps();

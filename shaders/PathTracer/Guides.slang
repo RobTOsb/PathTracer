@@ -22,11 +22,17 @@ struct PrimaryGuides
     float4 reflector;
     float reflectorRoughness;
     float curvature; // the reflector's signed mean curvature as the camera sees it, positive for a convex mirror
-    // The surface's own motion vector, where it does not move like a static point at position would: a
-    // moving object's, or that of the surface a curved chain of mirrors and glass ends on (see
-    // ChainMotionVector), whose virtual position only flat mirrors move like.
+    // Motion vector of the surface a curved chain of mirrors and glass ends on (see ChainMotionVector), for the
+    // virtual position's own reprojection, which only flat mirrors move like.
     float2 motion;
     bool hasMotion;
+    // Where the surface's point was last frame less where it is: a moving object's (HitInfo::motion), zero for
+    // a static one and for a chain's end. Without its own motion vector, the guides' point moves by it.
+    float3 displacement;
+    // PSR swapped the primary surface for the one a chain ends on (ReplacePrimarySurface), so position is virtual.
+    bool replaced;
+    // The specular guides follow a pane of glass in front of the surface (FinishGuides).
+    bool reflectorIsPane;
     // The PSR chain broke by chance this frame (PsrChainBrokenByChance), so RayGen keeps last frame's guides.
     bool hold;
 };
@@ -45,6 +51,9 @@ PrimaryGuides DefaultGuides(float3 dir)
     g.curvature = 0.0;
     g.motion = float2(0.0, 0.0);
     g.hasMotion = false;
+    g.displacement = float3(0.0, 0.0, 0.0);
+    g.replaced = false;
+    g.reflectorIsPane = false;
     g.hold = false;
     return g;
 }
@@ -56,13 +65,20 @@ float ViewedCurvature(HitInfo hit, float3 wo)
     return dot(hit.Ng, wo) < 0.0 ? -meanCurvature : meanCurvature;
 }
 
+// How far a specular lobe of this roughness has its dominant direction lean from the normal to the mirror
+// direction, 1 for a mirror (Lagarde and de Rousiers 2014).
+float SpecularDominantFactor(float roughness)
+{
+    float alpha = roughness * roughness;
+    float smoothness = 1.0 - alpha;
+    return smoothness * (sqrt(smoothness) + alpha);
+}
+
 // Where the reflector's reflection appears, by the thin mirror equation 1/i = 1/o + 2 curvature, moved
-// out only by the dominant direction's share for glossy surfaces (Lagarde and de Rousiers 2014).
+// out only by the dominant direction's share for glossy surfaces.
 float4 SpecularVirtualPosition(PrimaryGuides g, float3 viewDir, float hitDistance)
 {
-    float alpha = g.reflectorRoughness * g.reflectorRoughness;
-    float smoothness = 1.0 - alpha;
-    float dominantFactor = smoothness * (sqrt(smoothness) + alpha);
+    float dominantFactor = SpecularDominantFactor(g.reflectorRoughness);
     if (g.reflector.w == 0.0 || hitDistance <= 0.0 || dominantFactor <= 0.0)
         return g.reflector;
 

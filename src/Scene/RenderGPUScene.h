@@ -100,9 +100,9 @@ public:
 
 	void SetEmissionScale(uint32_t emissiveInstance, float scale);
 
-	// Rebuilds the TLASes if a dynamic instance has moved since the last call, and keeps last frame's
-	// transforms for the motion vectors. Records on the current frame's graphics command list, so call it
-	// once per frame after BeginGraphicsCommandList and before any tracing.
+	// Picks the current frame's set of TLASes and rebuilds it if the dynamic instances have moved since it was
+	// last built, and keeps last frame's transforms for the motion vectors. Records on the current frame's
+	// graphics command list, so call it once per frame after BeginGraphicsCommandList and before any tracing.
 	void UpdateAccelerationStructures();
 
 	// Per TLAS instance (InstanceIndex()), last frame's object-to-world transform as three float4 rows of
@@ -119,25 +119,41 @@ public:
 
 	bool HasGeometry() const
 	{
-		return tlas_ != InvalidAccelerationStructureHandle;
+		return !frameTlases_.empty();
 	}
 
+	// The current frame's TLAS (see UpdateAccelerationStructures).
 	ResourceHandle GetTLASSRV(bool opacityMicromaps = false) const
 	{
-		return opacityMicromaps && HasOpacityMicromaps() ? ommTlasSRV_ : tlasSRV_;
+		const FrameTLASes &frame = frameTlases_[tlasFrame_];
+		return opacityMicromaps && HasOpacityMicromaps() ? frame.ommTlasSRV : frame.tlasSRV;
+	}
+
+	// Last frame's TLAS, of the same kind, which still holds the dynamic instances where last frame traced them.
+	ResourceHandle GetPreviousTLASSRV(bool opacityMicromaps = false) const
+	{
+		const FrameTLASes &frame = frameTlases_[PreviousTLASFrame()];
+		return opacityMicromaps && HasOpacityMicromaps() ? frame.ommTlasSRV : frame.tlasSRV;
+	}
+
+	// The dynamic instances are elsewhere in the current frame's TLASes than in last frame's.
+	bool MovedSinceLastFrame() const
+	{
+		return !frameTlases_.empty() && frameTlases_[tlasFrame_].poseGeneration != frameTlases_[PreviousTLASFrame()].poseGeneration;
 	}
 
 	// Some primitive has opacity micromaps and the device can trace them.
 	bool HasOpacityMicromaps() const
 	{
-		return ommTlas_ != InvalidAccelerationStructureHandle;
+		return !frameTlases_.empty() && frameTlases_[0].ommTlas != InvalidAccelerationStructureHandle;
 	}
 
-	// Bindless index of the micromap TLAS whose alpha-tested instances read their micromaps in 2-state mode,
-	// for the rays past RenderSettings::opacityMicromap2StateBounce. Only with HasOpacityMicromaps.
+	// Bindless index of the current frame's micromap TLAS whose alpha-tested instances read their micromaps in
+	// 2-state mode, for the rays past RenderSettings::opacityMicromap2StateBounce. Only with HasOpacityMicromaps.
 	uint32_t GetOpacityMicromap2StateTLASIndex() const
 	{
-		const ResourceHandle srv = omm2StateTlasSRV_ != InvalidResourceHandle ? omm2StateTlasSRV_ : ommTlasSRV_;
+		const FrameTLASes &frame = frameTlases_[tlasFrame_];
+		const ResourceHandle srv = frame.omm2StateTlasSRV != InvalidResourceHandle ? frame.omm2StateTlasSRV : frame.ommTlasSRV;
 		return srv != InvalidResourceHandle ? renderContext_->GetResourceViewInfo(srv).descriptorIndex : 0;
 	}
 
@@ -449,7 +465,7 @@ private:
 	std::vector<uint32_t> dynamicLightInstance_; // per dynamic light, into dynamicInstances_
 	bool dynamicLightsMoved_ = false;
 	bool dynamicLightsRescaled_ = false; // a dynamic instance's emission scale changed
-	bool dynamicTLASMoved_ = false;
+	uint32_t dynamicPoseGeneration_ = 0; // counts the poses Animate has moved the dynamic instances to
 
 	std::vector<LightFrameBuffers> lightFrames_;
 	uint32_t lightFrame_ = 0;
@@ -477,12 +493,31 @@ private:
 	std::vector<TLASInstance> tlasInstances_;
 	std::vector<TLASInstance> ommTlasInstances_;
 	std::vector<TLASInstance> omm2StateTlasInstances_;
+	uint32_t tlasInstancesGeneration_ = 0; // the pose the TLAS instances above hold
 	std::vector<uint32_t> dynamicTlasInstances_; // into tlasRefs_, those of the dynamic instances
 	// GetPreviousTransformBuffer's, one per frame in flight. Only the dynamic instances' rows change.
 	std::vector<ResourceHandle> previousTransforms_;
 	uint32_t previousTransformFrame_ = 0;
-	AccelerationStructureHandle tlas_ = InvalidAccelerationStructureHandle;
-	ResourceHandle tlasSRV_ = InvalidResourceHandle;
+	
+	struct FrameTLASes
+	{
+		AccelerationStructureHandle tlas = InvalidAccelerationStructureHandle;
+		AccelerationStructureHandle ommTlas = InvalidAccelerationStructureHandle;
+		AccelerationStructureHandle omm2StateTlas = InvalidAccelerationStructureHandle;
+		ResourceHandle tlasSRV = InvalidResourceHandle;
+		ResourceHandle ommTlasSRV = InvalidResourceHandle;
+		ResourceHandle omm2StateTlasSRV = InvalidResourceHandle;
+		uint32_t poseGeneration = 0; // the pose of the dynamic instances it was built with
+	};
+	std::vector<FrameTLASes> frameTlases_; // empty without instanced geometry
+	uint32_t tlasFrame_ = 0; // the set the current frame traces
+
+	// The set last frame traced, which the current frame does not rebuild.
+	uint32_t PreviousTLASFrame() const
+	{
+		const uint32_t frames = static_cast<uint32_t>(frameTlases_.size());
+		return (tlasFrame_ + frames - 1) % frames;
+	}
 
 	// DXR 1.2 opacity micromaps of the alpha-tested primitives (BakeOpacityMicromaps). The micromaps and
 	// their states only stay on the CPU until BuildAccelerationStructures has built the array.
@@ -494,15 +529,8 @@ private:
 	std::vector<uint32_t> ommIndexOffsets_; // per primitive desc, its first triangle in ommIndices_, or UINT32_MAX
 	ResourceHandle ommIndexBuffer_ = InvalidResourceHandle;
 	AccelerationStructureHandle ommArray_ = InvalidAccelerationStructureHandle;
-	// The alpha-tested primitives' BLASes again, with the micromaps linked, and a TLAS that uses them
-	// in place of the plain ones, so the micromaps can be switched on and off at run time.
+	// The alpha-tested primitives' BLASes again, with the micromaps linked, for the micromap TLASes.
 	std::vector<AccelerationStructureHandle> ommBlases_;
-	AccelerationStructureHandle ommTlas_ = InvalidAccelerationStructureHandle;
-	ResourceHandle ommTlasSRV_ = InvalidResourceHandle;
-	// The micromap TLAS again with the masks' instances flagged to read their micromaps in 2-state mode,
-	// which a ray flag would also force on the blended surfaces'. Invalid when no mask has micromaps.
-	AccelerationStructureHandle omm2StateTlas_ = InvalidAccelerationStructureHandle;
-	ResourceHandle omm2StateTlasSRV_ = InvalidResourceHandle;
 
 	float3 boundsMin_ = { 0.0f, 0.0f, 0.0f };
 	float3 boundsMax_ = { 0.0f, 0.0f, 0.0f };

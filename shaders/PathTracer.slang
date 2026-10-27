@@ -17,6 +17,8 @@ import PathTracer.Subsurface;
 static const uint RR_START_BOUNCE = 1;
 // Longest path through a medium that absorption is evaluated over
 static const float MAX_MEDIUM_DISTANCE = 1.0e30;
+// How much a light's visibility must have changed since last frame, in some channel, to mark g_ShadowChanges.
+static const float SHADOW_CHANGE_THRESHOLD = 0.25;
 
 // TracePath's flags, one word so that a single register is held across each TraceRay. The DEFERRED_*
 // flags (GlassSplit.slang) share it.
@@ -489,12 +491,10 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
             // Until the path continues with a specular reflection: no reflection data, or last frame's.
             camera.guides.specularHitDistance = InitialSpecularHitDistance(camera.guides.roughness);
             camera.guides.curvature = ViewedCurvature(hit, wo);
-            // A moving object's point was elsewhere last frame, which RayGen's camera motion leaves out.
-            camera.guides.hasMotion = any(hit.motion != 0.0);
-            if (camera.guides.hasMotion)
-                camera.guides.motion = CalculateMotionVector(float4(hit.position, 1.0), float4(hit.position + hit.motion, 1.0),
-                                                             g_Frame.prevViewProj, g_Frame.viewProj,
-                                                             float2(DispatchRaysDimensions().xy));
+            // A moving object's point was elsewhere last frame, which RayGen's motion vectors take in.
+            camera.guides.hasMotion = false;
+            camera.guides.displacement = hit.motion;
+            camera.guides.replaced = false;
             ReflectanceGuides(mat, ctx, wo, camera.guides);
             camera.guides.diffuseAlbedo *= seenScale;
             camera.guides.specularAlbedo *= seenScale;
@@ -612,8 +612,19 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     {
         // As far along as the light was from the hit point.
         float3 shadowOrigin = opaque ? SmoothReflectionOrigin(hit, wo, ls.direction) : OffsetRay(hit.position, hit.Ng, ls.direction);
-        radiance += neeContribution * TraceShadowRay(shadowOrigin, ls.direction,
-                                                     ls.distance - dot(shadowOrigin - hit.position, ls.direction));
+        float shadowDistance = ls.distance - dot(shadowOrigin - hit.position, ls.direction);
+        float3 visibility = TraceShadowRay(shadowOrigin, ls.direction, shadowDistance);
+        radiance += neeContribution * visibility;
+#ifdef DLSS_RR
+        if (writesGuides && g_Frame.shadowChanges != 0)
+        {
+            float3 previousVisibility = TraceShadowRayIn(ResourceDescriptorHeap[g_Frame.previousScene], shadowOrigin,
+                                                         ls.direction, shadowDistance);
+            float3 change = abs(visibility - previousVisibility);
+            if (max(change.x, max(change.y, change.z)) > SHADOW_CHANGE_THRESHOLD)
+                g_ShadowChanges[DispatchRaysIndex().xy] = 1.0;
+        }
+#endif
     }
 
     SurfaceOutcome outcome;
@@ -792,6 +803,33 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
     return radiance;
 }
 
+#ifdef DLSS_RR
+float TraceGuideHitDistance(float3 position, float3 N, float3 viewDir, float roughness)
+{
+    N = dot(N, viewDir) > 0.0 ? -N : N;
+    float3 mirror = reflect(viewDir, N);
+    RayDesc ray;
+    ray.Direction = normalize(lerp(N, mirror, SpecularDominantFactor(roughness)));
+    ray.Origin = OffsetRay(position, N, ray.Direction);
+    ray.TMin = 0.0;
+    ray.TMax = FLT_MAX;
+
+    const uint rayFlags = OpacityMicromapRayFlags(1u);
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    query.TraceRayInline(SceneFor(rayFlags), RayFlags(rayFlags), 0xFF, ray);
+    while (query.Proceed())
+    {
+        PrimitiveDesc prim = LoadPrimitive(query.CandidateInstanceID());
+        MaterialData material = LoadGpuMaterial(prim.materialIndex);
+        float2 uv = InterpolateTexCoord(LoadTriangle(prim, query.CandidatePrimitiveIndex()),
+                                        Barycentrics(query.CandidateTriangleBarycentrics()));
+        if (material.alphaMode == ALPHA_MODE_OPAQUE || LoadBaseColourAlpha(material, uv).a >= AlphaCutoff(material))
+            query.CommitNonOpaqueTriangleHit();
+    }
+    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? query.CommittedRayT() : SKY_HIT_DISTANCE;
+}
+#endif
+
 // Entry points
 
 [shader("raygeneration")]
@@ -822,6 +860,10 @@ void RayGen()
     g_Accumulation[pixel] = float4(sum, 1.0);
     g_Output[pixel] = float4(sum / float(g_Frame.referenceSampleCount + g_Frame.samplesPerFrame), 1.0);
 #else
+#ifdef DLSS_RR
+    // Before the paths, any of which may mark it.
+    g_ShadowChanges[pixel] = 0.0;
+#endif
     // The mean of the frame's paths, each with its own random sequence. Under DLSS-RR they all start along the
     // same camera ray, and the guides are the last one's.
     float3 origin, dir;
@@ -857,12 +899,13 @@ void RayGen()
     // Last frame's specular hit distance, loaded first so its latency hides behind the guides below.
     float heldHitDistance = g_SpecularHitDistance[pixel];
 
-    // Unless the guides have a motion vector of their own (a moving object, a curved PSR chain), the primary
-    // point was in the same place last frame and only the camera moved. CalculateMotionVector works in NDC,
-    // whose +y is up in D3D, while DLSS wants +y down.
+    // Unless the guides have a motion vector of their own (a curved PSR chain), the primary point was last frame
+    // where its displacement says, which is where it is but on a moving object. CalculateMotionVector works in
+    // NDC, whose +y is up in D3D, while DLSS wants +y down. The sky (w = 0) has no displacement.
+    float4 previousPosition = guides.position + float4(guides.displacement, 0.0) * guides.position.w;
     float2 motion = guides.hasMotion
                     ? guides.motion
-                    : CalculateMotionVector(guides.position, guides.position, g_Frame.prevViewProj, g_Frame.viewProj, float2(dims));
+                    : CalculateMotionVector(guides.position, previousPosition, g_Frame.prevViewProj, g_Frame.viewProj, float2(dims));
     motion.y = -motion.y;
 
     // Reversed Z: the sky sits on the far plane at 0.
@@ -875,8 +918,12 @@ void RayGen()
     g_MotionVectors[pixel] = motion;
     g_Depth[pixel] = depth;
 
-    // Negative: keep last frame's, which is whatever the texture was created with until a frame writes it.
+    // The guides' own surface traces its hit distance. A virtual one (PSR) and a pane's reflection take the
+    // path's, where negative keeps last frame's, which is whatever the texture was created with until a frame
+    // writes it.
     float hitDistance = guides.specularHitDistance;
+    if (g_Frame.specularHitDistanceRay != 0 && guides.position.w > 0.0 && !guides.replaced && !guides.reflectorIsPane)
+        hitDistance = TraceGuideHitDistance(guides.position.xyz, guides.normal, camera.cameraDir, guides.roughness);
     if (hitDistance >= 0.0)
         g_SpecularHitDistance[pixel] = hitDistance;
     else
@@ -884,9 +931,14 @@ void RayGen()
     if (!isfinite(hitDistance))
         hitDistance = 0.0;
 
-    // The reflected point is static too, so only the camera moves its image.
+    // The reflected point is static, so its image moves with the camera, and with a moving reflector as far as
+    // the image is the reflector's own surface: all of it where it sits on the surface, less the sharper the
+    // lobe, as a mirror shows the world behind it, which the reflector's move barely shifts. A pane does not move.
     float4 reflection = SpecularVirtualPosition(guides, camera.cameraDir, hitDistance);
-    float2 specularMotion = CalculateMotionVector(reflection, reflection, g_Frame.prevViewProj, g_Frame.viewProj, float2(dims));
+    bool onReflector = all(reflection == guides.reflector);
+    float carried = guides.reflectorIsPane ? 0.0 : onReflector ? 1.0 : 1.0 - SpecularDominantFactor(guides.reflectorRoughness);
+    float4 previousReflection = reflection + float4(guides.displacement, 0.0) * (reflection.w * carried);
+    float2 specularMotion = CalculateMotionVector(reflection, previousReflection, g_Frame.prevViewProj, g_Frame.viewProj, float2(dims));
     specularMotion.y = -specularMotion.y;
     g_SpecularMotionVectors[pixel] = specularMotion;
 #endif

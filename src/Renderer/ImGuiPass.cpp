@@ -45,6 +45,7 @@ namespace
 		{ GUIDE_VIEW_DEPTH, "Depth" },
 		{ GUIDE_VIEW_MOTION_VECTORS, "Motion vectors" },
 		{ GUIDE_VIEW_SPECULAR_MOTION_VECTORS, "Specular motion vectors" },
+		{ GUIDE_VIEW_SHADOW_CHANGES, "Shadow changes" },
 	};
 
 	constexpr ComboEntry<DLSSMode> kDLSSModes[] = {
@@ -345,10 +346,18 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 							  "on it, its detail then being finer than a pixel");
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
+		ImGui::Checkbox("Traced specular hit distance", &settings_.specularHitDistanceRay);
+		ImGui::SetItemTooltip("Places the reflection for the specular motion vectors with a ray along the lobe's "
+							  "dominant direction, the same every frame, rather than the path's sampled reflection. "
+							  "PSR's virtual surfaces and glass panes keep the path's");
 		ImGui::Checkbox("Hold specular hit distance", &settings_.holdSpecularHitDistance);
 		ImGui::BeginDisabled(!settings_.holdSpecularHitDistance);
 		ImGui::SliderFloat("Hold max roughness", &settings_.holdHitDistanceMaxRoughness, 0.0f, 1.0f, "%.2f");
 		ImGui::EndDisabled();
+		ImGui::Checkbox("Moving shadow mask", &settings_.shadowChangeMask);
+		ImGui::SetItemTooltip("While the animation moves things, traces each pixel's light sample shadow ray in last "
+							  "frame's TLAS too, and where its shadow changed tells DLSS-RR to favour the current frame "
+							  "over its history, so moving shadows do not ghost");
 		EnumCombo("Guide view", kGuideViews, settings_.guideView);
 		ImGui::SetItemTooltip("Shows one of the guides given to DLSS-RR in place of the image, at render resolution");
 		ImGui::BeginDisabled(settings_.guideView == GUIDE_VIEW_OFF);

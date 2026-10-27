@@ -339,6 +339,8 @@ bool ReplacePrimarySurface(SpecularChain chain, OpenPBRBaseParams surface, OpenP
         return false;
     guides.hasMotion = hasMotion;
     guides.motion = motion;
+    guides.displacement = float3(0.0, 0.0, 0.0);
+    guides.replaced = true;
 
     // The chain's transform is a rotation or reflection, which preserves the angle between wo and the
     // normal, so the reflectance seen in virtual space is the real one.

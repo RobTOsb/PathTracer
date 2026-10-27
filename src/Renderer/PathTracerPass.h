@@ -26,6 +26,8 @@ struct PathTracerGuides
 	ResourceHandle depth = InvalidResourceHandle; // R32F, reversed-Z hardware depth
 	ResourceHandle specularHitDistance = InvalidResourceHandle;
 	ResourceHandle specularMotionVectors = InvalidResourceHandle; // RG16F
+	// R8, 1 where a moving object's shadow changed the light since last frame: DLSS-RR's bias current colour mask.
+	ResourceHandle shadowChanges = InvalidResourceHandle;
 };
 
 // Traces one path per pixel into an HDR radiance target (RGBA16F) using the DXR pipeline in

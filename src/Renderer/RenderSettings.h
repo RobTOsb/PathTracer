@@ -243,10 +243,19 @@ struct RenderSettings
 	// Past the camera's first surface, a chain through smooth glass always takes the lobe it follows, so its guides
 	// never hold last frame's; the other lobe's light (faint internal reflections) is left out.
 	bool psrStrongerLobe = true;
+	// The specular hit distance of the guides' surface, which places its reflection for the specular motion
+	// vectors, from a ray RayGen traces along the lobe's dominant direction rather than from the path's sampled
+	// reflection, so it is the same every frame for the same view. PSR's virtual surfaces and panes of glass keep
+	// the path's, and the hold below.
+	bool specularHitDistanceRay = true;
 	// Surfaces at most this rough keep last frame's specular hit distance in frames whose path took
 	// the diffuse lobe, so the guide does not flicker between a distance and none.
 	bool holdSpecularHitDistance = true;
 	float holdHitDistanceMaxRoughness = 0.25f;
+	// While the animated instances move, the surface the guides describe also traces its light sample's shadow
+	// ray in last frame's TLAS, and where the light was blocked differently DLSS-RR is told to trust the current
+	// frame over its history (bias current colour mask), so moving shadows do not ghost.
+	bool shadowChangeMask = true;
 	// Debug: one guide in place of the image (GuideViewPass), or with guideViewChange how much it changed since
 	// last frame along the motion vectors, as heat scaled by guideViewGain. guideViewHeld tints the pixels that kept
 	// last frame's guides because their PSR chain broke by chance.

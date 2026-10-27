@@ -62,6 +62,7 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 		guides_.depth = CreateTarget(Format::R32_FLOAT, "PathTracer_Depth");
 		guides_.specularHitDistance = CreateTarget(Format::R16_FLOAT, "PathTracer_SpecularHitDistance");
 		guides_.specularMotionVectors = CreateTarget(Format::R16G16_FLOAT, "PathTracer_SpecularMotionVectors");
+		guides_.shadowChanges = CreateTarget(Format::R8_UNORM, "PathTracer_ShadowChanges");
 
 		BufferDesc cameraStateDesc = {};
 		cameraStateDesc.sizeInBytes = static_cast<uint64_t>(width_) * height_ * sizeof(GpuCameraState);
@@ -95,6 +96,7 @@ PathTracerPass::~PathTracerPass()
 								  guides_.depth,
 								  guides_.specularHitDistance,
 								  guides_.specularMotionVectors,
+								  guides_.shadowChanges,
 								  cameraState_,
 								  deferredBranches_,
 								  accumulation_ })
@@ -341,6 +343,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.psrMaxRoughness = settings_.psrMaxRoughness;
 	constants.psrStrongerLobe = settings_.psrStrongerLobe ? 1u : 0u;
 	constants.psrMaxMinification = settings_.psrCurvedSurfaces ? std::max(settings_.psrMaxMinification, 1.0f) : -1.0f;
+	constants.specularHitDistanceRay = settings_.specularHitDistanceRay ? 1u : 0u;
 	constants.specularHitDistanceHoldRoughness =
 			settings_.holdSpecularHitDistance ? settings_.holdHitDistanceMaxRoughness : -1.0f;
 
@@ -409,12 +412,20 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 				std::chrono::duration<float>(std::chrono::steady_clock::now() - accumulationStart_).count();
 	}
 
+	const Pipeline *pipeline = SelectPipeline();
+
+	// Moving shadows are found against last frame's TLAS of the kind this pipeline traces.
+	if (rayReconstruction_ && settings_.shadowChangeMask && scene_.MovedSinceLastFrame())
+	{
+		constants.shadowChanges = 1;
+		constants.previousScene =
+				renderContext->GetResourceViewInfo(scene_.GetPreviousTLASSRV(pipeline->opacityMicromaps)).descriptorIndex;
+	}
+
 	// The slot for this frame index was last read framesInFlight frames ago, and BeginFrame has
 	// already waited on that frame's fence.
 	const ResourceHandle constantBuffer = frameConstants_[renderContext->GetCurrentFrameIndex()];
 	renderContext->UpdateConstantBuffer(constantBuffer, &constants, sizeof(constants));
-
-	const Pipeline *pipeline = SelectPipeline();
 
 	renderContext->BeginEvent("PathTracer");
 	renderContext->BeginProfileScope("PathTracer");
@@ -441,6 +452,13 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 									  ResourceLayout::UnorderedAccess,
 									  ResourceSync::Raytracing,
 									  ResourceAccess::UnorderedAccess);
+	if (rayReconstruction_)
+	{
+		renderContext->TransitionResource(guides_.shadowChanges,
+										  ResourceLayout::UnorderedAccess,
+										  ResourceSync::Raytracing,
+										  ResourceAccess::UnorderedAccess);
+	}
 
 	renderContext->SetRaytracingPipeline(pipeline->pipeline);
 	renderContext->SetRaytracingConstantBuffer(0, constantBuffer);
@@ -475,6 +493,10 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		renderContext->SetRaytracingUAV(i, targets[i]);
 	}
 	renderContext->SetRaytracingUAV(9, deferredBranches_);
+	if (rayReconstruction_)
+	{
+		renderContext->SetRaytracingUAV(10, guides_.shadowChanges);
+	}
 	if (reference_)
 	{
 		renderContext->TransitionResource(accumulation_,

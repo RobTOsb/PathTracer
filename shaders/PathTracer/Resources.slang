@@ -43,6 +43,9 @@ RWStructuredBuffer<GpuCameraState> g_CameraState : register(u8); // per pixel, s
 // Per TLAS instance (InstanceIndex()), last frame's ObjectToWorld3x4() as three rows, for the motion of moving
 // geometry (RenderGPUScene::GetPreviousTransformBuffer).
 StructuredBuffer<float4> g_PreviousTransforms : register(t16);
+// 1 where the guides' surface is lit differently than last frame by a moving object's shadow, the bias current
+// colour mask of DLSS-RR (see FrameConstants::shadowChanges).
+RWTexture2D<float> g_ShadowChanges : register(u10);
 #endif
 // The reference's sum of every path so far per pixel (RGBA32F); PathTracerPass binds it only under REFERENCE.
 #ifdef REFERENCE

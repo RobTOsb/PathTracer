@@ -136,6 +136,10 @@ struct FrameConstants
 	// flag (RAY_FLAG_FORCE_OMM_2_STATE) would force 2-state on them too, which camera and bounce rays cannot take.
 	// Shadow rays use that flag on every bounce and trace the scene TLAS instead.
 	uint opacityMicromap2StateScene;
+	uint shadowChanges;
+	uint previousScene;
+	uint specularHitDistanceRay;
+	uint pad;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -444,7 +448,7 @@ struct GpuCameraGuides
 	uint roughnessCurvature; // half2
 	float specularHitDistance;
 	uint flags; // CAMERA_GUIDES_* in CameraState.slang
-	float2 motion;
+	uint2 motion; // with CAMERA_GUIDES_MOTION the float2 motion vector, else the half3 displacement
 };
 
 // Only an active chain is stored.
@@ -523,7 +527,8 @@ enum GuideView
 	GUIDE_VIEW_ROUGHNESS = 4,
 	GUIDE_VIEW_DEPTH = 5,
 	GUIDE_VIEW_MOTION_VECTORS = 6,
-	GUIDE_VIEW_SPECULAR_MOTION_VECTORS = 7
+	GUIDE_VIEW_SPECULAR_MOTION_VECTORS = 7,
+	GUIDE_VIEW_SHADOW_CHANGES = 8 // the bias current colour mask, see FrameConstants::shadowChanges
 };
 
 // Root constants of GuideView.slang.
@@ -573,7 +578,7 @@ struct AutoExposureConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
-static_assert(sizeof(FrameConstants) == 624,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 640,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
 static_assert(sizeof(GpuMaterial) == 144,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,

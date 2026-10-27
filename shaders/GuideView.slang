@@ -23,6 +23,8 @@ float4 GuideValue(uint2 pixel)
         return float4(g.w, 0.0, 0.0, 0.0);
     case GUIDE_VIEW_DEPTH:
         return float4(g.x, 0.0, 0.0, 0.0);
+    case GUIDE_VIEW_SHADOW_CHANGES:
+        return float4(g.xxx, 0.0);
     case GUIDE_VIEW_MOTION_VECTORS:
     case GUIDE_VIEW_SPECULAR_MOTION_VECTORS:
         return float4(g.xy, 0.0, 0.0);

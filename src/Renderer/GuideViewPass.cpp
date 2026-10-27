@@ -85,6 +85,9 @@ void GuideViewPass::Execute(RenderContext *renderContext)
 	case GUIDE_VIEW_MOTION_VECTORS:
 		source = guides.motionVectors;
 		break;
+	case GUIDE_VIEW_SHADOW_CHANGES:
+		source = guides.shadowChanges;
+		break;
 	default:
 		source = guides.specularMotionVectors;
 		break;

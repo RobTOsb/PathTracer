@@ -349,11 +349,14 @@ RenderGPUScene::RenderGPUScene(RenderContext *renderContext) : renderContext_(re
 
 RenderGPUScene::~RenderGPUScene()
 {
-	for (AccelerationStructureHandle tlas: { tlas_, ommTlas_, omm2StateTlas_ })
+	for (const FrameTLASes &frame: frameTlases_)
 	{
-		if (tlas != InvalidAccelerationStructureHandle)
+		for (AccelerationStructureHandle tlas: { frame.tlas, frame.ommTlas, frame.omm2StateTlas })
 		{
-			renderContext_->DestroyAccelerationStructure(tlas);
+			if (tlas != InvalidAccelerationStructureHandle)
+			{
+				renderContext_->DestroyAccelerationStructure(tlas);
+			}
 		}
 	}
 	for (const std::vector<AccelerationStructureHandle> *list: { &blases_, &ommBlases_ })
@@ -610,7 +613,11 @@ void RenderGPUScene::Animate(float seconds)
 		}
 	}
 
-	dynamicTLASMoved_ = !dynamicInstances_.empty();
+	if (!dynamicInstances_.empty())
+	{
+		++dynamicPoseGeneration_;
+	}
+
 	dynamicLightsMoved_ = !dynamicObjectLights_.empty();
 }
 
@@ -1333,7 +1340,6 @@ void RenderGPUScene::PrepareAnimation()
 	dynamicOfInstance_.assign(instances.size(), UINT32_MAX);
 	dynamicRestMirrored_.clear();
 	dynamicLastFrameTransforms_.clear();
-	dynamicTLASMoved_ = false;
 	for (const AnimatedNode &node: animatedNodes_)
 	{
 		if (node.instance == UINT32_MAX)
@@ -2367,19 +2373,25 @@ void RenderGPUScene::BuildAccelerationStructures()
 		return;
 	}
 
-	tlas_ = renderContext_->CreateTLAS(tlasInstances);
-	renderContext_->BuildAccelerationStructure(tlas_);
-	if (anyMicromaps)
-	{
-		ommTlas_ = renderContext_->CreateTLAS(ommTlasInstances);
-		renderContext_->BuildAccelerationStructure(ommTlas_);
-	}
 	// Without a mask's micromaps 2-state mode changes nothing, and the micromap TLAS serves for it too.
-	if (anyMaskMicromaps)
+	frameTlases_.resize(renderContext_->GetFramesInFlight());
+	for (FrameTLASes &frame: frameTlases_)
 	{
-		omm2StateTlas_ = renderContext_->CreateTLAS(omm2StateTlasInstances);
-		renderContext_->BuildAccelerationStructure(omm2StateTlas_);
+		frame.tlas = renderContext_->CreateTLAS(tlasInstances);
+		renderContext_->BuildAccelerationStructure(frame.tlas);
+		if (anyMicromaps)
+		{
+			frame.ommTlas = renderContext_->CreateTLAS(ommTlasInstances);
+			renderContext_->BuildAccelerationStructure(frame.ommTlas);
+		}
+		if (anyMaskMicromaps)
+		{
+			frame.omm2StateTlas = renderContext_->CreateTLAS(omm2StateTlasInstances);
+			renderContext_->BuildAccelerationStructure(frame.omm2StateTlas);
+		}
+		frame.poseGeneration = dynamicPoseGeneration_;
 	}
+	tlasInstancesGeneration_ = dynamicPoseGeneration_;
 	tlasRefs_ = EnumerateTLASInstances();
 	tlasInstances_ = std::move(tlasInstances);
 	ommTlasInstances_ = anyMicromaps ? std::move(ommTlasInstances) : std::vector<TLASInstance>();
@@ -2411,17 +2423,21 @@ void RenderGPUScene::BuildAccelerationStructures()
 		buffer = renderContext_->CreateUploadBuffer(transformDesc, ResourceViewType::ShaderResource, transforms.data());
 	}
 	renderContext_->UAVBarrierForAccelerationStructures();
-	tlasSRV_ = renderContext_->GetAccelerationStructureSRV(tlas_);
-	if (anyMicromaps)
+	for (FrameTLASes &frame: frameTlases_)
 	{
-		ommTlasSRV_ = renderContext_->GetAccelerationStructureSRV(ommTlas_);
-	}
-	if (anyMaskMicromaps)
-	{
-		omm2StateTlasSRV_ = renderContext_->GetAccelerationStructureSRV(omm2StateTlas_);
+		frame.tlasSRV = renderContext_->GetAccelerationStructureSRV(frame.tlas);
+		if (anyMicromaps)
+		{
+			frame.ommTlasSRV = renderContext_->GetAccelerationStructureSRV(frame.ommTlas);
+		}
+
+		if (anyMaskMicromaps)
+		{
+			frame.omm2StateTlasSRV = renderContext_->GetAccelerationStructureSRV(frame.omm2StateTlas);
+		}
 	}
 
-	logi("GPUScene: built {} BLAS(es) ({} with opacity micromaps) and {} TLAS(es) with {} instance(s)",
+	logi("GPUScene: built {} BLAS(es) ({} with opacity micromaps) and {} TLAS(es) per frame in flight with {} instance(s)",
 		 builtBlases.size(),
 		 std::count_if(ommBlases_.begin(),
 					   ommBlases_.end(),
@@ -2432,7 +2448,7 @@ void RenderGPUScene::BuildAccelerationStructures()
 
 void RenderGPUScene::UpdateAccelerationStructures()
 {
-	if (tlas_ == InvalidAccelerationStructureHandle)
+	if (frameTlases_.empty())
 	{
 		return;
 	}
@@ -2453,36 +2469,45 @@ void RenderGPUScene::UpdateAccelerationStructures()
 		std::copy(m, m + 12, dynamicLastFrameTransforms_[d].begin());
 	}
 
-	if (!dynamicTLASMoved_)
+	// This frame traces its own set, which only needs building again if the instances moved since it was
+	// last built, possibly in a frame that traced another set.
+	tlasFrame_ = renderContext_->GetCurrentFrameIndex();
+	FrameTLASes &frame = frameTlases_[tlasFrame_];
+	if (frame.poseGeneration == dynamicPoseGeneration_)
 	{
 		return;
 	}
-	dynamicTLASMoved_ = false;
+	frame.poseGeneration = dynamicPoseGeneration_;
 
-	for (uint32_t i: dynamicTlasInstances_)
+	if (tlasInstancesGeneration_ != dynamicPoseGeneration_)
 	{
-		const uint32_t instance = tlasRefs_[i].instance;
-		float transform[12];
-		Scene::RowMajorToBLASTransform(instances[instance].worldMatrix, transform);
-		std::memcpy(tlasInstances_[i].transform, transform, sizeof(tlasInstances_[i].transform));
-		if (!ommTlasInstances_.empty())
+		tlasInstancesGeneration_ = dynamicPoseGeneration_;
+		for (uint32_t i: dynamicTlasInstances_)
 		{
-			std::memcpy(ommTlasInstances_[i].transform, transform, sizeof(ommTlasInstances_[i].transform));
-		}
-		if (!omm2StateTlasInstances_.empty())
-		{
-			std::memcpy(omm2StateTlasInstances_[i].transform, transform, sizeof(omm2StateTlasInstances_[i].transform));
+			const uint32_t instance = tlasRefs_[i].instance;
+			float transform[12];
+			Scene::RowMajorToBLASTransform(instances[instance].worldMatrix, transform);
+			std::memcpy(tlasInstances_[i].transform, transform, sizeof(tlasInstances_[i].transform));
+			if (!ommTlasInstances_.empty())
+			{
+				std::memcpy(ommTlasInstances_[i].transform, transform, sizeof(ommTlasInstances_[i].transform));
+			}
+			
+			if (!omm2StateTlasInstances_.empty())
+			{
+				std::memcpy(omm2StateTlasInstances_[i].transform, transform, sizeof(omm2StateTlasInstances_[i].transform));
+			}
 		}
 	}
 
-	renderContext_->UpdateTLAS(tlas_, tlasInstances_);
-	if (ommTlas_ != InvalidAccelerationStructureHandle)
+	renderContext_->UpdateTLAS(frame.tlas, tlasInstances_);
+	if (frame.ommTlas != InvalidAccelerationStructureHandle)
 	{
-		renderContext_->UpdateTLAS(ommTlas_, ommTlasInstances_);
+		renderContext_->UpdateTLAS(frame.ommTlas, ommTlasInstances_);
 	}
-	if (omm2StateTlas_ != InvalidAccelerationStructureHandle)
+	if (frame.omm2StateTlas != InvalidAccelerationStructureHandle)
 	{
-		renderContext_->UpdateTLAS(omm2StateTlas_, omm2StateTlasInstances_);
+		renderContext_->UpdateTLAS(frame.omm2StateTlas, omm2StateTlasInstances_);
 	}
 	renderContext_->UAVBarrierForAccelerationStructures();
 }

@@ -58,7 +58,7 @@ void DLSSPass::Execute(RenderContext *renderContext)
 	const PathTracerGuides &guides = pathTracer_.GetGuides();
 	const ResourceHandle inputs[] = { pathTracer_.GetOutput(), guides.diffuseAlbedo,	guides.specularAlbedo,
 									  guides.normalRoughness,  guides.motionVectors, guides.depth,
-									  guides.specularMotionVectors };
+									  guides.specularMotionVectors, guides.shadowChanges };
 	for (ResourceHandle input: inputs)
 	{
 		renderContext->TransitionResource(input,
@@ -83,6 +83,7 @@ void DLSSPass::Execute(RenderContext *renderContext)
 		eval.specularAlbedo = d3dContext->GetNativeResource(guides.specularAlbedo);
 		eval.normalRoughness = d3dContext->GetNativeResource(guides.normalRoughness);
 		eval.specularMotionVectors = d3dContext->GetNativeResource(guides.specularMotionVectors);
+		eval.biasCurrentColourMask = d3dContext->GetNativeResource(guides.shadowChanges);
 		eval.renderWidth = featureParams_.renderWidth;
 		eval.renderHeight = featureParams_.renderHeight;
 		eval.reset = reset_;

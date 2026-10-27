@@ -103,6 +103,8 @@ struct DLSSEvalInputs
 	ID3D12Resource *specularAlbedo = nullptr;
 	ID3D12Resource *normalRoughness = nullptr;
 	ID3D12Resource *specularMotionVectors = nullptr;
+	// Optional, R8: 1 where the history is out of date though the motion vectors match, so the current frame wins.
+	ID3D12Resource *biasCurrentColourMask = nullptr;
 	// Row-major 4x4 view/proj matrices.
 	float worldToView[16] = {};
 	float viewToClip[16] = {};
