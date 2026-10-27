@@ -176,6 +176,7 @@ LightSelectVertex ExitLightSelectVertex(float3 position, float3 normal, uint bou
     v.wo = normal;
     v.diffuseWeight = 1.0;
     v.specularWeight = 0.0;
+    v.backDiffuseWeight = 0.0;
     v.alpha = float2(1.0, 1.0);
     v.selection = LightSelection(bounce < g_Frame.lightTreeBounces);
     return v;

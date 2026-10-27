@@ -30,6 +30,9 @@ static const uint PATH_DIRECT_SEGMENT = 0x100;
 // Diffuse bounces so far, 4 bits; the rest of the bounce count are specular ones.
 static const uint PATH_DIFFUSE_BOUNCES_SHIFT = 9;
 static const uint PATH_DIFFUSE_BOUNCES_MASK = 0xF;
+// The segment left the surface the camera sees by a mirror-like lobe, so the light it finds is that surface's
+// image, which the firefly clamp leaves alone.
+static const uint PATH_MIRROR_SEGMENT = 0x2000;
 static const uint PATH_SPLITS_SHIFT = 16; // glass splits so far, 8 bits
 static const uint PATH_SPLITS_MASK = 0xFF;
 
@@ -53,10 +56,26 @@ bool ChainActive(uint flags)
 }
 
 
-float3 ClampIndirect(float3 contribution, bool direct)
+// The firefly clamp: a contribution is scaled down to at most directClamp in its largest channel if the surface
+// the camera sees scattered it (direct), to indirectClamp if it came further, and not at all if the camera sees
+// it (seen), also in a mirror-like surface.
+float3 ClampFirefly(float3 contribution, bool seen, bool direct)
 {
+    float limit = direct ? g_Frame.directClamp : g_Frame.indirectClamp;
     float m = MaxComponent(contribution);
-    return direct || m <= g_Frame.indirectClamp ? contribution : contribution * (g_Frame.indirectClamp / m);
+    return seen || m <= limit ? contribution : contribution * (limit / m);
+}
+
+// Whether light along the segment just traced reaches the surface the camera sees or a surface it left.
+bool DirectSegment(uint flags, bool fromCamera, bool chainActive)
+{
+    return fromCamera || chainActive || (flags & PATH_DIRECT_SEGMENT) != 0;
+}
+
+// Whether the camera sees light along the segment just traced, also in a mirror-like surface it left.
+bool SeenSegment(uint flags, bool fromCamera, bool chainActive)
+{
+    return fromCamera || chainActive || (flags & PATH_MIRROR_SEGMENT) != 0;
 }
 
 bool LeavesLightsToBsdf(OpenPBRContext ctx)
@@ -141,7 +160,8 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     bool frontFace = dot(OctDecode(payload.Ng), wo) > 0.0;
     // Light found here is direct for a surface the camera sees, or for the one the segment left.
     bool visible = fromCamera || chainActive;
-    bool directArrival = visible || (flags & PATH_DIRECT_SEGMENT) != 0;
+    bool directArrival = DirectSegment(flags, fromCamera, chainActive);
+    bool seenArrival = SeenSegment(flags, fromCamera, chainActive);
     float emissionWeight = 1.0;
     if (frontFace && payload.emitter != INVALID_LIGHT_INDEX)
     {
@@ -172,7 +192,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments,
                                          SIMPLE, specularAA);
     if (frontFace && any(hit.emission > 0.0))
-        radiance += ClampIndirect(throughput * hit.emission * emissionWeight, directArrival);
+        radiance += ClampFirefly(throughput * hit.emission * emissionWeight, seenArrival, directArrival);
 
     // Opaque and thin-walled surfaces are treated as two-sided: face the frame towards the viewer
     // so a back face is not mistaken for the inside of a transmissive object
@@ -202,11 +222,11 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
                        (diffuseBounces >= g_Frame.maxDiffuseBounces && specularBounces >= g_Frame.maxSpecularBounces);
     bool sampleLights = !emissionOnly && (lastSegment || !LeavesLightsToBsdf(ctx));
     // Sampled with the rounding prevVertex keeps, so both ends of an emitter's MIS see the same pmf. A
-    // vertex that samples no lights needs none, since the segment it starts takes no MIS.
+    // vertex that samples no lights needs none, since the segment it starts takes no MIS. A surface the camera
+    // sees, also past PSR's mirrors and glass, selects lights as the primary hit does.
     PackedLightSelectVertex vertex = (PackedLightSelectVertex)0;
     if (sampleLights)
-        vertex = PackLightSelectVertex(
-            MakeLightSelectVertex(hit.position, mat, ctx, wo, opaque || HasDeltaTransmission(mat), bounce));
+        vertex = PackLightSelectVertex(MakeLightSelectVertex(hit.position, mat, ctx, wo, visible ? 0u : bounce));
     // The light tree walk needs registers of its own, so across it the material is held packed and
     // the BSDF context not at all. Both are rebuilt after it, and everything from here on, sampling
     // and evaluation alike, uses the rebuilt pair.
@@ -236,7 +256,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
             float3 shadowTransmittance = intoMedium ? exp(-extinction * min(ls.distance, MAX_MEDIUM_DISTANCE))
                                                     : AtmosphereTransmittance(ls.distance);
             // Clamped unshadowed, which the shadow ray's visibility (at most 1) only scales down.
-            neeContribution = ClampIndirect(throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf), visible);
+            neeContribution = ClampFirefly(throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf), false, visible);
             traceShadowRay = true;
         }
     }
@@ -333,6 +353,9 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
                                 : 1.0;
         if ((bs.lobe & DIFFUSE_BOUNCE_LOBES) != 0)
             flags += 1u << PATH_DIFFUSE_BOUNCES_SHIFT;
+        float lobeAlpha = bs.lobe == LOBE_COAT ? ctx.coatAlpha : max(ctx.alpha.x, ctx.alpha.y);
+        bool mirrorLike = (bs.lobe & (LOBE_SPECULAR_REFLECTION | LOBE_SPECULAR_TRANSMISSION | LOBE_COAT)) != 0 && lobeAlpha <= 1.0e-4;
+        flags = SetFlag(flags, PATH_MIRROR_SEGMENT, visible && mirrorLike);
         throughput *= bs.weight * lobeProbability;
         prevBsdfPdf = bs.pdf;
         prevVertex = vertex;
@@ -456,9 +479,9 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         {
             SubsurfaceExit exit = (SubsurfaceExit)0;
             if (dot(dir, hit.Ng) < 0.0)
-                radiance += ClampIndirect(SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput,
-                                                            rayFlags, bounce + 1, rng, exit),
-                                          visible);
+                radiance += ClampFirefly(SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput,
+                                                           rayFlags, bounce + 1, rng, exit),
+                                         false, visible);
             continuePath = exit.valid;
             origin = exit.origin;
             dir = exit.dir;
@@ -538,8 +561,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 // whatever lies beyond. Rays that leave the scene cross atmosphereMissDistance of it.
                 float segmentLength = hit.hit ? hit.t : g_Frame.atmosphereMissDistance;
                 if (bounce < g_Frame.atmosphereInScatterSegments)
-                    radiance += ClampIndirect(throughput * AtmosphereInScattering(origin, dir, segmentLength, rayFlags, rng),
-                                              fromCamera || chainActive || (flags & PATH_DIRECT_SEGMENT) != 0);
+                    radiance += ClampFirefly(throughput * AtmosphereInScattering(origin, dir, segmentLength, rayFlags, rng),
+                                             SeenSegment(flags, fromCamera, chainActive), DirectSegment(flags, fromCamera, chainActive));
                 throughput *= AtmosphereTransmittance(segmentLength);
             }
     #endif
@@ -571,7 +594,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                     if (any(Lsun > 0.0))
                         Lsun *= fromCamera || smoothSegment ? 1.0 : PowerHeuristic(prevBsdfPdf, LightPdf(origin, dir, hit));
                     float3 sky = SkyRadiance(origin, dir, Lsun, fromCamera || chainActive, rng);
-                    radiance += ClampIndirect(throughput * sky, fromCamera || chainActive || (flags & PATH_DIRECT_SEGMENT) != 0);
+                    radiance += ClampFirefly(throughput * sky, SeenSegment(flags, fromCamera, chainActive),
+                                             DirectSegment(flags, fromCamera, chainActive));
                 }
                 break;
             }
@@ -635,7 +659,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         if ((deferredFlags & DEFERRED_REFLECTION) != 0)
         {
             // Solid glass's reflection leaves the surface the camera saw.
-            flags |= PATH_DIRECT_SEGMENT;
+            flags |= PATH_DIRECT_SEGMENT | PATH_MIRROR_SEGMENT;
             flags = SetFlag(flags, PATH_PANE_HIT_PENDING, (deferredFlags & DEFERRED_BRIGHTEST_PANE) != 0);
             flags = (flags & ~PATH_FROM_CAMERA) | DEFERRED_SMOOTH_SEGMENT;
         }

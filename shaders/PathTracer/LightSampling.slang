@@ -21,11 +21,14 @@ struct LightSample
 struct LightSelectVertex
 {
     float3 position;
-    float3 normal;  // the shading frame (mat.geometryNormal), the bitangent is cross(normal, tangent)
+    // The light tree's frame, the bitangent is cross(normal, tangent): mat.geometryNormal turned to the side of
+    // the glossy lobe, which for rough glass may be the transmitted side (see MakeLightSelectVertex).
+    float3 normal;
     float3 tangent;
-    float3 wo;
-    float diffuseWeight;
+    float3 wo; // the view direction whose mirror image about normal is the glossy lobe's axis
+    float diffuseWeight; // on normal's side
     float specularWeight;
+    float backDiffuseWeight; // on the far side of a transmissive surface
     float2 alpha;
     uint selection; // LIGHT_SELECT_*, how the light is picked from the light buffer
 };
@@ -93,27 +96,51 @@ LightSample SampleBufferLight(GpuLight light, float3 position, float2 u)
     return ls;
 }
 
-// The light tree only handles reflecting surfaces before bounce lightTreeBounces, others select by power.
-// From bounce lightTreeGlossyBounces on, the specular weight folds into the diffuse one to cheapen traversal.
-LightSelectVertex MakeLightSelectVertex(float3 position, OpenPBRBaseParams mat, OpenPBRContext ctx, float3 wo, bool reflectOnly,
-                                        uint bounce)
+// The light tree handles vertices before bounce lightTreeBounces, later ones select by power. From bounce
+// lightTreeGlossyBounces on, the specular weight folds into the diffuse one to cheapen traversal.
+// A transmissive surface ranks the lights on both of its sides. Its one glossy lobe is whichever of the
+// reflection and the rough transmission is the more likely: the transmission as the reflection of a virtual
+// view about the flipped normal, so that its axis is the refracted direction. The other lobe counts as
+// diffuse on its side. Smooth transmission, which NEE cannot reach, counts on neither.
+LightSelectVertex MakeLightSelectVertex(float3 position, OpenPBRBaseParams mat, OpenPBRContext ctx, float3 wo, uint bounce)
 {
     LightSelectVertex v;
     v.position = position;
-    v.normal = mat.geometryNormal;
+    // Inside a transmissive object the reflection is on the inner side. An opaque surface's frame already faces
+    // the viewer, and wo below its shading normal is the normal map's doing.
+    bool transmissive = mat.transmissionWeight > 0.0 || HasDiffuseTransmission(mat);
+    v.normal = transmissive && dot(wo, mat.geometryNormal) < 0.0 ? -mat.geometryNormal : mat.geometryNormal;
     v.tangent = mat.geometryTangent;
     v.wo = wo;
     // Fuzz is broad enough to count as diffuse. The coat joins the specular lobe, which takes the
     // roughness of whichever of the two reflects more.
-    v.diffuseWeight = ctx.probDiffuse + ctx.probFuzz;
+    float diffuseTransmitted = ctx.probDiffuse * DiffuseTransmittedShare(mat);
+    v.diffuseWeight = ctx.probDiffuse - diffuseTransmitted + ctx.probFuzz;
     v.specularWeight = ctx.probSpecR + ctx.probCoat;
+    v.backDiffuseWeight = diffuseTransmitted;
+    v.alpha = ctx.probCoat > ctx.probSpecR ? ctx.coatAlpha.xx : ctx.alpha;
+    float transmitted = HasDeltaTransmission(mat) || max(ctx.alpha.x, ctx.alpha.y) <= 1.0e-4 ? 0.0 : ctx.probSpecT;
+    float3 refracted = mat.geometryThinWalled ? -wo : refract(-wo, v.normal, 1.0 / ctx.eta);
+    if (transmitted > v.specularWeight && dot(refracted, refracted) > 0.0)
+    {
+        v.normal = -v.normal;
+        v.wo = 2.0 * dot(refracted, v.normal) * v.normal - refracted;
+        float swap = v.diffuseWeight + v.specularWeight;
+        v.diffuseWeight = v.backDiffuseWeight;
+        v.specularWeight = transmitted;
+        v.backDiffuseWeight = swap;
+        v.alpha = ctx.alpha;
+    }
+    else
+    {
+        v.backDiffuseWeight += transmitted;
+    }
     if (bounce >= g_Frame.lightTreeGlossyBounces)
     {
-        v.diffuseWeight += dot(wo, v.normal) > 0.0 ? v.specularWeight : 0.0;
+        v.diffuseWeight += dot(v.wo, v.normal) > 0.0 ? v.specularWeight : 0.0;
         v.specularWeight = 0.0;
     }
-    v.alpha = ctx.probCoat > ctx.probSpecR ? ctx.coatAlpha.xx : ctx.alpha;
-    v.selection = LightSelection(reflectOnly && bounce < g_Frame.lightTreeBounces);
+    v.selection = LightSelection(bounce < g_Frame.lightTreeBounces);
     return v;
 }
 
@@ -127,7 +154,7 @@ struct PackedLightSelectVertex
     uint wo;
     uint weights; // half2: diffuseWeight, specularWeight
     uint alpha;   // half2
-    uint selection;
+    uint selection; // low half the selection, high half backDiffuseWeight as a half
 };
 
 PackedLightSelectVertex PackLightSelectVertex(LightSelectVertex v)
@@ -139,7 +166,7 @@ PackedLightSelectVertex PackLightSelectVertex(LightSelectVertex v)
     p.wo = OctEncode(v.wo);
     p.weights = PackHalf2(float2(v.diffuseWeight, v.specularWeight));
     p.alpha = PackHalf2(v.alpha);
-    p.selection = v.selection;
+    p.selection = v.selection | (f32tof16(v.backDiffuseWeight) << 16);
     return p;
 }
 
@@ -154,14 +181,15 @@ LightSelectVertex UnpackLightSelectVertex(PackedLightSelectVertex p)
     v.diffuseWeight = weights.x;
     v.specularWeight = weights.y;
     v.alpha = UnpackHalf2(p.alpha);
-    v.selection = p.selection;
+    v.selection = p.selection & 0xFFFF;
+    v.backDiffuseWeight = f16tof32(p.selection >> 16);
     return v;
 }
 
 LightTreeShadingContext MakeLightTreeShadingContext(LightSelectVertex v)
 {
     return MakeLightTreeShadingContext(v.position, v.tangent, cross(v.normal, v.tangent), v.normal, v.wo,
-                                       v.diffuseWeight, v.specularWeight, v.alpha.x, v.alpha.y,
+                                       v.diffuseWeight, v.specularWeight, v.backDiffuseWeight, v.alpha.x, v.alpha.y,
                                        g_Frame.lightTreeDiffuseOnlyAlpha, g_Frame.lightTreeFarFieldSharpness);
 }
 

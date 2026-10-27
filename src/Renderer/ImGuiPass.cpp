@@ -538,6 +538,12 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::BeginDisabled(!settings_.clampIndirect);
 		ImGui::SliderFloat("Indirect clamp", &settings_.indirectClampValue, 0.1f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
 		ImGui::EndDisabled();
+		ImGui::Checkbox("Clamp direct", &settings_.clampDirect);
+		ImGui::SetItemTooltip("Firefly clamp for the light the visible surface scatters (sparkling highlights on glossy "
+							  "metal and rough glass). Lights seen directly or in mirror-like surfaces are not clamped");
+		ImGui::BeginDisabled(!settings_.clampDirect);
+		ImGui::SliderFloat("Direct clamp", &settings_.directClampValue, 0.1f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 
 		const ShaderExecutionReorderingSupport ser = renderContext->GetShaderExecutionReorderingSupport();

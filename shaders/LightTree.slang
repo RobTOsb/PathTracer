@@ -42,6 +42,9 @@ struct LightTreeShadingContext
     float3 normal;
     float diffuseWeight;   // reflectance of the diffuse lobe (e.g. luminance of the albedo)
     float specularWeight;  // reflectance of the glossy lobe (e.g. luminance of the Fresnel term)
+    // A transmissive surface's diffuse-like lobes on the far side of normal, as a diffuse lobe facing -normal.
+    // 0 for a surface that only reflects, which leaves out every node wholly below the tangent plane.
+    float backDiffuseWeight;
     GlossyContext glossy;
     // SG light sharpness from which a node wholly above the horizon takes the far-field (point light)
     // form of the diffuse and of the glossy importance.
@@ -55,13 +58,14 @@ struct LightTreeShadingContext
 // farFieldSharpness: SG light sharpness (squared distance over spatial variance) from which a cluster is
 // small enough, seen from here, to be treated as a point light. FLT_MAX turns the far field off.
 LightTreeShadingContext MakeLightTreeShadingContext(float3 position, float3 T, float3 B, float3 N, float3 V,
-                                                    float diffuseWeight, float specularWeight,
+                                                    float diffuseWeight, float specularWeight, float backDiffuseWeight,
                                                     float alphaX, float alphaY, float diffuseOnlyAlpha,
                                                     float farFieldSharpness)
 {
     LightTreeShadingContext ctx;
     ctx.position = position;
     ctx.normal = N;
+    ctx.backDiffuseWeight = backDiffuseWeight;
     float specular = dot(V, N) > 0.0 ? specularWeight : 0.0;
     // Depends only on the shading point, so SampleLightTree and LightTreePmf still agree.
     bool roughLobe = min(alphaX, alphaY) >= diffuseOnlyAlpha;
@@ -106,33 +110,38 @@ SGLight MakeSGLight(GpuLightTreeNode node, float3 toLight, float3 n)
 // Eq. 6 with the diffuse (Eq. 7) and glossy (Eq. 12) approximations, weighted by lobe reflectance.
 float LightTreeNodeImportance(GpuLightTreeNode node, LightTreeShadingContext ctx)
 {
-    // The bounding sphere lies entirely below the tangent plane: the true integral is zero. Also
-    // rejects the empty nodes that pad a group, whose radius is -FLT_MAX.
+    // A bounding sphere entirely below the tangent plane has a true integral of zero, unless the surface
+    // transmits. Either test rejects the empty nodes that pad a group, whose radius is -FLT_MAX.
     float3 toMean = node.meanAmplitude.xyz - ctx.position;
     float height = dot(toMean, ctx.normal);
     float radius = LightTreeRadius(node);
-    if (height < -radius)
+    bool front = height >= -radius;
+    bool back = ctx.backDiffuseWeight > 0.0 && height <= radius;
+    if (!front && !back)
         return 0.0;
 
-    SGLight sg = MakeSGLight(node, toMean, ctx.normal);
+    // A node behind a transmissive surface takes the conservative variance as seen from that side.
+    SGLight sg = MakeSGLight(node, toMean, back && height < 0.0 ? -ctx.normal : ctx.normal);
 
     bool aboveHorizon = height > radius;
 
     float importance = 0.0;
-    if (ctx.diffuseWeight > 0.0)
+    if (front && ctx.diffuseWeight > 0.0)
     {
         if (aboveHorizon && sg.sharpness >= ctx.diffuseFarFieldSharpness)
             importance += ctx.diffuseWeight * SGDiffuseImportanceFarField(sg, ctx.normal);
         else
             importance += ctx.diffuseWeight * SGDiffuseImportance(sg, ctx.normal);
     }
-    if (ctx.specularWeight > 0.0)
+    if (front && ctx.specularWeight > 0.0)
     {
         if (aboveHorizon && sg.sharpness >= ctx.glossyFarFieldSharpness)
             importance += ctx.specularWeight * SGGlossyImportanceFarField(sg, ctx.glossy);
         else
             importance += ctx.specularWeight * SGGlossyImportance(sg, ctx.glossy);
     }
+    if (back)
+        importance += ctx.backDiffuseWeight * SGDiffuseImportance(sg, -ctx.normal);
 
     // Guard against float underflow so that Eq. 1 (I > 0 whenever the integral is > 0) still holds.
     return max(importance, 1e-30);

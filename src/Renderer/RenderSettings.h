@@ -31,7 +31,7 @@ struct LightSettings
 	LightSamplingMode sampling = LIGHT_SAMPLING_TREE;
 	// Light tree: path vertices before this bounce (0 = primary hit) walk the tree, later ones select by
 	// flux, which costs one lookup instead of a walk per light sample and per emitter hit's MIS.
-	int treeBounces = 1;
+	int treeBounces = 2;
 	// Light tree: skip the glossy importance for lobes at least this rough (perceptual roughness).
 	bool diffuseOnlyRoughLobes = true;
 	float diffuseOnlyRoughness = 0.7f;
@@ -48,7 +48,7 @@ struct LightSettings
 	bool orientationSplits = false;
 	// Animates the scene's emitters (AnimateLights in main.cpp): the quad spins, which rebuilds the TLAS,
 	// the sphere pulses and the bulbs flash, and the dynamic emitters' light tree is rebuilt every frame.
-	bool animate = true;
+	bool animate = false;
 };
 
 // Geometric specular antialiasing of the opaque surfaces the camera sees: glossy lobes widen by how much
@@ -161,7 +161,11 @@ struct RenderSettings
 	// camera sees, PSR's mirrors and glass and pass-throughs not counting) is scaled down to at most
 	// indirectClampValue in its largest channel. Biased darker.
 	bool clampIndirect = true;
-	float indirectClampValue = 5.0f;
+	float indirectClampValue = 1.0f;
+	// The same for direct light: what the surface the camera sees scatters, by light sampling or a sample of a
+	// lobe that is not mirror-like. Light the camera sees, also as a mirror-like surface's image, is not clamped.
+	bool clampDirect = false;
+	float directClampValue = 1.0f;
 	// DXR 1.2 shader execution reordering: switches to the path tracing pipeline that reorders
 	// threads by material before shading each hit. Ignored where the device has no SER.
 	bool shaderExecutionReordering = true;

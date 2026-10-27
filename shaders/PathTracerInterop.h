@@ -88,7 +88,7 @@ struct FrameConstants
 	// tree, later ones and those that transmit by power, which skips the tree walks there.
 	uint lightTreeBounces;
 	// Firefly clamp: indirect light (reaching the surface the camera sees after more than one scattering, see
-	// ClampIndirect) is scaled down to at most this in its largest channel per contribution. FLT_MAX = off.
+	// ClampFirefly) is scaled down to at most this in its largest channel per contribution. FLT_MAX = off.
 	float indirectClamp;
 	// ATMOSPHERE: the air's multiple-scattered light counts only where a ray in a random direction from the
 	// in-scattering point reaches the sky.
@@ -126,9 +126,11 @@ struct FrameConstants
 	// PSR: past the camera's first surface, a chain through smooth solid glass takes the lobe it follows rather than
 	// a random one (PsrStrongerLobe), leaving out the other's light. 0 = off.
 	uint psrStrongerLobe;
+	// Firefly clamp of direct light: as indirectClamp, for light the surface the camera sees scatters (see
+	// ClampFirefly). Light the camera sees, also in a mirror-like surface, is never clamped. FLT_MAX = off.
+	float directClamp;
 	uint pad0;
 	uint pad1;
-	uint pad2;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
