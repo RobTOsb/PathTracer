@@ -31,12 +31,8 @@
 // 18: KHR_materials_volume attenuation colour and distance in GpuMaterial.
 // 19: KHR_materials_specular, GpuMaterial 144 bytes.
 // 20: alpha-blended primitives get no opacity micromaps (they were baked as masks at half their alpha).
-<<<<<<< HEAD
 // 21: alpha-blended primitives get micromaps again: transparent where alpha < 1/255, unknown where partly there.
 constexpr uint32_t kSceneCacheVersion = 21;
-=======
-constexpr uint32_t kSceneCacheVersion = 20;
->>>>>>> 012929c7edd7a6e7c68a8a9eb010767871a42d70
 
 struct SceneCacheTexture
 {

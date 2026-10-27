@@ -1842,15 +1842,9 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 			continue;
 		}
 		const MaterialData material = UnpackGpuMaterial(materials[desc.materialIndex]);
-<<<<<<< HEAD
 		// Pass-through surfaces always need the shadow any-hit shader for what they let through.
 		const bool blended = material.alphaMode == ALPHA_MODE_BLEND;
 		if ((material.alphaMode != ALPHA_MODE_MASK && !blended) || (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
-=======
-		// Only masks: blended and pass-through surfaces always need the shadow any-hit shader for what they
-		// let through.
-		if (material.alphaMode != ALPHA_MODE_MASK || (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
->>>>>>> 012929c7edd7a6e7c68a8a9eb010767871a42d70
 		{
 			continue;
 		}

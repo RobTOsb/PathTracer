@@ -80,12 +80,7 @@ static float QueryDisplayPeakNits(void *hwnd)
 //constexpr const char *kDefaultScenePath = "h:\\suntemple.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\SubsurfaceScene\\scene.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\SphereRoom\\SphereRoom.glb";
-<<<<<<< HEAD
 constexpr const char *kDefaultScenePath = "h:\\SanMiguel.glb";
-=======
-//constexpr const char *kDefaultScenePath = "h:\\SanMiguel.glb";
-constexpr const char *kDefaultScenePath = "h:\\IntelSponzaLionAngel.glb";
->>>>>>> 012929c7edd7a6e7c68a8a9eb010767871a42d70
 
 // Intel Sponza's emissive instances, numbered as the load logs them: from 0 the lamps' bulbs, then a
 // 1 m quad in master_material with the bulb material (left alone), the textured plane and the red sphere.
