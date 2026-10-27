@@ -176,6 +176,9 @@ struct RenderSettings
 	bool specularMaterials = true;
 	bool transmissiveMaterials = true;
 	int glassReflectionSplits = 2;
+	// Alpha-blended surfaces in front of the camera whose surface and what is behind it are both traced (DLSS-RR
+	// guides that do not flicker), instead of one or the other by chance.
+	int blendLayerSplits = 4;
 	// Solid subsurface materials: the orders of scattering inside the object that are rendered, light
 	// straight through and one scattering event path traced, the rest from a diffusion profile. All off
 	// falls back to OpenPBR's Lambertian stand-in. The radius scale multiplies every material's radius.

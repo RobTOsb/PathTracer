@@ -29,11 +29,16 @@ struct MaterialGeometryFlags
 	{
 		const bool passThrough = (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0;
 		isOpaque = material.alphaMode == ALPHA_MODE_OPAQUE && !passThrough;
-		noDuplicateAnyHit = passThrough;
+		// Shadow rays multiply in what these let through, once per triangle.
+		noDuplicateAnyHit = passThrough || material.alphaMode == ALPHA_MODE_BLEND;
+		// A mask's unknown micro-triangles may be taken as opaque or transparent. A blended surface's are
+		// partly there, which only its any-hit shaders get right.
+		opacityMicromap2State = material.alphaMode == ALPHA_MODE_MASK;
 	}
 
 	bool isOpaque;
 	bool noDuplicateAnyHit;
+	bool opacityMicromap2State;
 };
 
 class RenderGPUScene final : public Scene::GPUScene
@@ -118,6 +123,14 @@ public:
 	bool HasOpacityMicromaps() const
 	{
 		return ommTlas_ != InvalidAccelerationStructureHandle;
+	}
+
+	// Bindless index of the micromap TLAS whose alpha-tested instances read their micromaps in 2-state mode,
+	// for the rays past RenderSettings::opacityMicromap2StateBounce. Only with HasOpacityMicromaps.
+	uint32_t GetOpacityMicromap2StateTLASIndex() const
+	{
+		const ResourceHandle srv = omm2StateTlasSRV_ != InvalidResourceHandle ? omm2StateTlasSRV_ : ommTlasSRV_;
+		return srv != InvalidResourceHandle ? renderContext_->GetResourceViewInfo(srv).descriptorIndex : 0;
 	}
 
 	// Bindless indices of the material table (GpuMaterial) and primitive table (PrimitiveGPUDesc).
@@ -417,6 +430,7 @@ private:
 	std::vector<TLASInstanceRef> tlasRefs_;
 	std::vector<TLASInstance> tlasInstances_;
 	std::vector<TLASInstance> ommTlasInstances_;
+	std::vector<TLASInstance> omm2StateTlasInstances_;
 	AccelerationStructureHandle tlas_ = InvalidAccelerationStructureHandle;
 	ResourceHandle tlasSRV_ = InvalidResourceHandle;
 
@@ -435,6 +449,10 @@ private:
 	std::vector<AccelerationStructureHandle> ommBlases_;
 	AccelerationStructureHandle ommTlas_ = InvalidAccelerationStructureHandle;
 	ResourceHandle ommTlasSRV_ = InvalidResourceHandle;
+	// The micromap TLAS again with the masks' instances flagged to read their micromaps in 2-state mode,
+	// which a ray flag would also force on the blended surfaces'. Invalid when no mask has micromaps.
+	AccelerationStructureHandle omm2StateTlas_ = InvalidAccelerationStructureHandle;
+	ResourceHandle omm2StateTlasSRV_ = InvalidResourceHandle;
 
 	float3 boundsMin_ = { 0.0f, 0.0f, 0.0f };
 	float3 boundsMax_ = { 0.0f, 0.0f, 0.0f };

@@ -155,15 +155,33 @@ template<uint RayFlags> using RayQueryAllowingOpacityMicromaps = RayQuery<RayFla
 }
 #endif
 
-// Flags for the rays from a path vertex at this bounce: past g_Frame.opacityMicromap2StateBounce they
-// read the micromaps in 2-state mode and skip the alpha test.
+// Not a ray flag, but carried with them: the ray traces the TLAS whose masks read their micromaps in 2-state
+// mode (FrameConstants::opacityMicromap2StateScene). SceneFor picks the TLAS and RayFlags clears it.
+static const uint RAY_SCENE_OMM_2_STATE = 0x80000000u;
+
+// Flags for the rays from a path vertex at this bounce: past g_Frame.opacityMicromap2StateBounce the masks
+// read their micromaps in 2-state mode and skip the alpha test.
 uint OpacityMicromapRayFlags(uint bounce)
 {
 #ifdef OPACITY_MICROMAPS
-    return bounce >= g_Frame.opacityMicromap2StateBounce ? RAY_FLAG_FORCE_OMM_2_STATE : RAY_FLAG_NONE;
+    return bounce >= g_Frame.opacityMicromap2StateBounce ? RAY_SCENE_OMM_2_STATE : RAY_FLAG_NONE;
 #else
     return RAY_FLAG_NONE;
 #endif
+}
+
+RaytracingAccelerationStructure SceneFor(uint rayFlags)
+{
+#ifdef OPACITY_MICROMAPS
+    if ((rayFlags & RAY_SCENE_OMM_2_STATE) != 0)
+        return ResourceDescriptorHeap[g_Frame.opacityMicromap2StateScene];
+#endif
+    return g_Scene;
+}
+
+uint RayFlags(uint rayFlags)
+{
+    return rayFlags & ~RAY_SCENE_OMM_2_STATE;
 }
 
 void GenerateCameraRay(uint2 pixel, float2 u, out float3 origin, out float3 dir)
@@ -198,8 +216,8 @@ HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvat
 #ifdef SER
     // DXR 1.2 SER: traverse, regroup threads by hit/miss and material, then shade. The threads stay in
     // the new order for the shading in TracePath, which is where the material divergence is.
-    HitObject hitObject =
-        HitObject::TraceRay(g_Scene, rayFlags, 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
+    HitObject hitObject = HitObject::TraceRay(SceneFor(rayFlags), RayFlags(rayFlags), 0xFF, STANDARD_RAY_INDEX, 0,
+                                              STANDARD_RAY_INDEX, ray, payload);
     if (reorder)
     {
         uint materialHint = hitObject.IsHit() ? LoadPrimitive(hitObject.GetInstanceID()).materialIndex : 0;
@@ -211,7 +229,7 @@ HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvat
     payload.shape = uint2(needCurvature ? 1u : 0u, 0u);
     HitObject::Invoke(hitObject, payload);
 #else
-    TraceRay(g_Scene, rayFlags, 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
+    TraceRay(SceneFor(rayFlags), RayFlags(rayFlags), 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
 #endif
     return payload;
 }

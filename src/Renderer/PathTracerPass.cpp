@@ -322,12 +322,14 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.anisotropicSegments = static_cast<uint>(std::max(settings_.anisotropicSegments, 0));
 	// TracePath counts splits in 8 bits.
 	constants.glassReflectionSplits = static_cast<uint>(std::clamp(settings_.glassReflectionSplits, 0, 255));
+	constants.blendLayerSplits = static_cast<uint>(std::clamp(settings_.blendLayerSplits, 0, 255));
 	constants.indirectClamp = settings_.clampIndirect && approximations ? std::max(settings_.indirectClampValue, 0.0f) : FLT_MAX;
 	constants.directClamp = settings_.clampDirect && approximations ? std::max(settings_.directClampValue, 0.0f) : FLT_MAX;
 	constants.subsurfaceComponents = (settings_.subsurfaceZeroScattering ? SUBSURFACE_ZERO_SCATTERING : 0u) |
 									 (settings_.subsurfaceSingleScattering ? SUBSURFACE_SINGLE_SCATTERING : 0u) |
 									 (settings_.subsurfaceMultipleScattering ? SUBSURFACE_MULTIPLE_SCATTERING : 0u);
 	constants.subsurfaceRadiusScale = std::max(settings_.subsurfaceRadiusScale, 0.0f);
+	constants.opacityMicromap2StateScene = scene_.HasOpacityMicromaps() ? scene_.GetOpacityMicromap2StateTLASIndex() : 0u;
 	constants.opacityMicromap2StateBounce = settings_.opacityMicromap2StateBounce >= 0
 													? static_cast<uint>(settings_.opacityMicromap2StateBounce)
 													: UINT32_MAX;

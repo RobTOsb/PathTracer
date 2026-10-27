@@ -30,6 +30,33 @@ namespace
 	constexpr int kOpacityMicromapStates = 4;
 	constexpr int kOpacityMicromapMaxLevel = 6;
 	constexpr float kOpacityMicromapTargetEdge = 3.0f;
+	// BLEND_MIN_OPACITY in PathTracer/Materials.slang: the alpha below which a blended surface is cut.
+	constexpr float kBlendMinOpacity = 1.0f / 255.0f;
+	// D3D12_RAYTRACING_OPACITY_MICROMAP_STATE, two bits per micro-triangle in 4-state micromaps.
+	constexpr uint8_t kMicroTriangleTransparent = 0;
+	constexpr uint8_t kMicroTriangleOpaque = 1;
+	constexpr uint8_t kMicroTriangleUnknownOpaque = 3;
+
+	// A blended surface's micromap from its two cuts, in place of the first: transparent where nothing of
+	// it is there, opaque where all of it is (null opaque: nowhere), unknown between, for the any-hit
+	// shaders to blend. The states pair up two bits at a time, whatever order they are in.
+	void CombineBlendMicromap(uint8_t *there, const uint8_t *opaque, size_t size)
+	{
+		for (size_t i = 0; i < size; ++i)
+		{
+			uint8_t combined = 0;
+			for (int shift = 0; shift < 8; shift += 2)
+			{
+				const uint8_t thereState = (there[i] >> shift) & 3;
+				const uint8_t opaqueState = opaque != nullptr ? (opaque[i] >> shift) & 3 : kMicroTriangleTransparent;
+				const uint8_t state = thereState == kMicroTriangleTransparent ? kMicroTriangleTransparent
+									  : opaqueState == kMicroTriangleOpaque	  ? kMicroTriangleOpaque
+																			  : kMicroTriangleUnknownOpaque;
+				combined |= static_cast<uint8_t>(state << shift);
+			}
+			there[i] = combined;
+		}
+	}
 	constexpr uint32_t kNoOpacityMicromaps = UINT32_MAX;
 	// glTF allows an IOR down to 1, an interface that hardly reflects or bends light at all, which the
 	// BSDF's Fresnel and refraction handle badly.
@@ -38,18 +65,6 @@ namespace
 	bool IsUsablePrimitive(const Scene::Primitive &primitive)
 	{
 		return primitive.IsValid() && primitive.HasIndices() && primitive.GetIndexCount() >= 3;
-	}
-
-	// The material as the shaders see it: blended surfaces are traced as masked at half their opacity.
-	MaterialData UnpackTracedMaterial(const GpuMaterial &packed)
-	{
-		MaterialData material = UnpackGpuMaterial(packed);
-		if (material.alphaMode == ALPHA_MODE_BLEND)
-		{
-			material.alphaMode = ALPHA_MODE_MASK;
-			material.alphaCutoff = 0.5f * material.baseColour.w;
-		}
-		return material;
 	}
 
 	// Transforms a point by the scene's row-major 3x4 layout (3x3 for row vectors, translation in
@@ -328,7 +343,7 @@ RenderGPUScene::RenderGPUScene(RenderContext *renderContext) : renderContext_(re
 
 RenderGPUScene::~RenderGPUScene()
 {
-	for (AccelerationStructureHandle tlas: { tlas_, ommTlas_ })
+	for (AccelerationStructureHandle tlas: { tlas_, ommTlas_, omm2StateTlas_ })
 	{
 		if (tlas != InvalidAccelerationStructureHandle)
 		{
@@ -1579,11 +1594,7 @@ void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMater
 			packed.transmissionIor = (packed.transmissionIor & 0xFFFFu) |
 									 (static_cast<uint32_t>(DirectX::PackedVector::XMConvertFloatToHalf(kMinIor)) << 16);
 		}
-		const MaterialData material = UnpackTracedMaterial(packed);
-		if (UnpackGpuMaterial(packed).alphaMode == ALPHA_MODE_BLEND)
-		{
-			packed = PackGpuMaterial(material);
-		}
+		const MaterialData material = UnpackGpuMaterial(packed);
 		// Derived here rather than baked, so cached scenes get it too.
 		if (IsSimpleMaterial(packed))
 		{
@@ -1648,7 +1659,10 @@ std::vector<uint32_t> RenderGPUScene::CollectEmitters(const Scene::GLTFScene &sc
 		const TLASInstanceRef &ref = tlasInstances[i];
 		const uint32_t materialIndex = primitiveDescs[ref.primitive].materialIndex;
 		const MaterialData material = UnpackGpuMaterial(materials[materialIndex]);
-		const float3 emissive = material.emissive;
+		// A blended emitter is only there by its alpha, which the light has its factor of; a texture's alpha
+		// would need the albedo texture in the light, so NEE leaves that out.
+		const float3 emissive = material.alphaMode == ALPHA_MODE_BLEND ? material.emissive * std::clamp(material.baseColour.w, 0.0f, 1.0f)
+																	   : material.emissive;
 		if (!(emissive.x > 0.0f || emissive.y > 0.0f || emissive.z > 0.0f))
 		{
 			continue;
@@ -1763,16 +1777,54 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 		uint32_t width;
 		uint32_t height;
 	};
-	// The texture's own alpha where the material cuts at half of it, otherwise a copy remapped to put
-	// the cut there, kept per material.
-	std::map<uint32_t, std::vector<uint8_t>> remappedAlpha;
-	std::map<uint32_t, AlphaPlane> planes;
+	// The texture's own alpha where the cut is at half of it, otherwise a copy remapped to put the cut
+	// there, kept per material and cut (in texture alpha, in (0, 1]).
+	std::map<std::pair<uint32_t, float>, std::vector<uint8_t>> remappedAlpha;
+	std::map<std::pair<uint32_t, float>, AlphaPlane> planes;
+	auto planeFor = [&](uint32_t materialIndex, const Scene::Texture &texture, float threshold) -> const AlphaPlane *
+	{
+		auto [plane, isNew] = planes.try_emplace({ materialIndex, threshold });
+		if (!isNew)
+		{
+			return &plane->second;
+		}
+		const uint32_t width = static_cast<uint32_t>(texture.GetWidth());
+		const uint32_t height = static_cast<uint32_t>(texture.GetHeight());
+		if (std::fabs(threshold - 0.5f) < 0.5f / 255.0f)
+		{
+			plane->second = { texture.GetPixels() + 3, 4, static_cast<size_t>(width) * 4, width, height };
+			return &plane->second;
+		}
+		// Piecewise linear, threshold to 0.5, so the same texels pass.
+		std::array<uint8_t, 256> remap;
+		for (int v = 0; v < 256; ++v)
+		{
+			const float a = static_cast<float>(v) / 255.0f;
+			const float mapped = a < threshold ? 0.5f * a / threshold
+											   : (threshold < 1.0f ? 0.5f + 0.5f * (a - threshold) / (1.0f - threshold) : 1.0f);
+			remap[v] = static_cast<uint8_t>(std::clamp(mapped * 255.0f + 0.5f, 0.0f, 255.0f));
+		}
+		std::vector<uint8_t> &alpha = remappedAlpha[{ materialIndex, threshold }];
+		alpha.resize(static_cast<size_t>(width) * height);
+		const uint8_t *pixels = texture.GetPixels();
+		for (size_t i = 0; i < alpha.size(); ++i)
+		{
+			alpha[i] = remap[pixels[4 * i + 3]];
+		}
+		plane->second = { alpha.data(), 1, width, width, height };
+		return &plane->second;
+	};
 
 	// Each micromap before compaction: its level and offset, and the triangle and plane it comes from.
+	// A blended surface's is cut twice: plane where nothing of it is there, opaquePlane (null if it never
+	// is) where all of it is, see CombineBlendMicromap. It never reads them in 2-state mode
+	// (MaterialGeometryFlags::opacityMicromap2State).
 	struct Entry
 	{
 		float uv[3][2];
 		const AlphaPlane *plane;
+		const AlphaPlane *opaquePlane;
+		bool blended;
 	};
 	std::vector<uint8_t> levels;
 	std::vector<uint32_t> offsets;
@@ -1780,6 +1832,7 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 	size_t dataSize = 0;
 	uint32_t ommPrimitives = 0;
 	uint32_t uniformPrimitives = 0;
+	uint32_t blendedPrimitives = 0;
 
 	for (size_t p = 0; p < primitiveDescs.size(); ++p)
 	{
@@ -1788,25 +1841,32 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 		{
 			continue;
 		}
-		const MaterialData material = UnpackTracedMaterial(materials[desc.materialIndex]);
+		const MaterialData material = UnpackGpuMaterial(materials[desc.materialIndex]);
 		// Pass-through surfaces always need the shadow any-hit shader for what they let through.
-		if (material.alphaMode != ALPHA_MODE_MASK || (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
+		const bool blended = material.alphaMode == ALPHA_MODE_BLEND;
+		if ((material.alphaMode != ALPHA_MODE_MASK && !blended) || (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
 		{
 			continue;
 		}
 
-		// The any-hit shader cuts where baseColour.w * texture alpha < alphaCutoff.
+		// The any-hit shaders cut where baseColour.w * texture alpha < the cutoff.
 		const Scene::Texture *texture = desc.materialIndex < scene.GetMaterialCount() &&
 												scene.GetMaterial(desc.materialIndex).GetAlbedoTexture().IsValid()
 										? &scene.GetMaterial(desc.materialIndex).GetAlbedoTexture()
 										: nullptr;
 		const float factor = material.baseColour.w;
-		const float cutoff = material.alphaCutoff;
+		const float cutoff = blended ? kBlendMinOpacity : material.alphaCutoff;
 		const uint32_t triangleCount = desc.indexCount / 3;
-		ommIndexOffsets_[p] = static_cast<uint32_t>(ommIndices_.size());
 
 		const bool neverCut = cutoff <= 0.0f;
 		const bool alwaysCut = !neverCut && (texture == nullptr ? factor < cutoff : !(factor >= cutoff));
+		// A blended surface of one alpha that is partly there needs the any-hit shaders everywhere.
+		if (blended && texture == nullptr && !alwaysCut && factor < 1.0f)
+		{
+			continue;
+		}
+		ommIndexOffsets_[p] = static_cast<uint32_t>(ommIndices_.size());
+		blendedPrimitives += blended ? 1 : 0;
 		if (neverCut || alwaysCut || texture == nullptr)
 		{
 			// One alpha over the whole primitive.
@@ -1818,37 +1878,9 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 			continue;
 		}
 
-		auto [plane, isNew] = planes.try_emplace(desc.materialIndex);
-		if (isNew)
-		{
-			const uint32_t width = static_cast<uint32_t>(texture->GetWidth());
-			const uint32_t height = static_cast<uint32_t>(texture->GetHeight());
-			const float threshold = cutoff / factor; // in texture alpha, in (0, 1]
-			if (std::fabs(threshold - 0.5f) < 0.5f / 255.0f)
-			{
-				plane->second = { texture->GetPixels() + 3, 4, static_cast<size_t>(width) * 4, width, height };
-			}
-			else
-			{
-				// Piecewise linear, threshold to 0.5, so the same texels pass.
-				std::array<uint8_t, 256> remap;
-				for (int v = 0; v < 256; ++v)
-				{
-					const float a = static_cast<float>(v) / 255.0f;
-					const float mapped = a < threshold ? 0.5f * a / threshold
-													   : (threshold < 1.0f ? 0.5f + 0.5f * (a - threshold) / (1.0f - threshold) : 1.0f);
-					remap[v] = static_cast<uint8_t>(std::clamp(mapped * 255.0f + 0.5f, 0.0f, 255.0f));
-				}
-				std::vector<uint8_t> &alpha = remappedAlpha[desc.materialIndex];
-				alpha.resize(static_cast<size_t>(width) * height);
-				const uint8_t *pixels = texture->GetPixels();
-				for (size_t i = 0; i < alpha.size(); ++i)
-				{
-					alpha[i] = remap[pixels[4 * i + 3]];
-				}
-				plane->second = { alpha.data(), 1, width, width, height };
-			}
-		}
+		const AlphaPlane *plane = planeFor(desc.materialIndex, *texture, cutoff / factor);
+		const AlphaPlane *opaquePlane =
+				blended && factor >= 1.0f ? planeFor(desc.materialIndex, *texture, 1.0f / factor) : nullptr;
 
 		// One micromap per distinct UV triangle, at a level for its texel area.
 		const GpuVertex *vertices = &vertices_[desc.vertexOffset];
@@ -1864,8 +1896,8 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 													   &vertices[0].texCoord.x,
 													   desc.vertexCount,
 													   sizeof(GpuVertex),
-													   plane->second.width,
-													   plane->second.height,
+													   plane->width,
+													   plane->height,
 													   kOpacityMicromapMaxLevel,
 													   kOpacityMicromapTargetEdge);
 
@@ -1882,7 +1914,9 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 				entry.uv[c][0] = uv.x;
 				entry.uv[c][1] = uv.y;
 			}
-			entry.plane = &plane->second;
+			entry.plane = plane;
+			entry.opaquePlane = opaquePlane;
+			entry.blended = blended;
 		}
 		for (int index: primitiveIndices)
 		{
@@ -1916,6 +1950,28 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 												  entry.plane->pitch,
 												  entry.plane->width,
 												  entry.plane->height);
+					  if (!entry.blended)
+					  {
+						  return;
+					  }
+					  const size_t size = meshopt_opacityMapEntrySize(levels[e], kOpacityMicromapStates);
+					  std::vector<uint8_t> opaque;
+					  if (entry.opaquePlane != nullptr)
+					  {
+						  opaque.resize(size);
+						  meshopt_opacityMapRasterize(opaque.data(),
+													  levels[e],
+													  kOpacityMicromapStates,
+													  entry.uv[0],
+													  entry.uv[1],
+													  entry.uv[2],
+													  entry.opaquePlane->data,
+													  entry.opaquePlane->stride,
+													  entry.opaquePlane->pitch,
+													  entry.opaquePlane->width,
+													  entry.opaquePlane->height);
+					  }
+					  CombineBlendMicromap(&data[offsets[e]], opaque.empty() ? nullptr : opaque.data(), size);
 				  });
 
 	// Across the whole scene: one copy of each distinct micromap, and special indices for those in one state.
@@ -1938,10 +1994,11 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 	}
 
 	const size_t special = std::count_if(ommIndices_.begin(), ommIndices_.end(), [](int32_t i) { return i < 0; });
-	logi("GPUScene: opacity micromaps for {} alpha-tested primitive(s) ({} of one alpha): {} triangles, {:.0f}% "
-		 "in one state, {} micromaps ({} before compaction), {:.2f} MB, in {:.0f} ms",
+	logi("GPUScene: opacity micromaps for {} alpha-tested primitive(s) ({} of one alpha, {} blended): {} triangles, "
+		 "{:.0f}% in one state, {} micromaps ({} before compaction), {:.2f} MB, in {:.0f} ms",
 		 ommPrimitives + uniformPrimitives,
 		 uniformPrimitives,
+		 blendedPrimitives,
 		 ommIndices_.size(),
 		 100.0 * static_cast<double>(special) / static_cast<double>(ommIndices_.size()),
 		 count,
@@ -2034,7 +2091,9 @@ void RenderGPUScene::BuildAccelerationStructures()
 	// match the emitter buffer, which is indexed by InstanceIndex().
 	std::vector<TLASInstance> tlasInstances;
 	std::vector<TLASInstance> ommTlasInstances;
+	std::vector<TLASInstance> omm2StateTlasInstances;
 	bool anyMicromaps = false;
+	bool anyMaskMicromaps = false;
 	for (const TLASInstanceRef &ref: EnumerateTLASInstances())
 	{
 		// The scene stores row-vector matrices; DXR wants the 3x4 for column vectors.
@@ -2055,6 +2114,14 @@ void RenderGPUScene::BuildAccelerationStructures()
 			anyMicromaps = true;
 		}
 		ommTlasInstances.push_back(tlasInstance);
+
+		if (ommBlases_[ref.primitive] != InvalidAccelerationStructureHandle &&
+			materialGeometry_[primitiveDescs[ref.primitive].materialIndex].opacityMicromap2State)
+		{
+			tlasInstance.flags = TLASInstanceFlagForceOpacityMicromap2State;
+			anyMaskMicromaps = true;
+		}
+		omm2StateTlasInstances.push_back(tlasInstance);
 	}
 
 	if (tlasInstances.empty())
@@ -2070,14 +2137,25 @@ void RenderGPUScene::BuildAccelerationStructures()
 		ommTlas_ = renderContext_->CreateTLAS(ommTlasInstances);
 		renderContext_->BuildAccelerationStructure(ommTlas_);
 	}
+	// Without a mask's micromaps 2-state mode changes nothing, and the micromap TLAS serves for it too.
+	if (anyMaskMicromaps)
+	{
+		omm2StateTlas_ = renderContext_->CreateTLAS(omm2StateTlasInstances);
+		renderContext_->BuildAccelerationStructure(omm2StateTlas_);
+	}
 	tlasRefs_ = EnumerateTLASInstances();
 	tlasInstances_ = std::move(tlasInstances);
 	ommTlasInstances_ = anyMicromaps ? std::move(ommTlasInstances) : std::vector<TLASInstance>();
+	omm2StateTlasInstances_ = anyMaskMicromaps ? std::move(omm2StateTlasInstances) : std::vector<TLASInstance>();
 	renderContext_->UAVBarrierForAccelerationStructures();
 	tlasSRV_ = renderContext_->GetAccelerationStructureSRV(tlas_);
 	if (anyMicromaps)
 	{
 		ommTlasSRV_ = renderContext_->GetAccelerationStructureSRV(ommTlas_);
+	}
+	if (anyMaskMicromaps)
+	{
+		omm2StateTlasSRV_ = renderContext_->GetAccelerationStructureSRV(omm2StateTlas_);
 	}
 
 	logi("GPUScene: built {} BLAS(es) ({} with opacity micromaps) and {} TLAS(es) with {} instance(s)",
@@ -2085,7 +2163,7 @@ void RenderGPUScene::BuildAccelerationStructures()
 		 std::count_if(ommBlases_.begin(),
 					   ommBlases_.end(),
 					   [](AccelerationStructureHandle h) { return h != InvalidAccelerationStructureHandle; }),
-		 anyMicromaps ? 2 : 1,
+		 1 + (anyMicromaps ? 1 : 0) + (anyMaskMicromaps ? 1 : 0),
 		 tlasInstances_.size());
 }
 
@@ -2111,12 +2189,20 @@ void RenderGPUScene::UpdateAccelerationStructures()
 		{
 			std::memcpy(ommTlasInstances_[i].transform, transform, sizeof(ommTlasInstances_[i].transform));
 		}
+		if (!omm2StateTlasInstances_.empty())
+		{
+			std::memcpy(omm2StateTlasInstances_[i].transform, transform, sizeof(omm2StateTlasInstances_[i].transform));
+		}
 	}
 
 	renderContext_->UpdateTLAS(tlas_, tlasInstances_);
 	if (ommTlas_ != InvalidAccelerationStructureHandle)
 	{
 		renderContext_->UpdateTLAS(ommTlas_, ommTlasInstances_);
+	}
+	if (omm2StateTlas_ != InvalidAccelerationStructureHandle)
+	{
+		renderContext_->UpdateTLAS(omm2StateTlas_, omm2StateTlasInstances_);
 	}
 	renderContext_->UAVBarrierForAccelerationStructures();
 }

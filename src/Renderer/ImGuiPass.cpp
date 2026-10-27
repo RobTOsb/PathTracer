@@ -567,16 +567,17 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		const bool micromaps = scene_.HasOpacityMicromaps();
 		ImGui::BeginDisabled(!micromaps);
 		ImGui::Checkbox("Opacity micromaps", &settings_.opacityMicromaps);
-		ImGui::SetItemTooltip("DXR 1.2 opacity micromaps on the alpha-tested geometry: the alpha test only runs "
-							  "where an alpha edge crosses a micro-triangle");
+		ImGui::SetItemTooltip("DXR 1.2 opacity micromaps on the alpha-tested and blended geometry: the alpha test "
+							  "only runs where an alpha edge crosses a micro-triangle, or a blended surface is partly "
+							  "there");
 		ImGui::BeginDisabled(!settings_.opacityMicromaps);
 		ImGui::SliderInt("OMM 2-state from bounce",
 						 &settings_.opacityMicromap2StateBounce,
 						 -1,
 						 8,
 						 settings_.opacityMicromap2StateBounce < 0 ? "never" : "%d");
-		ImGui::SetItemTooltip("Rays from path vertices at this bounce on (0 = camera rays) read the micromaps in "
-							  "2-state mode and skip the alpha test entirely");
+		ImGui::SetItemTooltip("Rays from path vertices at this bounce on (0 = camera rays) read the masks' micromaps "
+							  "in 2-state mode and skip their alpha test entirely. Blended surfaces keep theirs");
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 		if (!micromaps)
@@ -593,6 +594,10 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SliderInt("Glass reflection splits", &settings_.glassReflectionSplits, 0, 4);
 		ImGui::SetItemTooltip("Smooth glass in front of the camera, thin panes or solid, whose reflection is traced as "
 							  "well as what it lets through, instead of one or the other. 0 = off");
+		ImGui::SliderInt("Blend layer splits", &settings_.blendLayerSplits, 0, 8);
+		ImGui::SetItemTooltip("Alpha-blended surfaces in front of the camera, whose surface is traced as well as "
+							  "what is behind it, so the DLSS-RR guides do not flicker. Past them the path takes one "
+							  "or the other by chance. Counts glass reflection splits too. 0 = off");
 
 		ImGui::TextUnformatted("Subsurface scattering");
 		ImGui::Checkbox("Zero##Subsurface", &settings_.subsurfaceZeroScattering);

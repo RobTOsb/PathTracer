@@ -1,4 +1,4 @@
-// Splitting camera paths at glass: one lobe now, the other deferred, plus the panes' reflections.
+// Splitting camera paths at glass and blended surfaces: one lobe now, the other deferred, plus the panes' reflections.
 import OpenPBRBSDF;
 import PathTracer.Resources;
 
@@ -42,6 +42,7 @@ struct DeferredBranch
     float3 dir;
     float coneWidth;
     float coneSpread;
+    float rrInvScale;
 };
 
 void StoreDeferredBranch(DeferredBranch b)
@@ -52,6 +53,7 @@ void StoreDeferredBranch(DeferredBranch b)
     p.throughput = b.throughput;
     p.coneSpread = b.coneSpread;
     p.direction = b.dir;
+    p.rrInvScale = b.rrInvScale;
     g_DeferredBranches[PixelIndex()] = p;
 }
 
@@ -64,5 +66,6 @@ DeferredBranch LoadDeferredBranch()
     b.dir = p.direction;
     b.coneWidth = p.coneWidth;
     b.coneSpread = p.coneSpread;
+    b.rrInvScale = p.rrInvScale;
     return b;
 }

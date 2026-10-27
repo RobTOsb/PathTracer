@@ -81,8 +81,8 @@ struct FrameConstants
 	float subsurfaceRadiusScale; // multiplies every material's subsurface radius
 
 	// Opacity micromaps (OPACITY_MICROMAPS permutation only): path vertices from this bounce on (0 = the
-	// camera ray) trace with RAY_FLAG_FORCE_OMM_2_STATE, taking the micromaps' unknown micro-triangles as
-	// opaque or transparent instead of running the alpha test. UINT_MAX = never.
+	// camera ray) trace the TLAS at opacityMicromap2StateScene, whose masks take their micromaps' unknown
+	// micro-triangles as opaque or transparent instead of running the alpha test. UINT_MAX = never.
 	uint opacityMicromap2StateBounce;
 	// LIGHT_SAMPLING_TREE: path vertices before this bounce (0 = the primary hit) select lights with the
 	// tree, later ones and those that transmit by power, which skips the tree walks there.
@@ -129,8 +129,12 @@ struct FrameConstants
 	// Firefly clamp of direct light: as indirectClamp, for light the surface the camera sees scatters (see
 	// ClampFirefly). Light the camera sees, also in a mirror-like surface, is never clamped. FLT_MAX = off.
 	float directClamp;
-	uint pad0;
-	uint pad1;
+	// DLSS-RR: at most this many splits of the camera ray at alpha-blended surfaces (see TracePath), which share
+	// their count with glassReflectionSplits. Past them a blended surface is there or not by chance.
+	uint blendLayerSplits;
+	// OPACITY_MICROMAPS: bindless index of that TLAS. Blended surfaces keep 4-state micromaps in it, since a ray
+	// flag (RAY_FLAG_FORCE_OMM_2_STATE) would force 2-state on them too, which their shadows cannot take.
+	uint opacityMicromap2StateScene;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -473,6 +477,7 @@ struct GpuCameraState
 	uint2 transmittance; // half: camera transmittance rgb, then unused
 	float distance;
 	float3 cameraDirection; // the camera ray's, rather than held in registers through the path
+	uint3 layerAlbedos; // half: diffuse rgb, specular rgb of the blended layers the guides do not describe
 };
 
 // One per render pixel: the branch a glass split leaves for later (PathTracer/GlassSplit.slang).
@@ -483,6 +488,7 @@ struct GpuDeferredBranch
 	float3 throughput;
 	float coneSpread;
 	float3 direction;
+	float rrInvScale; // the branch's Russian roulette scale, see TracePath
 };
 
 // Root constants for the tonemap compute pass (bound as g_PushConstants).
@@ -573,8 +579,8 @@ static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
 static_assert(sizeof(GpuCameraGuides) == 48 && sizeof(GpuSpecularChain) == 76 && sizeof(GpuPaneReflection) == 20,
 			  "GpuCameraState parts must match their HLSL layout");
-static_assert(sizeof(GpuCameraState) == 168, "GpuCameraState must match the structured buffer stride");
-static_assert(sizeof(GpuDeferredBranch) == 44, "GpuDeferredBranch must match the structured buffer stride");
+static_assert(sizeof(GpuCameraState) == 180, "GpuCameraState must match the structured buffer stride");
+static_assert(sizeof(GpuDeferredBranch) == 48, "GpuDeferredBranch must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 52, "TonemapConstants must fit the root constants");
 static_assert(sizeof(GuideViewConstants) <= 16 * 4, "GuideViewConstants must fit the root constants");
 #endif
