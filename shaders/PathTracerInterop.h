@@ -132,9 +132,13 @@ struct FrameConstants
 	// DLSS-RR: at most this many splits of the camera ray at alpha-blended surfaces (see TracePath), which share
 	// their count with glassReflectionSplits. Past them a blended surface is there or not by chance.
 	uint blendLayerSplits;
+<<<<<<< HEAD
 	// OPACITY_MICROMAPS: bindless index of that TLAS. Blended surfaces keep 4-state micromaps in it, since a ray
 	// flag (RAY_FLAG_FORCE_OMM_2_STATE) would force 2-state on them too, which their shadows cannot take.
 	uint opacityMicromap2StateScene;
+=======
+	uint pad1;
+>>>>>>> 012929c7edd7a6e7c68a8a9eb010767871a42d70
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
