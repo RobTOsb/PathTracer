@@ -199,21 +199,21 @@ void ChainArrive(inout SpecularChain chain, float3 dir, HitInfo hit)
     TransferDifferential(chain.motion, dir, hit.t, hit.Ng);
 }
 
-// Appends the event where the path arrived at hit along dirIn and left along dirOut.
-void AddPsrEvent(inout SpecularChain chain, OpenPBRBaseParams p, OpenPBRContext ctx, HitInfo hit, float3 wo, float3 dirIn,
+// Appends the turn of the event where the path arrived at hit along dirIn and left along dirOut, about the
+// surface's geometric normal, by reflection or by refraction with ctxEta (OpenPBRContext::eta). The caller
+// multiplies in its throughput (PsrEventThroughput).
+void AddPsrEvent(inout SpecularChain chain, HitInfo hit, float3 normal, bool thinWalled, float ctxEta, float3 dirIn,
                  float3 dirOut, bool reflection, float pixelFootprint)
 {
-    chain.throughput *= PsrEventThroughput(p, ctx, wo, reflection);
-
     // A thin wall's transmission mirrors its reflection back through the wall, which leaves the
     // direction alone however the surface turns.
-    if (chain.differentialsValid && (reflection || !p.geometryThinWalled))
+    if (chain.differentialsValid && (reflection || !thinWalled))
     {
-        float eta = 1.0 / ctx.eta;
-        chain.differentialsValid = reflection || abs(dot(dirOut, p.geometryNormal)) > 1.0e-4;
-        TurnDifferential(chain.pixelU, hit, p.geometryNormal, dirIn, dirOut, reflection, eta);
-        TurnDifferential(chain.pixelV, hit, p.geometryNormal, dirIn, dirOut, reflection, eta);
-        TurnDifferential(chain.motion, hit, p.geometryNormal, dirIn, dirOut, reflection, eta);
+        float eta = 1.0 / ctxEta;
+        chain.differentialsValid = reflection || abs(dot(dirOut, normal)) > 1.0e-4;
+        TurnDifferential(chain.pixelU, hit, normal, dirIn, dirOut, reflection, eta);
+        TurnDifferential(chain.pixelV, hit, normal, dirIn, dirOut, reflection, eta);
+        TurnDifferential(chain.motion, hit, normal, dirIn, dirOut, reflection, eta);
     }
 
     // How much a turn of the normal turns the path: twice for a reflection (or a thin wall's mirrored
@@ -221,7 +221,7 @@ void AddPsrEvent(inout SpecularChain chain, OpenPBRBaseParams p, OpenPBRContext 
     float deflection;
     if (reflection)
     {
-        chain.rotor = QuaternionMultiply(chain.rotor, MirrorRotor(p.geometryNormal, chain.parityOdd));
+        chain.rotor = QuaternionMultiply(chain.rotor, MirrorRotor(normal, chain.parityOdd));
         chain.parityOdd = !chain.parityOdd;
         deflection = 2.0;
     }
@@ -231,7 +231,7 @@ void AddPsrEvent(inout SpecularChain chain, OpenPBRBaseParams p, OpenPBRContext 
         // y of its quaternion.
         float4 q = ArcRotor(dirOut, dirIn);
         chain.rotor = QuaternionMultiply(chain.rotor, chain.parityOdd ? float4(-q.xy, q.zw) : q);
-        deflection = p.geometryThinWalled ? 2.0 : abs(1.0 - 1.0 / ctx.eta);
+        deflection = thinWalled ? 2.0 : abs(1.0 - 1.0 / ctxEta);
     }
     chain.pixelDeflection = max(chain.pixelDeflection, deflection * HitCurvature(hit) * pixelFootprint);
 }
@@ -244,7 +244,7 @@ SpecularChain StartSpecularChain(OpenPBRBaseParams p, OpenPBRContext ctx, HitInf
     chain.active = true;
     chain.parityOdd = false;
     chain.rotor = float4(0.0, 0.0, 0.0, 1.0);
-    chain.throughput = float3(1.0, 1.0, 1.0);
+    chain.throughput = PsrEventThroughput(p, ctx, wo, reflection);
     chain.primaryFraction = fraction;
     chain.primaryDistance = primaryDistance;
     chain.length = 0.0;
@@ -269,7 +269,7 @@ SpecularChain StartSpecularChain(OpenPBRBaseParams p, OpenPBRContext ctx, HitInf
     arrival.t = primaryDistance;
     ChainArrive(chain, dirIn, arrival);
 
-    AddPsrEvent(chain, p, ctx, hit, wo, dirIn, dirOut, reflection, pixelFootprint);
+    AddPsrEvent(chain, hit, p.geometryNormal, p.geometryThinWalled, ctx.eta, dirIn, dirOut, reflection, pixelFootprint);
     return chain;
 }
 

@@ -504,17 +504,16 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
             flags = SetFlag(flags, PATH_END_HIT_PENDING, end.replaceable && specularReflection);
         }
     }
-    else if (cameraSegment)
+    else if (fromCamera)
     {
-        // Only the parts this segment changes come in. The primary surface's guides are written afresh,
-        // and a chain's end goes to RayGen (FinishChainEnd). Past a blended layer that took the guides, glass
-        // leaves its reflection to the layers, not the panes.
+        // The surface the camera sees: only the parts it changes come in, its guides written afresh, and they go
+        // out again before a chain starts here, which is stored on its own. Past a blended layer that took the
+        // guides, glass leaves its reflection to the layers, not the panes.
         bool panesChange = (paneSplit || reflectionDeferred) && writesGuides;
-        uint parts = (chainActive ? CAMERA_CHAIN : 0) | (panesChange ? CAMERA_PANES : 0) | (fromCamera ? CAMERA_VIEW : 0);
+        uint parts = (panesChange ? CAMERA_PANES : 0) | CAMERA_VIEW;
         CameraState camera = firstSegment ? DefaultCameraState(dirIn) : LoadCameraState(parts);
-        uint loaded = firstSegment ? CAMERA_ALL : parts;
-        ArriveCameraState(camera, loaded, fromCamera, chainActive, hitDistanceArrived, paneHitArrived, endHitArrived, true, hit.t,
-                          arrivedExtinction);
+        ArriveCameraState(camera, firstSegment ? CAMERA_ALL : parts, true, false, hitDistanceArrived, paneHitArrived, endHitArrived,
+                          true, hit.t, arrivedExtinction);
 
         // What the camera sees of the surface: all that comes through to it, of a split blended one its opacity.
         float3 seenScale = camera.transmittance * (blendSplit ? opacity : 1.0);
@@ -534,7 +533,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
             camera.guides.diffuseAlbedo *= seenScale;
             camera.guides.specularAlbedo *= seenScale;
         }
-        else if (fromCamera)
+        else
         {
             // A layer the guides do not describe adds its albedos to theirs.
             PrimaryGuides layer;
@@ -564,47 +563,58 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
             camera.guides.specularAlbedo = float3(0.0, 0.0, 0.0);
         }
 
-        if (fromCamera)
+        if (specularReflection && writesGuides)
+            flags |= PATH_HIT_DISTANCE_PENDING;
+        // A chain that refracts into solid glass carries the glass's transmittance itself (SpecularChain::throughGlass).
+        bool chainThroughGlass = psrEvent && !specularReflection && !mat.geometryThinWalled;
+        if (!opaque && !mat.geometryThinWalled && !chainThroughGlass)
         {
-            if (specularReflection && writesGuides)
-                flags |= PATH_HIT_DISTANCE_PENDING;
-            if (psrEvent)
-                camera.chain = StartSpecularChain(mat, ctx, hit, wo, dirIn, dir, specularReflection, psrFraction, camera.distance,
-                                                  cone.width);
-            if (!opaque && !mat.geometryThinWalled && !(psrEvent && camera.chain.throughGlass))
-            {
-                float3 throughGlass = seenScale * PsrEventThroughput(mat, ctx, wo, false);
-                if (writesGuides)
-                    camera.guides.diffuseAlbedo += throughGlass;
-                else
-                    camera.layerDiffuseAlbedo += throughGlass;
-            }
-            // What is behind a split blended surface is seen through what of it is not there. Its own lobes
-            // left the camera's view whatever they took.
-            if (blendSplit)
-                camera.transmittance *= 1.0 - opacity;
-            else if (passThrough)
-                camera.transmittance *= passTransmittance;
-        }
-        else if (chainActive)
-        {
-            ChainArrive(camera.chain, dirIn, hit);
-            // As much of the surface as is there; one that is less than half there ends the chain by chance.
-            camera.chain.throughput *= opacity;
-            if (passThrough)
-            {
-                camera.chain.throughput *= passTransmittance;
-            }
+            float3 throughGlass = seenScale * PsrEventThroughput(mat, ctx, wo, false);
+            if (writesGuides)
+                camera.guides.diffuseAlbedo += throughGlass;
             else
-            {
-                AddPsrEvent(camera.chain, mat, ctx, hit, wo, dirIn, dir, specularReflection, cone.width);
-            }
+                camera.layerDiffuseAlbedo += throughGlass;
         }
+        // What is behind a split blended surface is seen through what of it is not there. Its own lobes
+        // left the camera's view whatever they took.
+        if (blendSplit)
+            camera.transmittance *= 1.0 - opacity;
+        else if (passThrough)
+            camera.transmittance *= passTransmittance;
+        StoreCameraState(camera, firstSegment ? CAMERA_ALL : (writesGuides ? CAMERA_GUIDES : 0) | parts);
 
-        uint changed = (writesGuides ? CAMERA_GUIDES : 0) | CAMERA_CHAIN | (panesChange ? CAMERA_PANES : 0) |
-                       (fromCamera ? CAMERA_VIEW : 0) | (firstSegment ? CAMERA_ALL : 0);
-        StoreCameraState(camera, changed);
-        flags = SetFlag(flags, PATH_CHAIN_ACTIVE, camera.chain.active);
+        if (psrEvent)
+        {
+            CameraState started = (CameraState)0;
+            started.chain = StartSpecularChain(mat, ctx, hit, wo, dirIn, dir, specularReflection, psrFraction, camera.distance,
+                                               cone.width);
+            StoreCameraState(started, CAMERA_CHAIN);
+            flags |= PATH_CHAIN_ACTIVE;
+        }
+    }
+    else if (chainActive)
+    {
+        // A chain that goes on through this surface: the event's share of the light and its geometry first,
+        // then only the chain comes in. As much of the surface as is there; one that is less than half there
+        // ends the chain by chance.
+        float3 eventThroughput = opacity * (passThrough ? passTransmittance : PsrEventThroughput(mat, ctx, wo, specularReflection));
+        float3 eventNormal = mat.geometryNormal;
+        bool eventThinWalled = mat.geometryThinWalled;
+        float eventEta = ctx.eta;
+        CameraState camera = LoadCameraState(CAMERA_CHAIN);
+        ArriveCameraState(camera, CAMERA_CHAIN, false, true, hitDistanceArrived, paneHitArrived, endHitArrived, true, hit.t,
+                          arrivedExtinction);
+        ChainArrive(camera.chain, dirIn, hit);
+        camera.chain.throughput *= eventThroughput;
+        if (!passThrough)
+            AddPsrEvent(camera.chain, hit, eventNormal, eventThinWalled, eventEta, dirIn, dir, specularReflection, cone.width);
+        StoreCameraState(camera, CAMERA_CHAIN);
+    }
+    else if (cameraSegment)
+    {
+        // Only hit distances arrive, which go straight to g_CameraState.
+        CameraState none = (CameraState)0;
+        ArriveCameraState(none, 0, false, false, hitDistanceArrived, paneHitArrived, endHitArrived, true, hit.t, arrivedExtinction);
     }
 
     if (continuePath)
