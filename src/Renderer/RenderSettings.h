@@ -52,7 +52,7 @@ struct LightSettings
 // While they play, the TLAS is rebuilt every frame, and so is the light tree of the emitters they move.
 struct AnimationSettings
 {
-	bool play = true;
+	bool play = false;
 	float speed = 1.0f;
 	// Into the animations: the main loop advances it while they play, and the UI can set it.
 	float seconds = 0.0f;

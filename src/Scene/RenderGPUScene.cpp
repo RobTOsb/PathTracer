@@ -2472,6 +2472,7 @@ void RenderGPUScene::UpdateAccelerationStructures()
 	// This frame traces its own set, which only needs building again if the instances moved since it was
 	// last built, possibly in a frame that traced another set.
 	tlasFrame_ = renderContext_->GetCurrentFrameIndex();
+	tlasFramesUpdated_ = std::min(tlasFramesUpdated_ + 1, 2u);
 	FrameTLASes &frame = frameTlases_[tlasFrame_];
 	if (frame.poseGeneration == dynamicPoseGeneration_)
 	{

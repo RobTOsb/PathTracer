@@ -136,10 +136,12 @@ public:
 		return opacityMicromaps && HasOpacityMicromaps() ? frame.ommTlasSRV : frame.tlasSRV;
 	}
 
-	// The dynamic instances are elsewhere in the current frame's TLASes than in last frame's.
+	// The dynamic instances are elsewhere in the current frame's TLASes than in last frame's. Never in the first
+	// frame: its other set is still the one built at load, which no frame traced, so there is no last frame.
 	bool MovedSinceLastFrame() const
 	{
-		return !frameTlases_.empty() && frameTlases_[tlasFrame_].poseGeneration != frameTlases_[PreviousTLASFrame()].poseGeneration;
+		return tlasFramesUpdated_ >= 2 &&
+			   frameTlases_[tlasFrame_].poseGeneration != frameTlases_[PreviousTLASFrame()].poseGeneration;
 	}
 
 	// Some primitive has opacity micromaps and the device can trace them.
@@ -511,6 +513,7 @@ private:
 	};
 	std::vector<FrameTLASes> frameTlases_; // empty without instanced geometry
 	uint32_t tlasFrame_ = 0; // the set the current frame traces
+	uint32_t tlasFramesUpdated_ = 0; // frames UpdateAccelerationStructures has picked a set for, up to 2
 
 	// The set last frame traced, which the current frame does not rebuild.
 	uint32_t PreviousTLASFrame() const
