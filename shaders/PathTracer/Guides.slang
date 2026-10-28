@@ -35,6 +35,8 @@ struct PrimaryGuides
     bool reflectorIsPane;
     // The PSR chain broke by chance this frame (PsrChainBrokenByChance), so RayGen keeps last frame's guides.
     bool hold;
+    // A PSR chain ended on a surface that RayGen may put in these guides' place (FinishChainEnd).
+    bool chainEnd;
 };
 
 PrimaryGuides DefaultGuides(float3 dir)
@@ -55,6 +57,7 @@ PrimaryGuides DefaultGuides(float3 dir)
     g.replaced = false;
     g.reflectorIsPane = false;
     g.hold = false;
+    g.chainEnd = false;
     return g;
 }
 

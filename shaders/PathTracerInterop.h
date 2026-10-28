@@ -474,10 +474,25 @@ struct GpuPaneReflection
 	float hitDistance;
 };
 
+// The surface a chain ended on, which RayGen puts in the guides' place (PsrChainEnd in PathTracer/Psr.slang).
+struct GpuChainEnd
+{
+	uint3 albedos; // half: diffuse rgb, then specular rgb
+	uint normal; // octahedral snorm16x2
+	uint roughnessCurvature; // half2
+	uint direction; // octahedral, the chain's last ray
+	uint Ng; // octahedral
+	float t; // the last ray's length
+	uint2 throughputScale; // half: rgb, then unused
+	float hitDistance;
+	uint flags; // CHAIN_END_* in CameraState.slang
+};
+
 struct GpuCameraState
 {
 	GpuCameraGuides guides;
 	GpuSpecularChain chain;
+	GpuChainEnd chainEnd;
 	GpuPaneReflection panes;
 	uint2 transmittance; // half: camera transmittance rgb, then unused
 	float distance;
@@ -583,9 +598,10 @@ static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 
 static_assert(sizeof(GpuMaterial) == 144,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
-static_assert(sizeof(GpuCameraGuides) == 48 && sizeof(GpuSpecularChain) == 76 && sizeof(GpuPaneReflection) == 20,
+static_assert(sizeof(GpuCameraGuides) == 48 && sizeof(GpuSpecularChain) == 76 && sizeof(GpuChainEnd) == 48 &&
+				  sizeof(GpuPaneReflection) == 20,
 			  "GpuCameraState parts must match their HLSL layout");
-static_assert(sizeof(GpuCameraState) == 180, "GpuCameraState must match the structured buffer stride");
+static_assert(sizeof(GpuCameraState) == 228, "GpuCameraState must match the structured buffer stride");
 static_assert(sizeof(GpuDeferredBranch) == 48, "GpuDeferredBranch must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 52, "TonemapConstants must fit the root constants");
 static_assert(sizeof(GuideViewConstants) <= 16 * 4, "GuideViewConstants must fit the root constants");

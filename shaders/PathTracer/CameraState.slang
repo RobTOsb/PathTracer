@@ -7,6 +7,7 @@ import PathTracer.GlassSplit;
 import PathTracer.Guides;
 import PathTracer.Math;
 import PathTracer.Psr;
+import PathTracer.RayTracing;
 import PathTracer.Resources;
 
 struct CameraState
@@ -45,10 +46,13 @@ static const uint CAMERA_GUIDES_SKY = 1; // position is a direction (w = 0)
 static const uint CAMERA_GUIDES_MOTION = 2; // PrimaryGuides::hasMotion
 static const uint CAMERA_GUIDES_HOLD = 4; // PrimaryGuides::hold
 static const uint CAMERA_GUIDES_REPLACED = 8; // PrimaryGuides::replaced
+static const uint CAMERA_GUIDES_CHAIN_END = 16; // PrimaryGuides::chainEnd
 // GpuSpecularChain::flags
 static const uint CAMERA_CHAIN_PARITY_ODD = 1;
 static const uint CAMERA_CHAIN_THROUGH_GLASS = 2;
 static const uint CAMERA_CHAIN_DIFFERENTIALS = 4; // SpecularChain::differentialsValid
+// GpuChainEnd::flags
+static const uint CHAIN_END_REPLACEABLE = 1;
 
 uint3 PackDifferential(RayDifferential r)
 {
@@ -77,7 +81,7 @@ GpuCameraGuides PackGuides(PrimaryGuides g)
     p.roughnessCurvature = PackHalf2(float2(g.roughness, g.curvature));
     p.specularHitDistance = g.specularHitDistance;
     p.flags = (sky ? CAMERA_GUIDES_SKY : 0) | (g.hasMotion ? CAMERA_GUIDES_MOTION : 0) | (g.hold ? CAMERA_GUIDES_HOLD : 0) |
-              (g.replaced ? CAMERA_GUIDES_REPLACED : 0);
+              (g.replaced ? CAMERA_GUIDES_REPLACED : 0) | (g.chainEnd ? CAMERA_GUIDES_CHAIN_END : 0);
     // A chain's end has no displacement, a surface no motion vector of its own, so they share the space.
     p.motion = g.hasMotion ? asuint(g.motion) : uint2(PackHalf2(g.displacement.xy), PackHalf2(float2(g.displacement.z, 0.0)));
     return p;
@@ -101,6 +105,7 @@ PrimaryGuides UnpackGuides(GpuCameraGuides p)
     g.hasMotion = (p.flags & CAMERA_GUIDES_MOTION) != 0;
     g.hold = (p.flags & CAMERA_GUIDES_HOLD) != 0;
     g.replaced = (p.flags & CAMERA_GUIDES_REPLACED) != 0;
+    g.chainEnd = (p.flags & CAMERA_GUIDES_CHAIN_END) != 0;
     g.motion = g.hasMotion ? asfloat(p.motion) : float2(0.0, 0.0);
     g.displacement = g.hasMotion ? float3(0.0, 0.0, 0.0) : float3(UnpackHalf2(p.motion.x), UnpackHalf2(p.motion.y).x);
     return g;
@@ -141,6 +146,42 @@ SpecularChain UnpackChain(GpuSpecularChain p)
     c.pixelV = UnpackDifferential(p.pixelV);
     c.motion = UnpackDifferential(p.motion);
     return c;
+}
+
+GpuChainEnd PackChainEnd(PsrChainEnd e)
+{
+    GpuChainEnd p;
+    p.albedos = uint3(PackHalf2(e.diffuseAlbedo.xy), PackHalf2(float2(e.diffuseAlbedo.z, e.specularAlbedo.x)),
+                      PackHalf2(e.specularAlbedo.yz));
+    p.normal = OctEncode(e.normal);
+    p.roughnessCurvature = PackHalf2(float2(e.roughness, e.curvature));
+    p.direction = OctEncode(e.dir);
+    p.Ng = OctEncode(e.Ng);
+    p.t = e.t;
+    p.throughputScale = uint2(PackHalf2(e.throughputScale.xy), PackHalf2(float2(e.throughputScale.z, 0.0)));
+    p.hitDistance = e.hitDistance;
+    p.flags = e.replaceable ? CHAIN_END_REPLACEABLE : 0;
+    return p;
+}
+
+PsrChainEnd UnpackChainEnd(GpuChainEnd p)
+{
+    PsrChainEnd e;
+    float2 albedos0 = UnpackHalf2(p.albedos.x);
+    float2 albedos1 = UnpackHalf2(p.albedos.y);
+    e.diffuseAlbedo = float3(albedos0, albedos1.x);
+    e.specularAlbedo = float3(albedos1.y, UnpackHalf2(p.albedos.z));
+    e.normal = OctDecode(p.normal);
+    float2 roughnessCurvature = UnpackHalf2(p.roughnessCurvature);
+    e.roughness = roughnessCurvature.x;
+    e.curvature = roughnessCurvature.y;
+    e.dir = OctDecode(p.direction);
+    e.Ng = OctDecode(p.Ng);
+    e.t = p.t;
+    e.throughputScale = float3(UnpackHalf2(p.throughputScale.x), UnpackHalf2(p.throughputScale.y).x);
+    e.hitDistance = p.hitDistance;
+    e.replaceable = (p.flags & CHAIN_END_REPLACEABLE) != 0;
+    return e;
 }
 
 GpuPaneReflection PackPanes(PaneReflection r)
@@ -231,6 +272,53 @@ void StorePaneHitDistance(float hitDistance)
 {
 #ifdef DLSS_RR
     g_CameraState[PixelIndex()].panes.hitDistance = hitDistance;
+#endif
+}
+
+void StoreChainEndHitDistance(float hitDistance)
+{
+#ifdef DLSS_RR
+    g_CameraState[PixelIndex()].chainEnd.hitDistance = hitDistance;
+#endif
+}
+
+// Where a chain ends, the surface goes to RayGen's FinishChainEnd, so the path holds neither the chain
+// nor the guides there.
+void StoreChainEnd(PsrChainEnd end)
+{
+#ifdef DLSS_RR
+    uint i = PixelIndex();
+    g_CameraState[i].chainEnd = PackChainEnd(end);
+    g_CameraState[i].guides.flags |= CAMERA_GUIDES_CHAIN_END;
+#endif
+}
+
+// A chain that broke by chance keeps last frame's guides (RayGen writes none).
+void HoldGuides()
+{
+#ifdef DLSS_RR
+    g_CameraState[PixelIndex()].guides.flags |= CAMERA_GUIDES_HOLD;
+#endif
+}
+
+// The chain the guides wait on: it arrives at the surface it ended on, which takes the guides' place
+// (ReplacePrimarySurface) or, through glass, leaves the glass's transmittance as their diffuse albedo.
+// s needs CAMERA_GUIDES and CAMERA_VIEW.
+void FinishChainEnd(inout CameraState s)
+{
+#ifdef DLSS_RR
+    uint i = PixelIndex();
+    SpecularChain chain = UnpackChain(g_CameraState[i].chain);
+    PsrChainEnd end = UnpackChainEnd(g_CameraState[i].chainEnd);
+    HitInfo arrival = (HitInfo)0;
+    arrival.t = end.t;
+    arrival.Ng = end.Ng;
+    chain.length += end.t;
+    ChainArrive(chain, end.dir, arrival);
+    chain.throughput *= end.throughputScale;
+    if (!(end.replaceable && ReplacePrimarySurface(chain, end, s.cameraDir, s.guides)) && chain.throughGlass)
+        s.guides.diffuseAlbedo += s.transmittance * chain.throughput;
+    s.guides.chainEnd = false;
 #endif
 }
 

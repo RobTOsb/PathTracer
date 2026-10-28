@@ -323,17 +323,32 @@ float3 ApplySpecularChain(SpecularChain chain, float3 v)
     return v + chain.rotor.w * t + cross(chain.rotor.xyz, t);
 }
 
-// Swap the primary surface's guides for the surface the chain ends on, which it reached along endDir
-// at a surface of geometric normal endNg. A chain with a motion vector through it stands unless it
-// shrinks the surface's image past psrMaxMinification; one without, unless an event on the way is curved
-// enough to smear the virtual image. Returns whether it did.
-bool ReplacePrimarySurface(SpecularChain chain, OpenPBRBaseParams surface, OpenPBRContext ctx, float curvature, float3 endDir,
-                           float3 endNg, float3 wo, float3 cameraDir, inout PrimaryGuides guides)
+// The surface a chain ended on and the ray it arrived along, all that ReplacePrimarySurface needs of them.
+struct PsrChainEnd
+{
+    float3 diffuseAlbedo; // the surface's reflectance guides, as the chain's last ray sees it
+    float3 specularAlbedo;
+    float3 normal; // geometric
+    float roughness; // GuideRoughness
+    float curvature; // ViewedCurvature
+    float3 dir; // the chain's last ray
+    float3 Ng;
+    float t; // its length
+    float3 throughputScale; // what the chain's throughput takes on along that ray and at the surface
+    // The surface's specular hit distance, InitialSpecularHitDistance until the path's next hit gives it.
+    float hitDistance;
+    bool replaceable; // not inside glass
+};
+
+// Swap the primary surface's guides for the surface the chain ends on. A chain with a motion vector
+// through it stands unless it shrinks the surface's image past psrMaxMinification; one without, unless
+// an event on the way is curved enough to smear the virtual image. Returns whether it did.
+bool ReplacePrimarySurface(SpecularChain chain, PsrChainEnd end, float3 cameraDir, inout PrimaryGuides guides)
 {
     float pathLength = chain.primaryDistance + chain.length;
     float2 motion;
     float minification;
-    bool hasMotion = ChainMotionVector(chain, cameraDir, endDir, endNg, pathLength, motion, minification);
+    bool hasMotion = ChainMotionVector(chain, cameraDir, end.dir, end.Ng, pathLength, motion, minification);
     if (hasMotion ? minification > g_Frame.psrMaxMinification
                   : chain.pixelDeflection * chain.length > PSR_MAX_VIRTUAL_DEPTH_JITTER * pathLength)
         return false;
@@ -342,20 +357,16 @@ bool ReplacePrimarySurface(SpecularChain chain, OpenPBRBaseParams surface, OpenP
     guides.displacement = float3(0.0, 0.0, 0.0);
     guides.replaced = true;
 
-    // The chain's transform is a rotation or reflection, which preserves the angle between wo and the
-    // normal, so the reflectance seen in virtual space is the real one.
-    PrimaryGuides seen;
-    ReflectanceGuides(surface, ctx, wo, seen);
-
-    // What the primary surface shows of the surface comes scaled by the chain's throughput, on top of
-    // the primary's own (small) diffuse part.
+    // The chain's transform is a rotation or reflection, which preserves the angle between the view and
+    // the normal, so the reflectance seen in virtual space is the real one. What the primary surface shows
+    // of the surface comes scaled by the chain's throughput, on top of the primary's own (small) diffuse part.
     guides.position = float4(guides.position.xyz + cameraDir * chain.length, 1.0);
-    guides.normal = normalize(ApplySpecularChain(chain, surface.geometryNormal));
-    guides.roughness = GuideRoughness(surface, ctx);
-    guides.diffuseAlbedo += chain.throughput * seen.diffuseAlbedo;
-    guides.specularAlbedo = lerp(guides.specularAlbedo, chain.throughput * seen.specularAlbedo, chain.primaryFraction);
-    guides.specularHitDistance = InitialSpecularHitDistance(guides.roughness);
+    guides.normal = normalize(ApplySpecularChain(chain, end.normal));
+    guides.roughness = end.roughness;
+    guides.diffuseAlbedo += chain.throughput * end.diffuseAlbedo;
+    guides.specularAlbedo = lerp(guides.specularAlbedo, chain.throughput * end.specularAlbedo, chain.primaryFraction);
+    guides.specularHitDistance = end.hitDistance;
     // The chain's rotations and reflections keep the viewer on the same side of the surface.
-    guides.curvature = curvature;
+    guides.curvature = end.curvature;
     return true;
 }
