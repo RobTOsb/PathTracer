@@ -1,5 +1,5 @@
 build
-external/DLSS
-.vscode*.scene
+.vscode
+*.scene
 *.scene.tmp
 .vscode
