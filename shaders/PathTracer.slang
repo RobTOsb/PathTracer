@@ -35,12 +35,9 @@ static const uint PATH_DIFFUSE_BOUNCES_MASK = 0xF;
 // The segment left the surface the camera sees by a mirror-like lobe, so the light it finds is that surface's
 // image, which the firefly clamp leaves alone.
 static const uint PATH_MIRROR_SEGMENT = 0x2000;
-// A blended layer in front of the camera took the guides, as at least half there, so the surfaces the camera
-// sees past it only add their albedos to the camera state's layers.
-static const uint PATH_GUIDES_TAKEN = 0x4000;
 // A chain ended on a specular reflection, so the next hit gives the hit distance of the surface it ended on.
 static const uint PATH_END_HIT_PENDING = 0x8000;
-static const uint PATH_SPLITS_SHIFT = 16; // glass and blend splits so far, 8 bits
+static const uint PATH_SPLITS_SHIFT = 16; // glass splits so far, 8 bits
 static const uint PATH_SPLITS_MASK = 0xFF;
 
 // The lobes whose samples spend the diffuse bounce budget, the others spend the specular one.
@@ -107,12 +104,6 @@ float4 UnpackSegmentMedium(uint2 packed)
 
 // No medium and a scale of 1, as a literal since f32tof16 is not folded.
 static const uint2 SEGMENT_MEDIUM_AIR = uint2(0, 0x3C000000);
-
-// The Russian roulette scale of a branch that carries weight of its parent's throughput, capped well inside a half.
-float BranchRRInvScale(float rrInvScale, float weight)
-{
-    return min(rrInvScale / max(weight, 1.0e-4), 1.0e4);
-}
 
 // Applies the segment just traced to the camera state: t is its length, 0 for a miss, through a medium
 // of the given extinction. The CAMERA_* parts in loaded are in registers; the hit distances for parts
@@ -205,16 +196,13 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     bool lastSegment = emissionOnly ||
                        (diffuseBounces >= g_Frame.maxDiffuseBounces && specularBounces >= g_Frame.maxSpecularBounces);
 
-    // glTF alpha blending: the surface is there by its opacity, and the rest of what reaches it goes straight
-    // through, a lobe of weight 1 - opacity. In front of the camera the path splits there, the surface now at its
-    // opacity and what is behind it deferred at the rest (see GlassSplit.slang), so the guides never depend on
-    // chance. Elsewhere, and past the splits, it takes the one or the other by chance.
+    // glTF alpha blending, stochastically: the surface is there by its opacity, and the rest of what reaches it
+    // goes straight through, a lobe of weight 1 - opacity. The path takes the one or the other by chance, the
+    // camera ray too, so the guides are of whichever it took.
     float opacity = LoadOpacity(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments);
     bool blended = opacity < 1.0;
-    uint splits = (flags >> PATH_SPLITS_SHIFT) & PATH_SPLITS_MASK;
-    bool blendSplit = blended && fromCamera && !lastSegment && splits < g_Frame.blendLayerSplits && (flags & DEFERRED_PENDING) == 0;
-    float2 blendU = blended && !blendSplit ? Rand3(rng).xy : float2(0.0, 0.0);
-    if (blended && !blendSplit && blendU.x >= opacity)
+    float2 blendU = blended ? Rand3(rng).xy : float2(0.0, 0.0);
+    if (blended && blendU.x >= opacity)
     {
         // Straight through: the same direction, cone and medium, and no light picked up or sampled here. The MIS
         // of the next light found gains the chance of passing, as for a pass-through wall.
@@ -246,30 +234,10 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         passed.rrU = blendU.y;
         return passed;
     }
-    // The pdf of the surface's own lobes is theirs times the chance of taking the surface, 1 where both are taken.
-    float layerPdf = blended && !blendSplit ? opacity : 1.0;
-    // Only a surface at least half there takes the guides from what is behind it, which all together is no more
-    // than it. One the path took by chance does not end a chain on itself.
-    bool writesGuides = fromCamera && (flags & PATH_GUIDES_TAKEN) == 0 && !(blendSplit && opacity < 0.5);
-    bool blendByChance = blended && !blendSplit && opacity < 0.5;
-    if (blendSplit)
-    {
-        flags = (flags & ~DEFERRED_MASK) | DEFERRED_PENDING | ((bounce + 1) << DEFERRED_BOUNCE_SHIFT);
-        flags += 1u << PATH_SPLITS_SHIFT;
-        if (writesGuides)
-            flags |= PATH_GUIDES_TAKEN;
-        DeferredBranch deferred;
-        deferred.origin = OffsetRay(hit.position, hit.Ng, dir);
-        deferred.throughput = throughput * (1.0 - opacity);
-        deferred.dir = dir;
-        deferred.coneWidth = cone.width;
-        deferred.coneSpread = cone.spread;
-        deferred.rrInvScale = BranchRRInvScale(rrInvScale, 1.0 - opacity);
-        StoreDeferredBranch(deferred);
-        // Everything the surface does from here on, its emission included, is at its opacity.
-        throughput *= opacity;
-        rrInvScale = BranchRRInvScale(rrInvScale, opacity);
-    }
+    // The pdf of the surface's own lobes is theirs times the chance of taking the surface.
+    float layerPdf = blended ? opacity : 1.0;
+    // A surface less than half there that the path took by chance neither starts nor ends a chain on itself.
+    bool blendByChance = blended && opacity < 0.5;
 
     // Specular antialiasing where the camera sees the surface: how far the vertex normals turn across
     // the pixel's footprint, stretched by 1 / cos along the slope, and the normal maps' own spread.
@@ -357,7 +325,8 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     const float3 dirIn = dir;
     float3 passTransmittance = float3(1.0, 1.0, 1.0);
     // The two branches cover the specular lobes only, so nothing with a diffuse, coat or fuzz lobe splits, nor
-    // a blended surface, whose split or chance came first.
+    // a blended surface, whose chance came first.
+    uint splits = (flags >> PATH_SPLITS_SHIFT) & PATH_SPLITS_MASK;
     bool splittable = !SIMPLE && fromCamera && !blended && !lastSegment && splits < g_Frame.glassReflectionSplits && ctx.probDiffuse <= 0.0 &&
                       ctx.probCoat <= 0.0 && ctx.probFuzz <= 0.0 && ctx.probSpecR > 0.0 && ctx.probSpecR < 1.0;
     // A thin pane: its reflection now, what is behind it deferred.
@@ -377,7 +346,6 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         deferred.dir = dir;
         deferred.coneWidth = cone.width;
         deferred.coneSpread = cone.spread;
-        deferred.rrInvScale = rrInvScale;
         StoreDeferredBranch(deferred);
     }
 
@@ -415,7 +383,6 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
                 deferred.throughput = throughput * sample.weight * ctx.probSpecR;
                 deferred.coneWidth = cone.width;
                 deferred.coneSpread = min(cone.spread + g_Frame.rayConeBsdfSpread * SampledConeSpread(sample.pdf / ctx.probSpecR), PI);
-                deferred.rrInvScale = rrInvScale;
                 StoreDeferredBranch(deferred);
                 reflectionDeferred = true;
             }
@@ -463,11 +430,10 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     flags = SetFlag(flags, DEFERRED_SMOOTH_SEGMENT, passThrough ? smoothSegment || fromCamera : !sampleLights);
 
     // DLSS-RR guides: the primary surface, or the first surface past the mirrors and glass in front
-    // of it. A surface that takes another lobe, or ends the path, ends the chain on itself. A split blended
-    // surface starts none, since its chain would share the camera state with what is behind it.
+    // of it. A surface that takes another lobe, or ends the path, ends the chain on itself.
     float psrFraction = 1.0;
 #ifdef PSR
-    bool psrEvent = continuePath && !paneSplit && !blendSplit && !blendByChance && (writesGuides || chainActive) &&
+    bool psrEvent = continuePath && !paneSplit && !blendByChance && (fromCamera || chainActive) &&
                     (glassSplit ? CoatedSpecularRoughness(mat) <= g_Frame.psrMaxRoughness : IsPsrEvent(mat, ctx, lobe, psrFraction));
 #else
     const bool psrEvent = false;
@@ -507,47 +473,34 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     else if (fromCamera)
     {
         // The surface the camera sees: only the parts it changes come in, its guides written afresh, and they go
-        // out again before a chain starts here, which is stored on its own. Past a blended layer that took the
-        // guides, glass leaves its reflection to the layers, not the panes.
-        bool panesChange = (paneSplit || reflectionDeferred) && writesGuides;
+        // out again before a chain starts here, which is stored on its own.
+        bool panesChange = paneSplit || reflectionDeferred;
         uint parts = (panesChange ? CAMERA_PANES : 0) | CAMERA_VIEW;
         CameraState camera = firstSegment ? DefaultCameraState(dirIn) : LoadCameraState(parts);
         ArriveCameraState(camera, firstSegment ? CAMERA_ALL : parts, true, false, hitDistanceArrived, paneHitArrived, endHitArrived,
                           true, hit.t, arrivedExtinction);
 
-        // What the camera sees of the surface: all that comes through to it, of a split blended one its opacity.
-        float3 seenScale = camera.transmittance * (blendSplit ? opacity : 1.0);
-        if (writesGuides)
-        {
-            camera.guides.position = float4(hit.position, 1.0);
-            camera.guides.normal = mat.geometryNormal;
-            camera.guides.roughness = GuideRoughness(mat, ctx);
-            // Until the path continues with a specular reflection: no reflection data, or last frame's.
-            camera.guides.specularHitDistance = InitialSpecularHitDistance(camera.guides.roughness);
-            camera.guides.curvature = ViewedCurvature(hit, wo);
-            // A moving object's point was elsewhere last frame, which RayGen's motion vectors take in.
-            camera.guides.hasMotion = false;
-            camera.guides.displacement = hit.motion;
-            camera.guides.replaced = false;
-            ReflectanceGuides(mat, ctx, wo, camera.guides);
-            camera.guides.diffuseAlbedo *= seenScale;
-            camera.guides.specularAlbedo *= seenScale;
-        }
-        else
-        {
-            // A layer the guides do not describe adds its albedos to theirs.
-            PrimaryGuides layer;
-            ReflectanceGuides(mat, ctx, wo, layer);
-            camera.layerDiffuseAlbedo += seenScale * layer.diffuseAlbedo;
-            camera.layerSpecularAlbedo += seenScale * layer.specularAlbedo;
-        }
+        // What the camera sees of the surface: all that comes through to it.
+        float3 seenScale = camera.transmittance;
+        camera.guides.position = float4(hit.position, 1.0);
+        camera.guides.normal = mat.geometryNormal;
+        camera.guides.roughness = GuideRoughness(mat, ctx);
+        // Until the path continues with a specular reflection: no reflection data, or last frame's.
+        camera.guides.specularHitDistance = InitialSpecularHitDistance(camera.guides.roughness);
+        camera.guides.curvature = ViewedCurvature(hit, wo);
+        // A moving object's point was elsewhere last frame, which RayGen's motion vectors take in.
+        camera.guides.hasMotion = false;
+        camera.guides.displacement = hit.motion;
+        camera.guides.replaced = false;
+        ReflectanceGuides(mat, ctx, wo, camera.guides);
+        camera.guides.diffuseAlbedo *= seenScale;
+        camera.guides.specularAlbedo *= seenScale;
 
         if (paneSplit)
         {
             PrimaryGuides seen;
             ReflectanceGuides(mat, ctx, wo, seen);
-            if (writesGuides &&
-                AddPaneReflection(camera.panes, camera.transmittance * seen.specularAlbedo, camera.distance,
+            if (AddPaneReflection(camera.panes, camera.transmittance * seen.specularAlbedo, camera.distance,
                                   ViewedCurvature(hit, wo)) &&
                 continuePath)
                 flags |= PATH_PANE_HIT_PENDING;
@@ -555,7 +508,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
             // the pane's now, for what is behind it.
             camera.transmittance *= ThinDeltaTransmittance(mat, ctx.wo.z);
         }
-        else if (reflectionDeferred && writesGuides)
+        else if (reflectionDeferred)
         {
             // The guides' specular albedo is the glass's reflection, which moves to the panes.
             if (AddPaneReflection(camera.panes, camera.guides.specularAlbedo, camera.distance, ViewedCurvature(hit, wo)))
@@ -563,25 +516,15 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
             camera.guides.specularAlbedo = float3(0.0, 0.0, 0.0);
         }
 
-        if (specularReflection && writesGuides)
+        if (specularReflection)
             flags |= PATH_HIT_DISTANCE_PENDING;
         // A chain that refracts into solid glass carries the glass's transmittance itself (SpecularChain::throughGlass).
         bool chainThroughGlass = psrEvent && !specularReflection && !mat.geometryThinWalled;
         if (!opaque && !mat.geometryThinWalled && !chainThroughGlass)
-        {
-            float3 throughGlass = seenScale * PsrEventThroughput(mat, ctx, wo, false);
-            if (writesGuides)
-                camera.guides.diffuseAlbedo += throughGlass;
-            else
-                camera.layerDiffuseAlbedo += throughGlass;
-        }
-        // What is behind a split blended surface is seen through what of it is not there. Its own lobes
-        // left the camera's view whatever they took.
-        if (blendSplit)
-            camera.transmittance *= 1.0 - opacity;
-        else if (passThrough)
+            camera.guides.diffuseAlbedo += seenScale * PsrEventThroughput(mat, ctx, wo, false);
+        if (passThrough)
             camera.transmittance *= passTransmittance;
-        StoreCameraState(camera, firstSegment ? CAMERA_ALL : (writesGuides ? CAMERA_GUIDES : 0) | parts);
+        StoreCameraState(camera, firstSegment ? CAMERA_ALL : CAMERA_GUIDES | parts);
 
         if (psrEvent)
         {
@@ -649,7 +592,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         float3 visibility = TraceShadowRay(shadowOrigin, ls.direction, shadowDistance);
         radiance += neeContribution * visibility;
 #ifdef DLSS_RR
-        if (writesGuides && g_Frame.shadowChanges != 0)
+        if (fromCamera && g_Frame.shadowChanges != 0)
         {
             float3 previousVisibility = TraceShadowRayIn(ResourceDescriptorHeap[g_Frame.previousScene], shadowOrigin,
                                                          ls.direction, shadowDistance);
@@ -662,8 +605,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
 
     SurfaceOutcome outcome;
     outcome.continuePath = continuePath;
-    // A split blended surface's own pass-through leaves the camera's view, which its deferred branch keeps.
-    outcome.passThrough = passThrough && !blendSplit;
+    outcome.passThrough = passThrough;
     outcome.rrU = lightU.z;
     return outcome;
 }
@@ -741,12 +683,10 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                     CameraState camera = firstSegment ? DefaultCameraState(dir) : (CameraState)0;
                     ArriveCameraState(camera, firstSegment ? CAMERA_ALL : 0, fromCamera, false, hitDistanceArrived, paneHitArrived,
                                       endHitArrived, false, 0.0, segmentExtinction);
-                    // Sky seen through a window: the guides describe the sky, as for a camera ray, unless a
-                    // blended layer in front took them.
-                    bool skyGuides = fromCamera && (flags & PATH_GUIDES_TAKEN) == 0;
-                    if (skyGuides)
+                    // Sky seen through a window: the guides describe the sky, as for a camera ray.
+                    if (fromCamera)
                         camera.guides = DefaultGuides(dir);
-                    StoreCameraState(camera, firstSegment ? CAMERA_ALL & ~CAMERA_CHAIN : skyGuides ? CAMERA_GUIDES : 0);
+                    StoreCameraState(camera, firstSegment ? CAMERA_ALL & ~CAMERA_CHAIN : fromCamera ? CAMERA_GUIDES : 0);
                 }
 
                 // A ray inside a medium that finds no way out ends there.
@@ -815,7 +755,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         throughput = deferred.throughput;
         cone.width = deferred.coneWidth;
         cone.spread = deferred.coneSpread;
-        segmentMedium = PackSegmentMedium(float3(0.0, 0.0, 0.0), deferred.rrInvScale);
+        segmentMedium = SEGMENT_MEDIUM_AIR;
         bounce = flags >> DEFERRED_BOUNCE_SHIFT;
         uint deferredFlags = flags & DEFERRED_MASK;
         // Glass splits only where the camera sees, so every bounce before the branch is specular.

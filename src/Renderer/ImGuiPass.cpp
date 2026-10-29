@@ -608,10 +608,6 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SliderInt("Glass reflection splits", &settings_.glassReflectionSplits, 0, 4);
 		ImGui::SetItemTooltip("Smooth glass in front of the camera, thin panes or solid, whose reflection is traced as "
 							  "well as what it lets through, instead of one or the other. 0 = off");
-		ImGui::SliderInt("Blend layer splits", &settings_.blendLayerSplits, 0, 8);
-		ImGui::SetItemTooltip("Alpha-blended surfaces in front of the camera, whose surface is traced as well as "
-							  "what is behind it, so the DLSS-RR guides do not flicker. Past them the path takes one "
-							  "or the other by chance. Counts glass reflection splits too. 0 = off");
 
 		ImGui::TextUnformatted("Subsurface scattering");
 		ImGui::Checkbox("Zero##Subsurface", &settings_.subsurfaceZeroScattering);
