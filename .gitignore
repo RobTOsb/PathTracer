@@ -3,3 +3,4 @@ build
 *.scene
 *.scene.tmp
 .vscode
+imgui.ini

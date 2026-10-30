@@ -90,7 +90,7 @@ float LightTreeConeCosine(float cosAxis, float sinCone, float cosCone)
 // A bound on the light the node's cluster sends to the shading point's lobes, from the cone of directions to its
 // bounding sphere: the node's vMF emission lobe at its strongest over the cone, over the squared distance (at
 // least the radius), times the receiving lobes at their strongest over the cone, the diffuse ones as cosine / pi
-// and the glossy one as its vMF. Two exps, no SG integrals, a fraction of the code of the paper's Eq. 6.
+// and the glossy one as its vMF.
 float LightTreeNodeImportance(GpuLightTreeNode node, LightTreeShadingContext ctx)
 {
     // A bounding sphere entirely below the tangent plane gets nothing, unless the surface transmits. Either test
