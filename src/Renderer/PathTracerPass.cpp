@@ -292,7 +292,6 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.lightTreeBounces = static_cast<uint>(std::max(lights.treeBounces, 0));
 	constants.sunSelectProbability = sunActive ? (lightsActive ? 0.5f : 1.0f) : 0.0f;
 	constants.lightTreeGlossyBounces = static_cast<uint>(std::max(lights.glossyImportanceBounces, 0));
-	constants.lightTreeFarFieldSharpness = lights.farFieldImportance ? lights.farFieldSharpness : FLT_MAX;
 	constants.lightTreeDiffuseOnlyAlpha = lights.diffuseOnlyRoughLobes
 											  ? lights.diffuseOnlyRoughness * lights.diffuseOnlyRoughness
 											  : FLT_MAX;

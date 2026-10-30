@@ -26,7 +26,7 @@ namespace
 		return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
 	}
 
-	// Full spherical integral of an SG, 2 pi (1 - exp(-2 kappa)) / kappa. Matches SGIntegral in SGLighting.slang.
+	// Full spherical integral of an SG, 2 pi (1 - exp(-2 kappa)) / kappa.
 	float SGIntegral(float kappa)
 	{
 		if (kappa < 0.05f)

@@ -37,10 +37,6 @@ struct LightSettings
 	float diffuseOnlyRoughness = 0.7f;
 	// Light tree: vertices from this bounce on (0 = primary hit) skip the glossy importance.
 	int glossyImportanceBounces = 1;
-	// Light tree: nodes wholly above the horizon whose SG light is at least this sharp (squared
-	// distance over spatial variance) use the cheap point light form of the importance.
-	bool farFieldImportance = true;
-	float farFieldSharpness = 16.0f;
 	// Light tree: lights per leaf, picked by flux within it, 1 to LIGHT_TREE_MAX_LEAF_LIGHTS. More
 	// makes the tree shallower at the cost of ignoring where the leaf's lights are relative to each other.
 	int maxLeafLights = 4;

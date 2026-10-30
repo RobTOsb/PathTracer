@@ -21,10 +21,9 @@ struct LightSample
 struct LightSelectVertex
 {
     float3 position;
-    // The light tree's frame, the bitangent is cross(normal, tangent): mat.geometryNormal turned to the side of
-    // the glossy lobe, which for rough glass may be the transmitted side (see MakeLightSelectVertex).
+    // mat.geometryNormal turned to the side of the glossy lobe, which for rough glass may be the transmitted side
+    // (see MakeLightSelectVertex).
     float3 normal;
-    float3 tangent;
     float3 wo; // the view direction whose mirror image about normal is the glossy lobe's axis
     float diffuseWeight; // on normal's side
     float specularWeight;
@@ -110,7 +109,6 @@ LightSelectVertex MakeLightSelectVertex(float3 position, OpenPBRBaseParams mat, 
     // the viewer, and wo below its shading normal is the normal map's doing.
     bool transmissive = mat.transmissionWeight > 0.0 || HasDiffuseTransmission(mat);
     v.normal = transmissive && dot(wo, mat.geometryNormal) < 0.0 ? -mat.geometryNormal : mat.geometryNormal;
-    v.tangent = mat.geometryTangent;
     v.wo = wo;
     // Fuzz is broad enough to count as diffuse. The coat joins the specular lobe, which takes the
     // roughness of whichever of the two reflects more.
@@ -150,7 +148,6 @@ struct PackedLightSelectVertex
 {
     float3 position;
     uint normal;
-    uint tangent;
     uint wo;
     uint weights; // half2: diffuseWeight, specularWeight
     uint alpha;   // half2
@@ -162,7 +159,6 @@ PackedLightSelectVertex PackLightSelectVertex(LightSelectVertex v)
     PackedLightSelectVertex p;
     p.position = v.position;
     p.normal = OctEncode(v.normal);
-    p.tangent = OctEncode(v.tangent);
     p.wo = OctEncode(v.wo);
     p.weights = PackHalf2(float2(v.diffuseWeight, v.specularWeight));
     p.alpha = PackHalf2(v.alpha);
@@ -175,7 +171,6 @@ LightSelectVertex UnpackLightSelectVertex(PackedLightSelectVertex p)
     LightSelectVertex v;
     v.position = p.position;
     v.normal = OctDecode(p.normal);
-    v.tangent = OctDecode(p.tangent);
     v.wo = OctDecode(p.wo);
     float2 weights = UnpackHalf2(p.weights);
     v.diffuseWeight = weights.x;
@@ -188,9 +183,8 @@ LightSelectVertex UnpackLightSelectVertex(PackedLightSelectVertex p)
 
 LightTreeShadingContext MakeLightTreeShadingContext(LightSelectVertex v)
 {
-    return MakeLightTreeShadingContext(v.position, v.tangent, cross(v.normal, v.tangent), v.normal, v.wo,
-                                       v.diffuseWeight, v.specularWeight, v.backDiffuseWeight, v.alpha.x, v.alpha.y,
-                                       g_Frame.lightTreeDiffuseOnlyAlpha, g_Frame.lightTreeFarFieldSharpness);
+    return MakeLightTreeShadingContext(v.position, v.normal, v.wo, v.diffuseWeight, v.specularWeight,
+                                       v.backDiffuseWeight, v.alpha.x, v.alpha.y, g_Frame.lightTreeDiffuseOnlyAlpha);
 }
 
 // Share of the flux of the part of the light buffer (static or dynamic emitters) that lightIndex is in.

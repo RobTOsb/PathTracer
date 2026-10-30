@@ -70,8 +70,8 @@ static float QueryDisplayPeakNits(void *hwnd)
 	return 0.0f;
 }
 
-constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
-//constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
+//constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
+constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
 // constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\breakfast-room\\gltf\\breakfast_room_extended.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\GlassHurricaneCandleHolder\\glTF-Binary\\GlassHurricaneCandleHolder.glb";
 //constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";

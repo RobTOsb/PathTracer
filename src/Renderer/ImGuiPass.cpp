@@ -444,17 +444,6 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::Checkbox("Orientation splits", &lights.orientationSplits);
 		ImGui::SetItemTooltip("Light tree build: keep emitters that face the same way together, by also weighing "
 							  "the spread of each side's normals in the split cost");
-		ImGui::Checkbox("Far-field importance", &lights.farFieldImportance);
-		ImGui::SetItemTooltip("Treat small, distant light clusters wholly above the horizon as point lights");
-		ImGui::SameLine();
-		ImGui::BeginDisabled(!lights.farFieldImportance);
-		ImGui::SliderFloat("Min sharpness",
-						   &lights.farFieldSharpness,
-						   1.0f,
-						   1000.0f,
-						   "%.0f",
-						   ImGuiSliderFlags_Logarithmic);
-		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 	}

@@ -46,7 +46,7 @@ struct FrameConstants
 	// coherence hint, enough for every material row and at most 16.
 	uint serCoherenceHintBits;
 	uint lightTreeGlossyBounces; // path vertices from this bounce on use the diffuse light tree importance only
-	float lightTreeFarFieldSharpness; // SG sharpness from which tree nodes count as point lights, FLT_MAX = off
+	uint pad1;
 
 	// Ray cone texture filtering (Akenine-Moller et al. 2021). Camera rays start as cones of
 	// rayConePixelSpread radians, and each BSDF sample widens the cone by rayConeBsdfSpread times

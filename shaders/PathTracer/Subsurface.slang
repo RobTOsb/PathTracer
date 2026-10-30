@@ -171,8 +171,6 @@ LightSelectVertex ExitLightSelectVertex(float3 position, float3 normal, uint bou
     LightSelectVertex v;
     v.position = position;
     v.normal = normal;
-    float3 bitangent;
-    BuildOrthonormalBasis(normal, v.tangent, bitangent);
     v.wo = normal;
     v.diffuseWeight = 1.0;
     v.specularWeight = 0.0;
