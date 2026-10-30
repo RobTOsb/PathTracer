@@ -74,11 +74,13 @@ static float QueryDisplayPeakNits(void *hwnd)
 //constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
 //constexpr const char *kDefaultScenePath = "H:\\gltf-research-scenes\\scenes\\classroom2\\gltf\\classroom2.glb";
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\GlassHurricaneCandleHolder\\glTF-Binary\\GlassHurricaneCandleHolder.glb";
-constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
+//constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
 //constexpr const char *kDefaultScenePath = "h:\\suntemple.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\SubsurfaceScene\\scene.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\SphereRoom\\SphereRoom.glb";
 //constexpr const char *kDefaultScenePath = "h:\\SanMiguel.glb";
+constexpr const char *kDefaultScenePath = "h:\\sci_fi_hallway_free.glb";
+
 
 constexpr uint kFramesInFlight = 2;
 constexpr uint kSwapchainImageCount = 3;

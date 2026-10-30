@@ -377,6 +377,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		key.prevViewProj = {};
 		key.prevCameraPosition = {};
 		key.frameIndex = 0;
+		key.opacityMicromap2StateScene = 0;
+		key.previousScene = 0;
 		key.samplesPerFrame = 0; // the reference's own, set below
 		const ReferenceSettings &reference = settings_.reference;
 		if (accumulatedSamples_ == 0 || std::memcmp(&key, &accumulationKey_, sizeof(key)) != 0 ||
