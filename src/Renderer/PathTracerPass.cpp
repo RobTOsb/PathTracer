@@ -329,6 +329,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 									 (settings_.subsurfaceSingleScattering ? SUBSURFACE_SINGLE_SCATTERING : 0u) |
 									 (settings_.subsurfaceMultipleScattering ? SUBSURFACE_MULTIPLE_SCATTERING : 0u);
 	constants.subsurfaceRadiusScale = std::max(settings_.subsurfaceRadiusScale, 0.0f);
+	constants.diffuseRoughnessScale = std::clamp(settings_.diffuseRoughnessScale, 0.0f, 1.0f);
 	constants.opacityMicromap2StateScene = scene_.HasOpacityMicromaps() ? scene_.GetOpacityMicromap2StateTLASIndex() : 0u;
 	constants.opacityMicromap2StateBounce = settings_.opacityMicromap2StateBounce >= 0
 													? static_cast<uint>(settings_.opacityMicromap2StateBounce)

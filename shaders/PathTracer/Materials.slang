@@ -108,6 +108,13 @@ void SetGltfAnisotropy(inout OpenPBRBaseParams p, float strength)
     p.specularRoughness = sqrt(sqrt(0.5 * (alphaT * alphaT + alphaB * alphaB)));
 }
 
+// glTF has no diffuse roughness, so the base's EON diffuse takes the Rendering panel's fraction of the
+// specular roughness (as widened by specular AA and made isotropic by SetGltfAnisotropy).
+void SetDiffuseRoughness(inout OpenPBRBaseParams p)
+{
+    p.baseDiffuseRoughness = g_Frame.diffuseRoughnessScale * p.specularRoughness;
+}
+
 // glTF sheen as OpenPBR fuzz: fuzzWeight * fuzzColour is the sheen colour, which makes the lobe the
 // sheen colour times the LTC and leaves 1 - max(sheen colour) E_F(wo) to the layers below, as in
 // KHR_materials_sheen's albedo scaling. Only the lobe's shape differs, Zeltner's LTC in place of Charlie.
@@ -295,6 +302,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     SetGltfSpecular(p, specularWeight, specularColour);
     if (anisotropyStrength > 0.0)
         SetGltfAnisotropy(p, saturate(anisotropyStrength));
+    SetDiffuseRoughness(p);
     if (!simple && any(material.sheenColour > 0.0))
     {
         float3 sheen = material.sheenColour;
@@ -387,6 +395,7 @@ OpenPBRBaseParams UnpackMaterial(PackedMaterial m, bool simple)
     h = UnpackHalf2(m.base.z);
     p.specularRoughness = h.x;
     p.specularRoughnessAnisotropy = h.y;
+    SetDiffuseRoughness(p);
     h = UnpackHalf2(m.base.w);
     p.specularIor = h.x;
     p.transmissionWeight = h.y;

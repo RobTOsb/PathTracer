@@ -190,6 +190,8 @@ struct RenderSettings
 	bool subsurfaceSingleScattering = true;
 	bool subsurfaceMultipleScattering = true;
 	float subsurfaceRadiusScale = 1.0f;
+	// glTF has no diffuse roughness: the base's EON diffuse takes this fraction of the specular roughness, 0 = Lambert.
+	float diffuseRoughnessScale = 0.33f;
 
 	bool rayConeTextureLod = true;
 	float textureLodBias = 0.0f;

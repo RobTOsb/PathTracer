@@ -616,6 +616,9 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 						   "%.2f",
 						   ImGuiSliderFlags_Logarithmic);
 		ImGui::SetItemTooltip("Multiplies every material's mean free path");
+		ImGui::SliderFloat("Diffuse roughness", &settings_.diffuseRoughnessScale, 0.0f, 1.0f, "%.2f");
+		ImGui::SetItemTooltip("The base's diffuse roughness (EON) as this fraction of its specular roughness, "
+							  "0 = Lambertian");
 
 		ImGui::Checkbox("Ray cone texture LOD", &settings_.rayConeTextureLod);
 		ImGui::SetItemTooltip("Filters textures over each ray's cone footprint instead of always sampling the top mip");
