@@ -71,7 +71,7 @@ static float QueryDisplayPeakNits(void *hwnd)
 }
 
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
-//constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
+constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
 //constexpr const char *kDefaultScenePath = "H:\\gltf-research-scenes\\scenes\\classroom2\\gltf\\classroom2.glb";
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\GlassHurricaneCandleHolder\\glTF-Binary\\GlassHurricaneCandleHolder.glb";
 //constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
@@ -79,7 +79,7 @@ static float QueryDisplayPeakNits(void *hwnd)
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\SubsurfaceScene\\scene.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\SphereRoom\\SphereRoom.glb";
 //constexpr const char *kDefaultScenePath = "h:\\SanMiguel.glb";
-constexpr const char *kDefaultScenePath = "h:\\sci_fi_hallway_free.glb";
+//constexpr const char *kDefaultScenePath = "h:\\the_bathroom_free\\scene.gltf";
 
 
 constexpr uint kFramesInFlight = 2;
@@ -298,6 +298,82 @@ bool LoadScene(const std::filesystem::path &scenePath, RenderGPUScene &gpuScene)
 	return true;
 }
 
+// Uniform in [0, 1) from an integer (PCG).
+float Hash01(uint32_t x)
+{
+	x = x * 747796405u + 2891336453u;
+	x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+	return static_cast<float>((x >> 22u) ^ x) * (1.0f / 4294967296.0f);
+}
+
+float SmoothStep(float edge0, float edge1, float x)
+{
+	const float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+	return t * t * (3.0f - 2.0f * t);
+}
+
+// On for a little over half of every 1.2 s, with 60 ms fades.
+float BeatFlash(float seconds)
+{
+	const float phase = seconds / 1.2f - floorf(seconds / 1.2f);
+	return SmoothStep(0.0f, 0.06f, phase) * (1.0f - SmoothStep(0.55f, 0.61f, phase));
+}
+
+// Two 120 ms blinks every 1.7 s, like a beacon, and dark in between.
+float BeaconFlash(float seconds)
+{
+	const float t = (seconds / 1.7f - floorf(seconds / 1.7f)) * 1.7f;
+	return (t < 0.12f || (t >= 0.3f && t < 0.42f)) ? 1.0f : 0.0f;
+}
+
+// A failing light: each 1.5 s it is either steady with a faint 25 Hz buzz, stuttering on and off at random,
+// or dead.
+float BrokenLight(float seconds)
+{
+	const uint32_t episode = static_cast<uint32_t>(seconds / 1.5f);
+	const uint32_t tick = static_cast<uint32_t>(seconds * 25.0f);
+	const float state = Hash01(episode * 0x9E3779B9u + 17u);
+	if (state < 0.15f)
+	{
+		return 0.0f;
+	}
+	if (state < 0.5f)
+	{
+		return Hash01(tick ^ 0x85EBCA6Bu) < 0.45f ? 0.0f : 0.6f + 0.4f * Hash01(tick * 7u + 1u);
+	}
+	return 0.9f + 0.1f * Hash01(tick);
+}
+
+// Intel Sponza's emissive bunnies, by their glTF materials (Material.001 to .003): pink, blue and the violet one
+// that is broken.
+struct FlashingBunny
+{
+	uint32_t emissiveInstance;
+	float (*pattern)(float seconds);
+};
+
+std::vector<FlashingBunny> FindBunnies(const std::filesystem::path &scenePath, const RenderGPUScene &gpuScene)
+{
+	std::vector<FlashingBunny> bunnies;
+	if (scenePath.stem() != "Intelsponza")
+	{
+		return bunnies;
+	}
+	constexpr struct
+	{
+		uint32_t material;
+		float (*pattern)(float);
+	} kBunnies[] = { { 41, BeatFlash }, { 42, BeaconFlash }, { 43, BrokenLight } };
+	for (const auto &bunny: kBunnies)
+	{
+		for (uint32_t emissiveInstance: gpuScene.FindEmissiveInstances(bunny.material))
+		{
+			bunnies.push_back({ emissiveInstance, bunny.pattern });
+		}
+	}
+	return bunnies;
+}
+
 int Run(const char *scenePath)
 {
 	Window window(WindowDesc{ "PathTracer", 1920, 1080, true });
@@ -359,6 +435,11 @@ int Run(const char *scenePath)
 	DLSSMode builtMode = settings.dlssMode;
 	DLSSRayReconstructionPreset builtPreset = settings.rrPreset;
 
+	const std::vector<FlashingBunny> bunnies = FindBunnies(scenePath, gpuScene);
+	settings.lights.bunnyCount = static_cast<uint32_t>(bunnies.size());
+	std::vector<float> bunnyScales(bunnies.size(), 1.0f);
+	float flashSeconds = 0.0f;
+
 	auto lastTime = std::chrono::steady_clock::now();
 	float animatedSeconds = -1.0f; // the time the scene was last posed at, none yet
 	while (window.ProcessEvents())
@@ -419,6 +500,22 @@ int Run(const char *scenePath)
 			}
 		}
 
+		// Like the animations, the flashing holds still in the reference, which starts over if a bunny changes.
+		if (settings.lights.flashBunnies && settings.renderMode != RenderMode::Reference)
+		{
+			flashSeconds += deltaSeconds;
+		}
+		for (size_t i = 0; i < bunnies.size(); ++i)
+		{
+			const float scale = settings.lights.flashBunnies ? bunnies[i].pattern(flashSeconds) : 1.0f;
+			if (scale != bunnyScales[i])
+			{
+				gpuScene.SetEmissionScale(bunnies[i].emissiveInstance, scale);
+				bunnyScales[i] = scale;
+				++settings.reference.restartCount;
+			}
+		}
+
 		if (settings.atmosphere.enabled && settings.clouds.enabled && settings.renderMode != RenderMode::Reference)
 		{
 			const float direction = DegreesToRadians(settings.clouds.windDirectionDegrees);
@@ -429,16 +526,14 @@ int Run(const char *scenePath)
 
 		renderContext->BeginFrame();
 
-		// After BeginFrame, which frees this frame's light buffers. Rebuilds the static emitters'
-		// tree only when its settings change, the animated emitters' also when they have moved.
-		LightTreeBuildSettings lightTreeSettings;
-		lightTreeSettings.maxLeafLights = static_cast<uint32_t>(settings.lights.maxLeafLights);
-		lightTreeSettings.orientationSplits = settings.lights.orientationSplits;
-		gpuScene.UpdateLights(lightTreeSettings);
+		// After BeginFrame, which frees this frame's light buffers.
+		gpuScene.UpdateLights();
 
 		renderContext->BeginGraphicsCommandList();
 		renderContext->SetDescriptorHeaps();
 		gpuScene.UpdateAccelerationStructures();
+		// Every light, static and dynamic, into a new tree on the GPU each frame.
+		gpuScene.BuildLightTree(static_cast<uint32_t>(settings.lights.maxLeafLights));
 
 		for (const std::unique_ptr<RenderPass> &pass: passes)
 		{

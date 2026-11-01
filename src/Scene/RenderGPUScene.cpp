@@ -329,6 +329,31 @@ namespace
 		return inv;
 	}
 
+	float3 MinFloat3(const float3 &a, const float3 &b)
+	{
+		return { std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z) };
+	}
+
+	float3 MaxFloat3(const float3 &a, const float3 &b)
+	{
+		return { std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z) };
+	}
+
+	// Bounds of the lights' triangle centroids, empty (min above max) without lights.
+	void CentroidBounds(std::span<const GpuLight> lights, float3 &boundsMin, float3 &boundsMax)
+	{
+		boundsMin = float3(FLT_MAX, FLT_MAX, FLT_MAX);
+		boundsMax = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+		for (const GpuLight &light: lights)
+		{
+			const float3 centroid = float3((light.v1.x + light.v2.x + light.v3.x) * (1.0f / 3.0f),
+										   (light.v1.y + light.v2.y + light.v3.y) * (1.0f / 3.0f),
+										   (light.v1.z + light.v2.z + light.v3.z) * (1.0f / 3.0f));
+			boundsMin = MinFloat3(boundsMin, centroid);
+			boundsMax = MaxFloat3(boundsMax, centroid);
+		}
+	}
+
 	// The light's triangle moved by m, its UVs kept.
 	GpuLight TransformLight(GpuLight light, const float *m)
 	{
@@ -341,7 +366,8 @@ namespace
 	}
 } // namespace
 
-RenderGPUScene::RenderGPUScene(RenderContext *renderContext) : renderContext_(renderContext)
+RenderGPUScene::RenderGPUScene(RenderContext *renderContext) :
+	renderContext_(renderContext), lightTreeBuilder_(std::make_unique<LightTreeBuilder>(renderContext))
 {
 	std::fill(std::begin(streamBuffers_), std::end(streamBuffers_), InvalidResourceHandle);
 	std::fill(std::begin(streamBufferIndices), std::end(streamBufferIndices), InvalidResourceDescriptorIndex);
@@ -404,8 +430,7 @@ void RenderGPUScene::DestroyLights()
 {
 	for (LightFrameBuffers &frame: lightFrames_)
 	{
-		for (ResourceHandle buffer:
-			 { frame.lights, frame.nodes, frame.leaves, frame.parents, frame.leafLights, frame.power, frame.emissionScales })
+		for (ResourceHandle buffer: { frame.lights, frame.emissionScales })
 		{
 			if (buffer != InvalidResourceHandle)
 			{
@@ -418,135 +443,72 @@ void RenderGPUScene::DestroyLights()
 	lightTreeBuilt_ = false;
 }
 
-void RenderGPUScene::UpdateLights(const LightTreeBuildSettings &settings)
+void RenderGPUScene::UpdateLights()
 {
-	// The static emitters' tree only changes with its settings, the dynamic emitters' also when they move
-	// or their emission scales change. Other emission scales only need writing.
-	const bool rebuildStatic = !lightTreeBuilt_ || settings != lightTreeSettings_;
-	const bool rebuildDynamic = rebuildStatic || dynamicLightsMoved_ || dynamicLightsRescaled_;
-	if (!rebuildDynamic && !emissionScalesChanged_)
-	{
-		return;
-	}
-	lightTreeBuilt_ = true;
-	lightTreeSettings_ = settings;
-
 	const std::span<const GpuLight> lights = emissiveLights_;
-	const std::span<const float> fluxScales = emissiveFluxScales_;
-	const uint32_t dynamicLightCount = static_cast<uint32_t>(lights.size()) - staticLightCount_;
-	const bool dynamic = dynamicLightCount > 0;
-	if (rebuildStatic)
+	if (!lightTreeBuilt_)
 	{
-		// With dynamic emitters the root group leaves its last slot to their tree.
-		LightTreeLayout layout;
-		layout.rootWidth = dynamic ? LIGHT_TREE_WIDTH - 1 : LIGHT_TREE_WIDTH;
-		const auto start = std::chrono::steady_clock::now();
-		staticLightTree_ = BuildLightTree(lights.first(staticLightCount_), fluxScales.first(staticLightCount_), settings, layout);
-		staticLightTreeBuildMs_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
-		++staticTreeGeneration_;
+		lightTreeBuilder_->Reset(emissiveFluxScales_, lightEmitterBuffer_);
+		lightTreeBuilt_ = true;
+		++lightsGeneration_;
+		CentroidBounds(lights.first(staticLightCount_), staticLightBoundsMin_, staticLightBoundsMax_);
+		// The dynamic lights where the scene loaded them, until they first move.
+		CentroidBounds(lights.subspan(staticLightCount_), dynamicLightBoundsMin_, dynamicLightBoundsMax_);
 	}
-
-	// After the static tree's nodes, its lights and its leaf slots, which are one per static light.
-	if (rebuildDynamic)
+	if (dynamicLightsMoved_)
 	{
-		dynamicLightTree_ = {};
+		TransformDynamicLights();
+		dynamicLightsMoved_ = false;
 	}
-
-	if (rebuildDynamic && dynamic)
-	{
-		const auto start = std::chrono::steady_clock::now();
-		if (dynamicLightsMoved_)
-		{
-			TransformDynamicLights();
-		}
-		// Picked by the flux they emit now, so a light that is off gets no samples.
-		std::vector<float> dynamicFluxScales(fluxScales.begin() + staticLightCount_, fluxScales.end());
-		for (size_t j = 0; j < dynamicFluxScales.size(); ++j)
-		{
-			dynamicFluxScales[j] *= emissionScales_[lightEmitters_[staticLightCount_ + j]];
-		}
-		LightTreeLayout layout;
-		layout.firstNode = static_cast<uint32_t>(staticLightTree_.nodes.size());
-		layout.firstLight = staticLightCount_;
-		layout.rootParent = LIGHT_TREE_WIDTH - 1;
-		dynamicLightTree_ = BuildLightTree(lights.subspan(staticLightCount_), dynamicFluxScales, settings, layout);
-		dynamicLightTreeBuildMs_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
-	}
-	
-	const LightTree &dynamicTree = dynamicLightTree_;
-	dynamicLightsMoved_ = false;
-	dynamicLightsRescaled_ = false;
-	emissionScalesChanged_ = false;
-
-	const double flux = staticLightTree_.flux + dynamicTree.flux;
-	staticLightPowerShare_ = flux > 0.0 ? static_cast<float>(staticLightTree_.flux / flux) : (staticLightCount_ > 0 ? 1.0f : 0.0f);
 	lightCount_ = static_cast<uint32_t>(lights.size());
-	// The dynamic emitters sit a level deeper, under the root group's last slot.
-	const uint32_t treeLights = staticLightTree_.treeLights + dynamicTree.treeLights;
-	lightTreeMaxDepth_ = std::max(staticLightTree_.maxDepth, dynamicTree.treeLights > 0 ? dynamicTree.maxDepth + 1 : 0);
-	lightTreeAverageDepth_ = treeLights == 0 ? 0.0f
-											 : (staticLightTree_.averageDepth * staticLightTree_.treeLights +
-												(dynamicTree.averageDepth + 1.0f) * dynamicTree.treeLights) /
-													   static_cast<float>(treeLights);
 
-	// BeginFrame has waited for the frame that last read this slot, so it can be overwritten. Its
-	// static part only needs writing once per static build, unless a buffer had to grow.
+	// BeginFrame has waited for the frame that last read this slot, so it can be overwritten. The static
+	// lights only need writing once per reset, unless the buffer had to grow, the dynamic ones whenever
+	// they have moved since this slot last held them.
 	lightFrames_.resize(renderContext_->GetFramesInFlight());
 	lightFrame_ = renderContext_->GetCurrentFrameIndex();
 	LightFrameBuffers &frame = lightFrames_[lightFrame_];
-	const size_t staticNodes = staticLightTree_.nodes.size();
-	const size_t staticGroups = staticLightTree_.parents.size();
-	bool recreated = false;
-	recreated |= ReserveLightBuffer<GpuLight>(renderContext_, frame.lights, frame.lightCapacity, lights.size(), "Scene_Lights");
-	recreated |= ReserveLightBuffer<GpuLightTreeNode>(renderContext_,
-													  frame.nodes,
-													  frame.nodeCapacity,
-													  staticNodes + (dynamic ? dynamicTree.nodes.size() : 0),
-													  "Scene_LightTreeNodes");
-	recreated |= ReserveLightBuffer<GpuLightTreeLeafEntry>(renderContext_,
-														   frame.leaves,
-														   frame.leafCapacity,
-														   lights.size(),
-														   "Scene_LightLeaves");
-	recreated |= ReserveLightBuffer<uint32_t>(renderContext_,
-											  frame.parents,
-											  frame.parentCapacity,
-											  staticGroups + (dynamic ? dynamicTree.parents.size() : 0),
-											  "Scene_LightTreeParents");
-	recreated |= ReserveLightBuffer<GpuLightTreeLeafEntry>(renderContext_,
-														   frame.leafLights,
-														   frame.leafLightCapacity,
-														   staticLightCount_ + dynamicTree.leafLights.size(),
-														   "Scene_LightTreeLeafLights");
-	recreated |= ReserveLightBuffer<GpuLightAliasEntry>(renderContext_, frame.power, frame.powerCapacity, lights.size(), "Scene_LightPower");
+	const bool recreated = ReserveLightBuffer<GpuLight>(renderContext_, frame.lights, frame.lightCapacity, lights.size(), "Scene_Lights");
+	if (recreated || frame.lightsGeneration != lightsGeneration_)
+	{
+		frame.lightsGeneration = lightsGeneration_;
+		frame.dynamicLightPose = UINT32_MAX;
+		WriteLightRange(renderContext_, frame.lights, 0, lights.first(staticLightCount_));
+	}
+	if (frame.dynamicLightPose != dynamicLightPose_)
+	{
+		frame.dynamicLightPose = dynamicLightPose_;
+		WriteLightRange(renderContext_, frame.lights, staticLightCount_, lights.subspan(staticLightCount_));
+	}
 	ReserveLightBuffer<float>(renderContext_,
 							  frame.emissionScales,
 							  frame.emissionScaleCapacity,
 							  emissionScales_.size(),
 							  "Scene_EmissionScales");
 	WriteLightRange<float>(renderContext_, frame.emissionScales, 0, emissionScales_);
+}
 
-	if (recreated || frame.staticTreeGeneration != staticTreeGeneration_)
+void RenderGPUScene::BuildLightTree(uint32_t maxLeafLights)
+{
+	if (lightFrames_.empty())
 	{
-		frame.staticTreeGeneration = staticTreeGeneration_;
-		WriteLightRange(renderContext_, frame.lights, 0, lights.first(staticLightCount_));
-		WriteLightRange<GpuLightTreeNode>(renderContext_, frame.nodes, 0, staticLightTree_.nodes);
-		WriteLightRange<GpuLightTreeLeafEntry>(renderContext_, frame.leaves, 0, staticLightTree_.leafOfLight);
-		WriteLightRange<uint32_t>(renderContext_, frame.parents, 0, staticLightTree_.parents);
-		WriteLightRange<GpuLightTreeLeafEntry>(renderContext_, frame.leafLights, 0, staticLightTree_.leafLights);
-		WriteLightRange<GpuLightAliasEntry>(renderContext_, frame.power, 0, staticLightTree_.powerTable);
+		return;
 	}
-	if (dynamic)
+	const LightFrameBuffers &frame = lightFrames_[lightFrame_];
+	LightTreeBuilder::Inputs inputs;
+	inputs.lights = frame.lights;
+	inputs.emissionScales = frame.emissionScales;
+	const bool anyStatic = staticLightCount_ > 0;
+	const bool anyDynamic = lightCount_ > staticLightCount_;
+	inputs.boundsMin = anyStatic ? staticLightBoundsMin_ : dynamicLightBoundsMin_;
+	inputs.boundsMax = anyStatic ? staticLightBoundsMax_ : dynamicLightBoundsMax_;
+	if (anyStatic && anyDynamic)
 	{
-		const GpuLightTreeNode dynamicRoot = dynamicTree.flux > 0.0 ? dynamicTree.root : EmptyLightTreeNode();
-		WriteLightRange<GpuLightTreeNode>(renderContext_, frame.nodes, LIGHT_TREE_WIDTH - 1, std::span(&dynamicRoot, 1));
-		WriteLightRange(renderContext_, frame.lights, staticLightCount_, lights.subspan(staticLightCount_));
-		WriteLightRange<GpuLightTreeNode>(renderContext_, frame.nodes, staticNodes, dynamicTree.nodes);
-		WriteLightRange<GpuLightTreeLeafEntry>(renderContext_, frame.leaves, staticLightCount_, dynamicTree.leafOfLight);
-		WriteLightRange<uint32_t>(renderContext_, frame.parents, staticGroups, dynamicTree.parents);
-		WriteLightRange<GpuLightTreeLeafEntry>(renderContext_, frame.leafLights, staticLightCount_, dynamicTree.leafLights);
-		WriteLightRange<GpuLightAliasEntry>(renderContext_, frame.power, staticLightCount_, dynamicTree.powerTable);
+		inputs.boundsMin = MinFloat3(inputs.boundsMin, dynamicLightBoundsMin_);
+		inputs.boundsMax = MaxFloat3(inputs.boundsMax, dynamicLightBoundsMax_);
 	}
+	inputs.maxLeafLights = maxLeafLights;
+	lightTreeBuilder_->Build(inputs);
 }
 
 void RenderGPUScene::Animate(float seconds)
@@ -621,6 +583,24 @@ void RenderGPUScene::Animate(float seconds)
 	dynamicLightsMoved_ = !dynamicObjectLights_.empty();
 }
 
+std::vector<uint32_t> RenderGPUScene::FindEmissiveInstances(uint32_t materialIndex) const
+{
+	std::vector<uint8_t> uses(instances.size(), 0);
+	for (const TLASInstanceRef &ref: EnumerateTLASInstances())
+	{
+		uses[ref.instance] |= primitiveDescs[ref.primitive].materialIndex == materialIndex;
+	}
+	std::vector<uint32_t> found;
+	for (uint32_t ordinal = 0; ordinal < static_cast<uint32_t>(emissiveInstances_.size()); ++ordinal)
+	{
+		if (uses[emissiveInstances_[ordinal]])
+		{
+			found.push_back(ordinal);
+		}
+	}
+	return found;
+}
+
 void RenderGPUScene::SetEmissionScale(uint32_t emissiveInstance, float scale)
 {
 	scale = std::max(scale, 0.0f);
@@ -629,8 +609,6 @@ void RenderGPUScene::SetEmissionScale(uint32_t emissiveInstance, float scale)
 		return;
 	}
 	emissionScales_[emissiveInstance] = scale;
-	emissionScalesChanged_ = true;
-	dynamicLightsRescaled_ |= GetDynamicInstanceOfEmitter(emissiveInstance) != UINT32_MAX;
 }
 
 void RenderGPUScene::TransformDynamicLights()
@@ -655,6 +633,10 @@ void RenderGPUScene::TransformDynamicLights()
 		}
 		emissiveLights_[staticLightCount_ + j] = light;
 	}
+	CentroidBounds(std::span<const GpuLight>(emissiveLights_).subspan(staticLightCount_),
+				   dynamicLightBoundsMin_,
+				   dynamicLightBoundsMax_);
+	++dynamicLightPose_;
 }
 
 void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
@@ -662,7 +644,6 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 	dynamicObjectLights_.clear();
 	dynamicLightInstance_.clear();
 	dynamicLightsMoved_ = false;
-	dynamicLightsRescaled_ = false;
 	emissiveInstances_.clear();
 
 	const uint32_t lightCount = static_cast<uint32_t>(emissiveLights_.size());
@@ -725,7 +706,6 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 	}
 	// Every emissive instance at its loaded emission, and each light's instance in the final order.
 	emissionScales_.assign(emissiveInstances_.size(), 1.0f);
-	emissionScalesChanged_ = true;
 	auto findLightEmitters = [&]
 	{
 		lightEmitters_.assign(lightCount, 0);

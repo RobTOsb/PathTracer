@@ -83,7 +83,7 @@ StructuredBuffer<GpuLightTreeLeafEntry> g_LightLeaves : register(t7);
 StructuredBuffer<uint> g_Emitters : register(t8);
 StructuredBuffer<uint> g_LightTreeParents : register(t9);
 StructuredBuffer<GpuLightTreeLeafEntry> g_LightTreeLeafLights : register(t10);
-StructuredBuffer<GpuLightAliasEntry> g_LightPower : register(t13);
+StructuredBuffer<GpuLightPowerEntry> g_LightPower : register(t13);
 StructuredBuffer<uint> g_LightEmitters : register(t14);    // per light, its emissive instance
 StructuredBuffer<float> g_EmissionScales : register(t15); // per emissive instance, see RenderGPUScene::SetEmissionScale
 

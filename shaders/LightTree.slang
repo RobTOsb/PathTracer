@@ -1,7 +1,9 @@
-// Light tree traversal after "Hierarchical Light Sampling with Accurate Spherical Gaussian Lighting" (Tokuyoshi,
-// Ikeda, Kulkarni and Harada 2024): their clusters (Section 3.1), but a cheap bound on each node's contribution in
-// place of their SG lighting integrals, which keeps the walk small in code and registers. The tree is built on the
-// CPU by LightTreeBuilder.
+// Light tree traversal: a stochastic walk down a 4-wide tree with one light sample per query, and the PMF walk back
+// up for MIS. Each node holds the cluster of "Hierarchical Light Sampling with Accurate Spherical Gaussian Lighting"
+// (Tokuyoshi, Ikeda, Kulkarni and Harada 2024, Section 3.1): flux, mean, a vMF fit of the emission and the spatial
+// deviation. A node's importance is not their SG lighting integral but a cheap bound over the cone to its bounding
+// sphere, except for the glossy lobe, which weighs the node as their SG light, widened by its spatial deviation.
+// LightTreeBuild.slang builds the tree on the GPU every frame, Morton sorted after Lin and Yuksel 2020.
 
 #include "LightTreeInterop.h"
 
@@ -24,6 +26,12 @@ float LightTreeRadius(GpuLightTreeNode n)
 float LightTreeSharpness(GpuLightTreeNode n)
 {
     return f16tof32(n.packed.z & 0xFFFF);
+}
+
+// Flux weighted standard deviation of the cluster's light positions.
+float LightTreeStdDev(GpuLightTreeNode n)
+{
+    return f16tof32(n.packed.z >> 16);
 }
 
 // Octahedral snorm16x2 to a unit vector, x in the low half.
@@ -49,7 +57,6 @@ struct LightTreeShadingContext
     float backDiffuseWeight;
     float3 reflectDir;     // the glossy lobe's axis, the view direction mirrored about normal
     float glossySharpness; // the glossy lobe as a vMF around reflectDir
-    float glossyNorm;      // that vMF's normalisation, so that it integrates to 1 over the sphere
 };
 
 // diffuseOnlyAlpha: GGX alpha (roughness squared) on both axes at or above which the glossy lobe counts as
@@ -73,9 +80,7 @@ LightTreeShadingContext MakeLightTreeShadingContext(float3 position, float3 N, f
     ctx.reflectDir = 2.0 * dot(V, N) * N - V;
     float alpha = clamp(max(alphaX, alphaY), 1e-3, 1.0);
     float alpha2 = alpha * alpha;
-    float k = (1.0 - alpha2) / (2.0 * alpha2);
-    ctx.glossySharpness = k;
-    ctx.glossyNorm = k < 1e-3 ? 0.5 / LIGHT_TREE_TWO_PI : k / (LIGHT_TREE_TWO_PI * (1.0 - exp(-2.0 * k)));
+    ctx.glossySharpness = (1.0 - alpha2) / (2.0 * alpha2);
     return ctx;
 }
 
@@ -87,10 +92,10 @@ float LightTreeConeCosine(float cosAxis, float sinCone, float cosCone)
     return cosAxis >= cosCone ? 1.0 : cosAxis * cosCone + sinAxis * sinCone;
 }
 
-// A bound on the light the node's cluster sends to the shading point's lobes, from the cone of directions to its
-// bounding sphere: the node's vMF emission lobe at its strongest over the cone, over the squared distance (at
-// least the radius), times the receiving lobes at their strongest over the cone, the diffuse ones as cosine / pi
-// and the glossy one as its vMF.
+// The light the node's cluster sends to the shading point's lobes: the node's vMF emission lobe at its strongest over
+// the cone of directions to its bounding sphere, over the squared distance (at least the radius), times the diffuse
+// lobes as cosine / pi at their strongest over the cone, and the glossy lobe weighed by the cluster as an SG light.
+// The emission lobe is left as it is: a one-sided emitter's sharpness is at most about 1.8, already broad.
 float LightTreeNodeImportance(GpuLightTreeNode node, LightTreeShadingContext ctx)
 {
     // A bounding sphere entirely below the tangent plane gets nothing, unless the surface transmits. Either test
@@ -121,8 +126,18 @@ float LightTreeNodeImportance(GpuLightTreeNode node, LightTreeShadingContext ctx
     {
         lobes += ctx.diffuseWeight * LIGHT_TREE_INV_PI * max(LightTreeConeCosine(cosNormal, sinCone, cosCone), 0.0);
         if (ctx.specularWeight > 0.0)
-            lobes += ctx.specularWeight * ctx.glossyNorm *
-                     exp(ctx.glossySharpness * (LightTreeConeCosine(dot(ctx.reflectDir, dir), sinCone, cosCone) - 1.0));
+        {
+            // Seen from the point, the cluster spreads over directions like an SG of sharpness d^2 / sigma^2 around
+            // the one to its mean, which Tokuyoshi et al. use for the SG light. Convolved with the glossy vMF the
+            // sharpnesses combine harmonically, k' = k d^2 / (d^2 + k sigma^2), so a cluster that is wide for its
+            // distance widens the lobe it is weighed with, and one around the point flattens it. The normalised
+            // vMF's k' / (2 pi (1 - exp(-2 k'))) is approximated by sqrt(k'^2 + 1/4) / (2 pi), within 11%.
+            float sigma = LightTreeStdDev(node);
+            float distance2 = max(d2, 1e-20);
+            float k = ctx.glossySharpness * distance2 / (distance2 + ctx.glossySharpness * sigma * sigma);
+            lobes += ctx.specularWeight * (sqrt(k * k + 0.25) / LIGHT_TREE_TWO_PI) *
+                     exp(k * (dot(ctx.reflectDir, dir) - 1.0));
+        }
     }
     if (back)
         lobes += ctx.backDiffuseWeight * LIGHT_TREE_INV_PI * max(LightTreeConeCosine(-cosNormal, sinCone, cosCone), 0.0);

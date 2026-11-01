@@ -187,12 +187,6 @@ LightTreeShadingContext MakeLightTreeShadingContext(LightSelectVertex v)
                                        v.backDiffuseWeight, v.alpha.x, v.alpha.y, g_Frame.lightTreeDiffuseOnlyAlpha);
 }
 
-// Share of the flux of the part of the light buffer (static or dynamic emitters) that lightIndex is in.
-float LightPartPowerShare(uint lightIndex)
-{
-    return lightIndex < g_Frame.staticLightCount ? g_Frame.staticLightPowerShare : 1.0 - g_Frame.staticLightPowerShare;
-}
-
 // Probability of SampleLight at v picking lightIndex from the light buffer, sun selection included.
 float LightSelectPmf(LightSelectVertex v, uint lightIndex)
 {
@@ -200,7 +194,7 @@ float LightSelectPmf(LightSelectVertex v, uint lightIndex)
     if (v.selection == LIGHT_SELECT_TREE)
         pmf = LightTreePmf(g_LightTreeNodes, g_LightTreeParents, g_LightLeaves, MakeLightTreeShadingContext(v), lightIndex);
     else if (v.selection == LIGHT_SELECT_POWER)
-        pmf = g_LightPower[lightIndex].pmf * LightPartPowerShare(lightIndex);
+        pmf = g_LightPower[lightIndex].pmf;
     else
         pmf = 1.0 / g_Frame.lightCount;
     return pmf * (1.0 - g_Frame.sunSelectProbability);
@@ -248,19 +242,29 @@ LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
     }
     else if (v.selection == LIGHT_SELECT_POWER)
     {
-        // The static or the dynamic part by its share of the flux, then an entry of the part's alias
-        // table. u.y, which only the sun uses, decides between the entry's light and its alias.
-        float staticShare = g_Frame.staticLightPowerShare;
-        bool inStatic = uSelect < staticShare;
-        uint first = inStatic ? 0 : g_Frame.staticLightCount;
-        uint count = inStatic ? g_Frame.staticLightCount : g_Frame.lightCount - g_Frame.staticLightCount;
-        float share = inStatic ? staticShare : 1.0 - staticShare;
-        float uPart = min((inStatic ? uSelect : uSelect - staticShare) / share, 0.99999994);
-        uint entry = first + min(uint(uPart * count), count - 1);
-        GpuLightAliasEntry alias = g_LightPower[entry];
-        bool keep = u.y < alias.threshold;
-        lightIndex = keep ? entry : alias.alias;
-        pmf = (keep ? alias.pmf : alias.aliasPmf) * share;
+        // A point of the flux CDF (see GpuLightPowerEntry) at 31 bits: uSelect gives the top 24 and u.y, which
+        // only the sun uses otherwise, the rest. The guide table's bucket holding it bounds the search to the
+        // lights between the owners of its start and of the next bucket's.
+        uint target = (min(uint(uSelect * 16777216.0), 16777215u) << 7) | min(uint(u.y * 128.0), 127u);
+        uint guideBits = firstbithigh(g_Frame.lightCount);
+        uint bucket = target >> (31 - guideBits);
+        uint lo = g_LightPower[bucket].guide;
+        uint hi = bucket + 1 < (1u << guideBits) ? g_LightPower[bucket + 1].guide : g_Frame.lightCount - 1;
+        [loop]
+        while (lo < hi)
+        {
+            uint mid = (lo + hi) / 2;
+            if (g_LightPower[mid].cdfEnd > target)
+                hi = mid;
+            else
+                lo = mid + 1;
+        }
+        GpuLightPowerEntry entry = g_LightPower[lo];
+        // Past the last light's interval, which the quantised flux leaves a little short of 2^31.
+        if (entry.cdfEnd <= target)
+            return ls;
+        lightIndex = lo;
+        pmf = entry.pmf;
     }
     else
     {

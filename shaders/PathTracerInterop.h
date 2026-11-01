@@ -114,11 +114,8 @@ struct FrameConstants
 	// Paths per pixel this dispatch traces: averaged into the output, or under REFERENCE added to the sum.
 	uint samplesPerFrame;
 	uint maxSpecularBounces; // see maxDiffuseBounces
-	// The light buffer holds the static emitters first, then from staticLightCount on the dynamic ones.
-	// Power selection picks the static part with staticLightPowerShare, its share of the flux, then a
-	// light within the part from its own alias table.
-	uint staticLightCount;
-	float staticLightPowerShare;
+	uint pad2;
+	uint pad3;
 
 	// ATMOSPHERE: the cloud layer seen past the scene's geometry and shadowing its sunlight (see Clouds.slang).
 	CloudParameters clouds;
@@ -165,7 +162,7 @@ enum MaterialOverrideFlags
 UnscopedEnum
 enum LightSamplingMode
 {
-	LIGHT_SAMPLING_TREE = 0, // SG light tree (Tokuyoshi et al. 2024), power selection past lightTreeBounces
+	LIGHT_SAMPLING_TREE = 0, // light tree (LightTree.slang), power selection past lightTreeBounces
 	LIGHT_SAMPLING_UNIFORM = 1,
 	LIGHT_SAMPLING_POWER = 2, // in proportion to flux, wherever the shading point is
 };

@@ -40,12 +40,15 @@ struct LightSettings
 	// Light tree: lights per leaf, picked by flux within it, 1 to LIGHT_TREE_MAX_LEAF_LIGHTS. More
 	// makes the tree shallower at the cost of ignoring where the leaf's lights are relative to each other.
 	int maxLeafLights = 4;
-	// Light tree build: the split cost also weighs how far each side's emitter normals spread.
-	bool orientationSplits = false;
+	// Intel Sponza's emissive bunnies flash on clocks of their own, one like a broken light, so that the light
+	// tree's lights change every frame. The main loop finds them (the checkbox shows only if it did) and holds
+	// them still in the reference.
+	bool flashBunnies = true;
+	uint32_t bunnyCount = 0;
 };
 
 // The scene's glTF animations (RenderGPUScene::Animate), which play together and loop, except in the reference.
-// While they play, the TLAS is rebuilt every frame, and so is the light tree of the emitters they move.
+// While they play, the TLAS is rebuilt every frame (the light tree is rebuilt every frame regardless).
 struct AnimationSettings
 {
 	bool play = false;

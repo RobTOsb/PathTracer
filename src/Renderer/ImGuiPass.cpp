@@ -239,11 +239,18 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	{
 		ProfileRow(renderContext, "SkyAtmosphere");
 	}
+
+	if (scene_.GetLightCount() > 0)
+	{
+		ProfileRow(renderContext, "LightTree");
+	}
+
 	ProfileRow(renderContext, "PathTracer");
 	if (settings_.dlssMode != DLSSMode::Off)
 	{
 		ProfileRow(renderContext, "DLSS-RR");
 	}
+	
 	ProfileRow(renderContext, "AutoExposure");
 	ProfileRow(renderContext, "Bloom");
 	ProfileRow(renderContext, "Tonemap");
@@ -401,7 +408,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		AnimationSettings &animation = settings_.animation;
 		ImGui::Text("%u instance(s) move", scene_.GetDynamicInstanceCount());
 		ImGui::Checkbox("Play", &animation.play);
-		ImGui::SetItemTooltip("Rebuilds the TLAS every frame, and the light tree of the emitters that move");
+		ImGui::SetItemTooltip("Rebuilds the TLAS every frame");
 		ImGui::SliderFloat("Playback speed", &animation.speed, 0.0f, 4.0f, "%.2fx");
 		ImGui::SliderFloat("Time", &animation.seconds, 0.0f, scene_.GetAnimationDuration(), "%.2f s");
 	}
@@ -410,19 +417,16 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	{
 		LightSettings &lights = settings_.lights;
 		const uint32_t lightCount = scene_.GetLightCount();
-		const uint32_t dynamicLightCount = lightCount - scene_.GetStaticLightCount();
-		ImGui::Text("%u static emissive triangle(s), tree built in %.3f ms",
-					scene_.GetStaticLightCount(),
-					scene_.GetStaticLightTreeBuildMs());
-		if (dynamicLightCount > 0)
+		ImGui::Text("%u emissive triangle(s), %u of them dynamic",
+					lightCount,
+					lightCount - scene_.GetStaticLightCount());
+		ImGui::Text("Tree depth: %u (4-wide), rebuilt on the GPU every frame", scene_.GetLightTreeDepth());
+		if (lights.bunnyCount > 0)
 		{
-			ImGui::Text("%u dynamic emissive triangle(s), tree built in %.3f ms",
-						dynamicLightCount,
-						scene_.GetDynamicLightTreeBuildMs());
+			ImGui::Checkbox("Flash bunnies", &lights.flashBunnies);
+			ImGui::SetItemTooltip("The %u emissive bunnies flash on their own, the violet one like a broken light",
+								  lights.bunnyCount);
 		}
-		ImGui::Text("Tree depth: %u max, %.1f average (4-wide)",
-					scene_.GetLightTreeMaxDepth(),
-					scene_.GetLightTreeAverageDepth());
 		ImGui::BeginDisabled(lightCount == 0);
 		ImGui::Checkbox("Enabled", &lights.enabled);
 		EnumCombo("Sampling", kLightSamplingModes, lights.sampling);
@@ -441,9 +445,6 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 							  "later ones use the diffuse one only");
 		ImGui::SliderInt("Lights per leaf", &lights.maxLeafLights, 1, static_cast<int>(LIGHT_TREE_MAX_LEAF_LIGHTS));
 		ImGui::SetItemTooltip("Light tree leaf size; a leaf's lights are picked in proportion to their flux");
-		ImGui::Checkbox("Orientation splits", &lights.orientationSplits);
-		ImGui::SetItemTooltip("Light tree build: keep emitters that face the same way together, by also weighing "
-							  "the spread of each side's normals in the split cost");
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 	}
