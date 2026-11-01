@@ -271,7 +271,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         }
     }
 
-    SetShadingBasis(mat, hit.T, hit.B, hit.N, hit.Ns, wo);
+    SetShadingBasis(mat, hit.T, hit.B, hit.N, hit.Ns, hit.Ng, wo);
     OpenPBRContext ctx = OpenPBRSetup(mat, wo);
 
     // One hash covers the light sample (xy) and the Russian roulette decision (z).

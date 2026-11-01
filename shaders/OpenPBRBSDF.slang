@@ -1,7 +1,7 @@
 // OpenPBR BSDF for path tracing (base substrate, coat and fuzz): evaluation, sampling and PDF.
 //
 // API
-//   void           SetShadingBasis(p, T, B, N, Ns, wo)  fills the shading basis in the params
+//   void           SetShadingBasis(p, T, B, N, Ns, Ng, wo)  fills the shading basis in the params
 //   OpenPBRContext OpenPBRSetup(p, wo)                  per shading point setup, call once per hit
 //   float3         OpenPBREval(p, ctx, wi)              returns f(wi, wo) * |dot(wi, geometryNormal)|
 //   float          OpenPBRPdf(p, ctx, wi)               returns the solid angle PDF of sampling wi given wo
@@ -1018,8 +1018,8 @@ bool GeometricallyConsistent(OpenPBRBaseParams p, float3 Ng, float3 wi, float3 w
     return gi != 0.0 && ((gi * go > 0.0) == (si * so > 0.0));
 }
 
-// A normal-mapped normal n bent so the viewer along wo stays on the same side of it as of the vertex
-// normal, side being that side's sign.
+// A normal-mapped normal n bent so the viewer along wo stays on the same side of it as of the triangle,
+// side being that side's sign.
 float3 FaceViewer(float3 n, float3 wo, float side)
 {
     const float eps = 0.01;
@@ -1034,11 +1034,14 @@ float3 FaceViewer(float3 n, float3 wo, float side)
 //
 // T, B, N  interpolated vertex tangent, bitangent and normal (world space)
 // Ns       shading normal from the normal map (world space), pass N if there is no map
+// Ng       triangle normal (world space)
 // wo       direction towards the viewer, normally -rayDir
-void SetShadingBasis(inout OpenPBRBaseParams p, float3 T, float3 B, float3 N, float3 Ns, float3 wo)
+void SetShadingBasis(inout OpenPBRBaseParams p, float3 T, float3 B, float3 N, float3 Ns, float3 Ng, float3 wo)
 {
-    // Keep the viewer on the same side of Ns as of the vertex normal.
-    float side = dot(N, wo) >= 0.0 ? 1.0 : -1.0;
+    // Keep the viewer on the same side of Ns as of the triangle. Vertex normals smoothed round a corner
+    // lean far from it, and a grazing viewer can be below them while above the surface, which would
+    // otherwise read as inside it.
+    float side = dot(Ng, wo) >= 0.0 ? 1.0 : -1.0;
     Ns = FaceViewer(Ns, wo, side);
 
     // Make the tangent perpendicular to Ns, falling back to the bitangent if they are parallel.
