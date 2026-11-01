@@ -74,6 +74,28 @@ public:
 		return animationDuration_;
 	}
 
+	// The glTF camera the view can follow: the first perspective camera, or the first an animation moves.
+	struct CameraPose
+	{
+		float3 position;
+		float3 front; // the camera node's -Z
+		float3 up; // its +Y
+		float yFov; // radians
+	};
+
+	bool HasCamera() const
+	{
+		return !sceneCamera_.empty();
+	}
+
+	bool IsCameraAnimated() const
+	{
+		return !sceneCamera_.empty() && sceneCamera_[0].animatedNode != UINT32_MAX;
+	}
+
+	// Where the camera is at rest, or as the last Animate posed it.
+	CameraPose GetCameraPose() const;
+
 	// Poses the animated nodes at this many seconds into the animations. The scene instances they move are
 	// the dynamic ones: their TLAS instances follow at the next UpdateAccelerationStructures and their lights
 	// at the next UpdateLights.
@@ -313,6 +335,13 @@ private:
 	};
 	static constexpr uint32_t kStaticParent = UINT32_MAX;
 
+	struct SceneCamera
+	{
+		float worldMatrix[12]; // at rest, then as Animate last posed it
+		float yFov; // radians
+		uint32_t animatedNode; // into animatedNodes_, or UINT32_MAX for a camera that does not move
+	};
+
 	// A glTF animation channel, its keys in animationTimes_ and animationValues_ (see Scene::SampleAnimation).
 	struct AnimationChannel
 	{
@@ -435,6 +464,7 @@ private:
 	std::vector<float> animationTimes_;
 	std::vector<float> animationValues_;
 	float animationDuration_ = 0.0f;
+	std::vector<SceneCamera> sceneCamera_; // none or one, a table for the cache
 
 	// The scene instances that move, and the lights of their triangles.
 	std::vector<uint32_t> dynamicInstances_; // into instances

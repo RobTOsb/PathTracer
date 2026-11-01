@@ -55,13 +55,16 @@ struct AnimationSettings
 	float speed = 1.0f;
 	// Into the animations: the main loop advances it while they play, and the UI can set it.
 	float seconds = 0.0f;
+	// While they play (not in the reference), the view follows the scene's animated glTF camera, its field of view
+	// too, and ignores the mouse and keys. Paused, the free camera carries on from where it was left.
+	bool sceneCamera = true;
 };
 
 // Geometric specular antialiasing of the opaque surfaces the camera sees: glossy lobes widen by how much
 // the normals turn across the pixel, so highlights smaller than a pixel stop flickering with the jitter.
 struct SpecularAASettings
 {
-	bool enabled = true;
+	bool enabled = false;
 	float strength = 1.0f; // scales the kernel, 1 = Tokuyoshi and Kaplanyan's
 	// The normal maps' variance as their mips average it away (Toksvig).
 	bool normalMaps = true;
@@ -250,10 +253,18 @@ struct RenderSettings
 	// the diffuse lobe, so the guide does not flicker between a distance and none.
 	bool holdSpecularHitDistance = true;
 	float holdHitDistanceMaxRoughness = 0.25f;
+	// Only surfaces at most this rough get specular motion vectors that follow their reflection; rougher ones get
+	// the surface's own, since one hit distance cannot place a glossy blur of things at many depths (a light's
+	// streak on a shiny floor) and the field it gives jumps across the highlight. Bevy Solari's cut-off
+	// (GGX alpha 0.0625). 1 = always the reflection.
+	float specularMotionMaxRoughness = 0.25f;
 	// While the animated instances move, the surface the guides describe also traces its light sample's shadow
 	// ray in last frame's TLAS, and where the light was blocked differently DLSS-RR is told to trust the current
 	// frame over its history (bias current colour mask), so moving shadows do not ghost.
 	bool shadowChangeMask = true;
+	// Set by the main loop for a frame whose view does not follow on from the last (the scene camera starting,
+	// stopping or looping), so DLSS drops its history.
+	bool cameraCut = false;
 	// Debug: one guide in place of the image (GuideViewPass), or with guideViewChange how much it changed since
 	// last frame along the motion vectors, as heat scaled by guideViewGain. guideViewHeld tints the pixels that kept
 	// last frame's guides because their PSR chain broke by chance.

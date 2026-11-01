@@ -86,7 +86,7 @@ void DLSSPass::Execute(RenderContext *renderContext)
 		eval.biasCurrentColourMask = d3dContext->GetNativeResource(guides.shadowChanges);
 		eval.renderWidth = featureParams_.renderWidth;
 		eval.renderHeight = featureParams_.renderHeight;
-		eval.reset = reset_;
+		eval.reset = reset_ || settings_.cameraCut;
 
 		// DLSS wants the jitter as applied to the projection, which shifts the image the opposite
 		// way to the offset the camera rays were sampled at.

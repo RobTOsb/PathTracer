@@ -23,6 +23,20 @@ void Camera::SetOrientation(float newYaw, float newPitch)
 	UpdateOrientation();
 }
 
+void Camera::SetView(const float3 &newPosition, const float3 &newFront, const float3 &newUp)
+{
+	position = newPosition;
+	front = newFront;
+	NormaliseFloat3(front);
+	right = Cross(front, newUp);
+	NormaliseFloat3(right);
+	up = Cross(right, front);
+	// The inverse of UpdateOrientation's front from yaw and pitch.
+	yaw = atan2f(front.x, front.z);
+	pitch = Clamp(asinf(Clamp(front.y, -1.0f, 1.0f)), negativeRotationClamp, rotationClamp);
+	UpdateViewMatrix();
+}
+
 void Camera::UpdateOrientation()
 {
 	float3 worldUp = { 0.0f, 1.0f, 0.0f };

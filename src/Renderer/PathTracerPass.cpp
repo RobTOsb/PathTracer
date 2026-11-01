@@ -343,6 +343,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.specularHitDistanceRay = settings_.specularHitDistanceRay ? 1u : 0u;
 	constants.specularHitDistanceHoldRoughness =
 			settings_.holdSpecularHitDistance ? settings_.holdHitDistanceMaxRoughness : -1.0f;
+	constants.specularMotionMaxRoughness = settings_.specularMotionMaxRoughness;
 
 	if (atmosphere)
 	{

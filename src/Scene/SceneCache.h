@@ -34,7 +34,8 @@
 // 21: alpha-blended primitives get micromaps again: transparent where alpha < 1/255, unknown where partly there.
 // 22: a blended surface's unknown micro-triangles lean the way its alpha cut at 0.5 does, for 2-state shadow rays.
 // 23: glTF node animations (RenderGPUScene's animation tables).
-constexpr uint32_t kSceneCacheVersion = 23;
+// 24: the glTF camera the view can follow (RenderGPUScene::sceneCamera_).
+constexpr uint32_t kSceneCacheVersion = 24;
 
 struct SceneCacheTexture
 {

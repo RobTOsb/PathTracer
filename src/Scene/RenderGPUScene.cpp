@@ -574,6 +574,11 @@ void RenderGPUScene::Animate(float seconds)
 			std::copy(worlds[i].begin(), worlds[i].end(), instances[node.instance].worldMatrix);
 		}
 	}
+	if (IsCameraAnimated())
+	{
+		const std::array<float, 12> &world = worlds[sceneCamera_[0].animatedNode];
+		std::copy(world.begin(), world.end(), sceneCamera_[0].worldMatrix);
+	}
 
 	if (!dynamicInstances_.empty())
 	{
@@ -581,6 +586,20 @@ void RenderGPUScene::Animate(float seconds)
 	}
 
 	dynamicLightsMoved_ = !dynamicObjectLights_.empty();
+}
+
+RenderGPUScene::CameraPose RenderGPUScene::GetCameraPose() const
+{
+	// Rows of the ComposeTRS layout are where the node's axes go, the 4th column its position.
+	const float *m = sceneCamera_[0].worldMatrix;
+	CameraPose pose;
+	pose.position = float3(m[3], m[7], m[11]);
+	pose.front = float3(-m[8], -m[9], -m[10]);
+	pose.up = float3(m[4], m[5], m[6]);
+	NormaliseFloat3(pose.front);
+	NormaliseFloat3(pose.up);
+	pose.yFov = sceneCamera_[0].yFov;
+	return pose;
 }
 
 std::vector<uint32_t> RenderGPUScene::FindEmissiveInstances(uint32_t materialIndex) const
@@ -951,6 +970,7 @@ void RenderGPUScene::SerialiseTables(Archive &archive,
 	archive.Table(animationChannels_);
 	archive.Table(animationTimes_);
 	archive.Table(animationValues_);
+	archive.Table(sceneCamera_);
 	archive.Value(boundsMin_);
 	archive.Value(boundsMax_);
 }
@@ -1070,6 +1090,11 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 			return false;
 		}
 	}
+	if (sceneCamera_.size() > 1 ||
+		(IsCameraAnimated() && sceneCamera_[0].animatedNode >= animatedNodes_.size()))
+	{
+		return false;
+	}
 	for (const AnimationChannel &channel: animationChannels_)
 	{
 		if (channel.node >= animatedNodes_.size() || channel.path > Scene::AnimationPath::Scale ||
@@ -1113,6 +1138,7 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 		animationChannels_.clear();
 		animationTimes_.clear();
 		animationValues_.clear();
+		sceneCamera_.clear();
 		ReleaseStaging();
 		return false;
 	}
@@ -1281,6 +1307,36 @@ void RenderGPUScene::BuildAnimation(const Scene::GLTFScene &scene, const std::ve
 			animatedOfNode[n] = static_cast<uint32_t>(animatedNodes_.size() - 1);
 		}
 		stack.insert(stack.end(), children[n].begin(), children[n].end());
+	}
+
+	// The camera the view can follow, a moving one before a still one.
+	sceneCamera_.clear();
+	int32_t cameraNode = -1;
+	for (uint32_t n = 0; n < static_cast<uint32_t>(nodeCount); ++n)
+	{
+		const int32_t camera = scene.GetInstance(n).GetCameraIndex();
+		if (camera < 0 || static_cast<size_t>(camera) >= scene.GetCameraCount() || !scene.GetCamera(camera).perspective)
+		{
+			continue;
+		}
+		if (cameraNode < 0 || (animatedOfNode[cameraNode] == UINT32_MAX && animatedOfNode[n] != UINT32_MAX))
+		{
+			cameraNode = static_cast<int32_t>(n);
+		}
+	}
+	if (cameraNode >= 0)
+	{
+		const Scene::Instance &source = scene.GetInstance(cameraNode);
+		const Scene::Camera &camera = scene.GetCamera(source.GetCameraIndex());
+		SceneCamera &entry = sceneCamera_.emplace_back();
+		std::copy(source.GetWorldMatrix(), source.GetWorldMatrix() + 12, entry.worldMatrix);
+		entry.yFov = camera.yFov;
+		entry.animatedNode = animatedOfNode[cameraNode];
+		logi("GPUScene: camera '{}' on node '{}', vertical FOV {:.1f} degrees, {}",
+			 camera.name,
+			 source.GetName(),
+			 camera.yFov * 180.0f / Pi,
+			 entry.animatedNode != UINT32_MAX ? "animated" : "still");
 	}
 
 	for (size_t a = 0; a < scene.GetAnimationCount(); ++a)

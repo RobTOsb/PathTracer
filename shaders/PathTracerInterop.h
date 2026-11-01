@@ -126,7 +126,10 @@ struct FrameConstants
 	// Firefly clamp of direct light: as indirectClamp, for light the surface the camera sees scatters (see
 	// ClampFirefly). Light the camera sees, also in a mirror-like surface, is never clamped. FLT_MAX = off.
 	float directClamp;
-	uint pad0;
+	// DLSS_RR: the specular motion vectors follow the reflection only on surfaces at most this (perceptual) rough
+	// (the lobe the specular guides follow); rougher ones, whose reflection is a blur of things at many depths, take
+	// the surface's own motion vectors (as Bevy Solari). 1 = always the reflection.
+	float specularMotionMaxRoughness;
 	// OPACITY_MICROMAPS: bindless index of that TLAS. Blended surfaces keep 4-state micromaps in it, since a ray
 	// flag (RAY_FLAG_FORCE_OMM_2_STATE) would force 2-state on them too, which camera and bounce rays cannot take.
 	// Shadow rays use that flag on every bounce and trace the scene TLAS instead.

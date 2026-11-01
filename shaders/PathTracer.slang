@@ -897,6 +897,15 @@ void RayGen()
     g_MotionVectors[pixel] = motion;
     g_Depth[pixel] = depth;
 
+    // A rough reflector's reflection is a blur of things at many depths that one hit distance cannot place: its
+    // specular motion vectors are the surface's own, so the field stays smooth across a highlight (Bevy Solari).
+    // A pane's reflection is never rough, and otherwise the reflector is the guides' surface, moving with motion.
+    if (guides.reflectorRoughness > g_Frame.specularMotionMaxRoughness)
+    {
+        g_SpecularMotionVectors[pixel] = motion;
+        return;
+    }
+
     // The guides' own surface traces its hit distance. A virtual one (PSR) and a pane's reflection take the
     // path's, where negative keeps last frame's, which is whatever the texture was created with until a frame
     // writes it.

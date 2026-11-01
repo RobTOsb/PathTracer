@@ -353,6 +353,9 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 							  "on it, its detail then being finer than a pixel");
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
+		ImGui::SliderFloat("Specular MV max roughness", &settings_.specularMotionMaxRoughness, 0.0f, 1.0f, "%.2f");
+		ImGui::SetItemTooltip("Surfaces at most this rough get specular motion vectors that follow their reflection, "
+							  "rougher ones the surface's own (Bevy Solari: 0.25). 1 = always the reflection");
 		ImGui::Checkbox("Traced specular hit distance", &settings_.specularHitDistanceRay);
 		ImGui::SetItemTooltip("Places the reflection for the specular motion vectors with a ray along the lobe's "
 							  "dominant direction, the same every frame, rather than the path's sampled reflection. "
@@ -411,6 +414,12 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SetItemTooltip("Rebuilds the TLAS every frame");
 		ImGui::SliderFloat("Playback speed", &animation.speed, 0.0f, 4.0f, "%.2fx");
 		ImGui::SliderFloat("Time", &animation.seconds, 0.0f, scene_.GetAnimationDuration(), "%.2f s");
+		if (scene_.IsCameraAnimated())
+		{
+			ImGui::Checkbox("Scene camera", &animation.sceneCamera);
+			ImGui::SetItemTooltip("While playing, the view follows the scene's animated camera and ignores the mouse "
+								  "and keys. Paused, the free camera carries on from there");
+		}
 	}
 
 	if (ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))

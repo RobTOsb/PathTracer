@@ -246,6 +246,19 @@ public:
 		this->farZ = farZ;
 	}
 
+	// Rebuilds the projection with this vertical field of view (radians), keeping its depth mapping.
+	void SetFovY(float newFovY, float aspectRatio)
+	{
+		fovY = newFovY;
+		projectionMatrix = farZ == std::numeric_limits<float>::infinity()
+								   ? CreatePerspectiveMatrixFovReverseZInfiniteRH(fovY, aspectRatio, nearZ)
+								   : CreatePerspectiveMatrixFovRH(fovY, aspectRatio, nearZ, farZ);
+	}
+
+	// Places the camera looking along front with this up, which may roll it. Yaw and pitch follow front, so mouse
+	// turns carry on from here (and level the roll).
+	void SetView(const float3 &newPosition, const float3 &newFront, const float3 &newUp);
+
 	void RotateCamera(float yaw, float pitch, float sensitivity = 0.05f);
 
 	float GetYaw() const // radians
