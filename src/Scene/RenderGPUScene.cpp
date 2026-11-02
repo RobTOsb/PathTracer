@@ -31,7 +31,7 @@ namespace
 	constexpr int kOpacityMicromapMaxLevel = 6;
 	constexpr float kOpacityMicromapTargetEdge = 3.0f;
 	// BLEND_MIN_OPACITY in PathTracer/Materials.slang: the alpha below which a blended surface is cut.
-	constexpr float kBlendMinOpacity = 1.0f / 255.0f;
+	constexpr float kBlendMinOpacity = 16.0f / 255.0f;
 	constexpr float kBlendShadowOpacity = 0.5f;
 	// D3D12_RAYTRACING_OPACITY_MICROMAP_STATE, two bits per micro-triangle in 4-state micromaps.
 	constexpr uint8_t kMicroTriangleTransparent = 0;
@@ -2383,7 +2383,7 @@ void RenderGPUScene::BuildAccelerationStructures()
 		tlasInstance.blas = blases_[ref.primitive];
 		std::memcpy(tlasInstance.transform, transform, sizeof(tlasInstance.transform));
 		tlasInstance.instanceID = ref.primitive;
-		tlasInstance.instanceMask = 0xFF;
+		tlasInstance.instanceMask = materialGeometry_[primitiveDescs[ref.primitive].materialIndex].instanceMask;
 		tlasInstance.hitGroupIndex = 0;
 		tlasInstances.push_back(tlasInstance);
 

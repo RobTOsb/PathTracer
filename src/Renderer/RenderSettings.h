@@ -185,6 +185,9 @@ struct RenderSettings
 	int opacityMicromap2StateBounce = 1;
 	bool specularMaterials = true;
 	bool transmissiveMaterials = true;
+	// Blended (ALPHA_MODE_BLEND) surfaces block shadow rays, as a mask at half their alpha. Off suits decals, which
+	// would otherwise shadow the wall they lie on.
+	bool blendedShadows = false;
 	int glassReflectionSplits = 2;
 	// Solid subsurface materials: the orders of scattering inside the object that are rendered, light
 	// straight through and one scattering event path traced, the rest from a diffusion profile. All off

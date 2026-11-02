@@ -310,6 +310,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		++hintBits;
 	}
 	constants.serCoherenceHintBits = hintBits;
+	constants.shadowInstanceMask = settings_.blendedShadows ? 0xFFu : 0xFFu & ~static_cast<uint>(INSTANCE_MASK_BLENDED);
 	constants.materialOverrides = (settings_.specularMaterials ? 0u : MATERIAL_OVERRIDE_NO_SPECULAR) |
 								  (settings_.transmissiveMaterials ? 0u : MATERIAL_OVERRIDE_NO_TRANSMISSION);
 

@@ -604,6 +604,9 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SameLine();
 		ImGui::Checkbox("Transmission", &settings_.transmissiveMaterials);
 		ImGui::SetItemTooltip("Off: transmissive materials turn opaque");
+		ImGui::Checkbox("Blended shadows", &settings_.blendedShadows);
+		ImGui::SetItemTooltip("Alpha-blended surfaces cast shadows, cut at half their alpha. Off for decals, which "
+							  "would shadow the wall they lie on");
 		ImGui::SliderInt("Glass reflection splits", &settings_.glassReflectionSplits, 0, 4);
 		ImGui::SetItemTooltip("Smooth glass in front of the camera, thin panes or solid, whose reflection is traced as "
 							  "well as what it lets through, instead of one or the other. 0 = off");

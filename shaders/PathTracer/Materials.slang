@@ -454,9 +454,9 @@ float4 LoadBaseColourAlpha(MaterialData material, float2 uv)
     return albedo;
 }
 
-// Blended surfaces of less alpha than an 8-bit texel's least are not there at all, so the any-hit shaders cut
+// Blended surfaces of less alpha than this are not there at all, so the any-hit shaders cut
 // them like a mask and the path never shades them.
-static const float BLEND_MIN_OPACITY = 1.0 / 255.0;
+static const float BLEND_MIN_OPACITY = 16.0 / 255.0;
 
 // The alpha below which a candidate hit is cut, 0 for an opaque material, which never is.
 float AlphaCutoff(MaterialData material)

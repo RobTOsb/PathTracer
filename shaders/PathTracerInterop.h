@@ -114,7 +114,9 @@ struct FrameConstants
 	// Paths per pixel this dispatch traces: averaged into the output, or under REFERENCE added to the sum.
 	uint samplesPerFrame;
 	uint maxSpecularBounces; // see maxDiffuseBounces
-	uint pad2;
+	// Instance mask shadow rays trace with: all instances, or all but the blended ones (InstanceMaskBits) when
+	// blended surfaces cast no shadows.
+	uint shadowInstanceMask;
 	uint pad3;
 
 	// ATMOSPHERE: the cloud layer seen past the scene's geometry and shadowing its sunlight (see Clouds.slang).
@@ -168,6 +170,15 @@ enum LightSamplingMode
 	LIGHT_SAMPLING_TREE = 0, // light tree (LightTree.slang), power selection past lightTreeBounces
 	LIGHT_SAMPLING_UNIFORM = 1,
 	LIGHT_SAMPLING_POWER = 2, // in proportion to flux, wherever the shading point is
+};
+
+// TLAS instance masks: one instance per primitive, so per material. Path rays see every instance, shadow rays those
+// in FrameConstants::shadowInstanceMask.
+UnscopedEnum
+enum InstanceMaskBits
+{
+	INSTANCE_MASK_SOLID = 1,
+	INSTANCE_MASK_BLENDED = 2, // ALPHA_MODE_BLEND materials, decals for instance
 };
 
 // glTF alphaMode, matches Scene::AlphaMode.

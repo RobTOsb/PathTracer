@@ -36,11 +36,13 @@ struct MaterialGeometryFlags
 		// partly there, which only its any-hit shaders get right for camera and bounce rays (shadow rays force
 		// 2-state on every micromap, see TraceShadowRay).
 		opacityMicromap2State = material.alphaMode == ALPHA_MODE_MASK;
+		instanceMask = material.alphaMode == ALPHA_MODE_BLEND ? INSTANCE_MASK_BLENDED : INSTANCE_MASK_SOLID;
 	}
 
 	bool isOpaque;
 	bool noDuplicateAnyHit;
 	bool opacityMicromap2State;
+	uint32_t instanceMask; // InstanceMaskBits
 };
 
 class RenderGPUScene final : public Scene::GPUScene

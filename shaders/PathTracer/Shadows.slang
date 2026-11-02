@@ -23,7 +23,7 @@ float3 TraceShadowRayIn(RaytracingAccelerationStructure scene, float3 origin, fl
 #ifdef INLINE_SHADOWS
     // Opaque triangles commit themselves and end the search; the rest come here as ShadowAnyHit would.
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
-    query.TraceRayInline(scene, SHADOW_RAY_FLAGS, 0xFF, ray);
+    query.TraceRayInline(scene, SHADOW_RAY_FLAGS, g_Frame.shadowInstanceMask, ray);
     float3 visibility = float3(1.0, 1.0, 1.0);
     while (query.Proceed())
     {
@@ -41,7 +41,7 @@ float3 TraceShadowRayIn(RaytracingAccelerationStructure scene, float3 origin, fl
     ShadowRayPayload payload;
     payload.visibility = float3(1.0f, 1.0f, 1.0f);
 
-    TraceRay(scene, SHADOW_RAY_FLAGS | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX,
+    TraceRay(scene, SHADOW_RAY_FLAGS | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, g_Frame.shadowInstanceMask, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX,
              ray, payload);
 
     return payload.visibility;
