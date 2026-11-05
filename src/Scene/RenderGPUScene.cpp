@@ -376,26 +376,7 @@ RenderGPUScene::RenderGPUScene(RenderContext *renderContext) :
 
 RenderGPUScene::~RenderGPUScene()
 {
-	for (const FrameTLASes &frame: frameTlases_)
-	{
-		for (AccelerationStructureHandle tlas: { frame.tlas, frame.ommTlas, frame.omm2StateTlas })
-		{
-			if (tlas != InvalidAccelerationStructureHandle)
-			{
-				renderContext_->DestroyAccelerationStructure(tlas);
-			}
-		}
-	}
-	for (const std::vector<AccelerationStructureHandle> *list: { &blases_, &ommBlases_ })
-	{
-		for (AccelerationStructureHandle blas: *list)
-		{
-			if (blas != InvalidAccelerationStructureHandle)
-			{
-				renderContext_->DestroyAccelerationStructure(blas);
-			}
-		}
-	}
+	DestroyInstanceStructures();
 	// After the BLASes that link it.
 	if (ommArray_ != InvalidAccelerationStructureHandle)
 	{
@@ -419,10 +400,6 @@ RenderGPUScene::~RenderGPUScene()
 		{
 			renderContext_->DestroyResource(buffer);
 		}
-	}
-	for (ResourceHandle buffer: previousTransforms_)
-	{
-		renderContext_->DestroyResource(buffer);
 	}
 	DestroyLights();
 }
@@ -2048,6 +2025,7 @@ std::vector<uint32_t> RenderGPUScene::CollectEmitters(const Scene::GLTFScene &sc
 
 void RenderGPUScene::UploadEmitters(const std::vector<uint32_t> &emitters, UploadBatchHandle batch)
 {
+	emitters_ = emitters;
 	emitterBuffer_ = UploadStream(emitters.data(),
 								  emitters.size() * sizeof(uint32_t),
 								  sizeof(uint32_t),
@@ -2347,9 +2325,8 @@ void RenderGPUScene::BuildAccelerationStructures()
 										   ResourceAccess::ShaderResource);
 	}
 
-	const ResourceHandle indexBuffer = streamBuffers_[(uint32_t) GPUStream::Index];
-
-	// The micromaps are built first, as the BLASes that link them read them.
+	// The micromaps are built first, as the BLASes that link them read them. The array stays for the BLASes
+	// SetMergeInstances builds again.
 	const bool micromaps = renderContext_->SupportsOpacityMicromaps() && ommIndexBuffer_ != InvalidResourceHandle;
 	if (micromaps && !ommMicromaps_.empty())
 	{
@@ -2358,16 +2335,84 @@ void RenderGPUScene::BuildAccelerationStructures()
 	std::vector<uint8_t>().swap(ommData_);
 	std::vector<OpacityMicromap>().swap(ommMicromaps_);
 
-	blases_.assign(primitiveDescs.size(), InvalidAccelerationStructureHandle);
-	ommBlases_.assign(primitiveDescs.size(), InvalidAccelerationStructureHandle);
-	for (size_t i = 0; i < primitiveDescs.size(); ++i)
-	{
-		const PrimitiveGPUDesc &desc = primitiveDescs[i];
-		if (desc.indexCount == 0)
-		{
-			continue;
-		}
+	BuildInstanceStructures();
+}
 
+void RenderGPUScene::SetMergeInstances(bool merge)
+{
+	if (merge == mergeInstances_)
+	{
+		return;
+	}
+	mergeInstances_ = merge;
+	// Before BuildAccelerationStructures (or without geometry) there is nothing to build again yet.
+	if (frameTlases_.empty())
+	{
+		return;
+	}
+	DestroyInstanceStructures();
+	BuildInstanceStructures();
+}
+
+void RenderGPUScene::DestroyInstanceStructures()
+{
+	for (const FrameTLASes &frame: frameTlases_)
+	{
+		for (AccelerationStructureHandle tlas: { frame.tlas, frame.ommTlas, frame.omm2StateTlas })
+		{
+			if (tlas != InvalidAccelerationStructureHandle)
+			{
+				renderContext_->DestroyAccelerationStructure(tlas);
+			}
+		}
+	}
+	frameTlases_.clear();
+	for (std::vector<AccelerationStructureHandle> *list: { &blases_, &ommBlases_, &prototypeBlases_, &prototypeOmmBlases_ })
+	{
+		for (AccelerationStructureHandle blas: *list)
+		{
+			if (blas != InvalidAccelerationStructureHandle)
+			{
+				renderContext_->DestroyAccelerationStructure(blas);
+			}
+		}
+		list->clear();
+	}
+	for (ResourceHandle buffer: previousTransforms_)
+	{
+		renderContext_->DestroyResource(buffer);
+	}
+	previousTransforms_.clear();
+	for (ResourceHandle *buffer: { &tlasPrimitiveBuffer_, &tlasEmitterBuffer_ })
+	{
+		if (*buffer != InvalidResourceHandle)
+		{
+			renderContext_->DestroyResource(*buffer);
+			*buffer = InvalidResourceHandle;
+		}
+	}
+	tlasRefs_.clear();
+	tlasInstances_.clear();
+	ommTlasInstances_.clear();
+	omm2StateTlasInstances_.clear();
+	dynamicTlasInstances_.clear();
+	tlasFrame_ = 0;
+	tlasFramesUpdated_ = 0; // no last frame in the new TLASes
+	previousTransformFrame_ = 0;
+}
+
+void RenderGPUScene::BuildInstanceStructures()
+{
+	const ResourceHandle indexBuffer = streamBuffers_[(uint32_t) GPUStream::Index];
+	const bool micromaps = renderContext_->SupportsOpacityMicromaps() && ommIndexBuffer_ != InvalidResourceHandle;
+	auto hasMicromaps = [&](uint32_t primitive) { return micromaps && ommIndexOffsets_[primitive] != kNoOpacityMicromaps; };
+	auto geometryFlags = [&](uint32_t primitive) -> const MaterialGeometryFlags &
+	{
+		return materialGeometry_[primitiveDescs[primitive].materialIndex];
+	};
+	auto geometryOf = [&](uint32_t primitive, bool linkMicromaps)
+	{
+		const PrimitiveGPUDesc &desc = primitiveDescs[primitive];
 		BLASGeometry geometry = {};
 		// The position is the first member of each interleaved GpuVertex.
 		geometry.vertexBuffer = vertexBuffer_;
@@ -2377,24 +2422,159 @@ void RenderGPUScene::BuildAccelerationStructures()
 		geometry.indexBuffer = indexBuffer;
 		geometry.indexBufferOffset = static_cast<uint64_t>(desc.indexOffset) * sizeof(uint32_t);
 		geometry.indexCount = desc.indexCount;
-		const MaterialGeometryFlags &flags = materialGeometry_[desc.materialIndex];
+		const MaterialGeometryFlags &flags = geometryFlags(primitive);
 		geometry.isOpaque = flags.isOpaque;
 		geometry.noDuplicateAnyHit = flags.noDuplicateAnyHit;
-
-		blases_[i] = renderContext_->CreateBLAS(geometry);
-
-		if (micromaps && ommIndexOffsets_[i] != kNoOpacityMicromaps)
+		if (linkMicromaps)
 		{
 			geometry.opacityMicromapArray = ommArray_;
 			geometry.opacityMicromapIndexBuffer = ommIndexBuffer_;
-			geometry.opacityMicromapIndexBufferOffset = static_cast<uint64_t>(ommIndexOffsets_[i]) * sizeof(int32_t);
-			ommBlases_[i] = renderContext_->CreateBLAS(geometry);
+			geometry.opacityMicromapIndexBufferOffset = static_cast<uint64_t>(ommIndexOffsets_[primitive]) * sizeof(int32_t);
+		}
+		return geometry;
+	};
+
+	// Per ref, the prototype it is a part of, or UINT32_MAX for a TLAS instance of its own. A merged instance
+	// takes the place of its group's first ref. Only static refs without emissive triangles are merged: the
+	// emitter tables and last frame's transforms stay per TLAS instance.
+	const std::vector<TLASInstanceRef> refs = EnumerateTLASInstances();
+	std::vector<uint32_t> prototypeOfRef(refs.size(), UINT32_MAX);
+	std::vector<uint8_t> leadsGroup(refs.size(), 0);
+	std::vector<std::vector<uint32_t>> prototypes; // the primitives of each, in its geometry order
+	uint32_t mergedRefs = 0;
+	if (mergeInstances_)
+	{
+		std::vector<uint32_t> candidates;
+		for (uint32_t r = 0; r < static_cast<uint32_t>(refs.size()); ++r)
+		{
+			const bool emissive = r < emitters_.size() && emitters_[r] != INVALID_LIGHT_INDEX;
+			if (!emissive && dynamicOfInstance_[refs[r].instance] == UINT32_MAX)
+			{
+				candidates.push_back(r);
+			}
+		}
+		// The same instance mask bit and bit for bit the same world matrix.
+		auto compare = [&](uint32_t a, uint32_t b)
+		{
+			const uint32_t maskA = geometryFlags(refs[a].primitive).instanceMask;
+			const uint32_t maskB = geometryFlags(refs[b].primitive).instanceMask;
+			if (maskA != maskB)
+			{
+				return maskA < maskB ? -1 : 1;
+			}
+			return std::memcmp(instances[refs[a].instance].worldMatrix,
+							   instances[refs[b].instance].worldMatrix,
+							   sizeof(InstanceGPU::worldMatrix));
+		};
+		std::sort(candidates.begin(),
+				  candidates.end(),
+				  [&](uint32_t a, uint32_t b)
+				  {
+					  const int order = compare(a, b);
+					  return order != 0 ? order < 0 : a < b;
+				  });
+
+		std::map<std::vector<uint32_t>, uint32_t> prototypeOfParts;
+		for (size_t begin = 0; begin < candidates.size();)
+		{
+			size_t end = begin + 1;
+			while (end < candidates.size() && compare(candidates[begin], candidates[end]) == 0)
+			{
+				++end;
+			}
+			if (end - begin >= 2)
+			{
+				std::vector<uint32_t> parts;
+				for (size_t k = begin; k < end; ++k)
+				{
+					parts.push_back(refs[candidates[k]].primitive);
+				}
+				std::sort(parts.begin(), parts.end());
+				const auto [it, added] = prototypeOfParts.try_emplace(std::move(parts), static_cast<uint32_t>(prototypes.size()));
+				if (added)
+				{
+					prototypes.push_back(it->first);
+				}
+				for (size_t k = begin; k < end; ++k)
+				{
+					prototypeOfRef[candidates[k]] = it->second;
+				}
+				// The lowest ref of the group, as the sort breaks ties by ref.
+				leadsGroup[candidates[begin]] = 1;
+				mergedRefs += static_cast<uint32_t>(end - begin);
+			}
+			begin = end;
+		}
+	}
+
+	// A BLAS per primitive that some TLAS instance has to itself, and one per prototype, each with its micromap
+	// twin if a part has micromaps.
+	std::vector<uint8_t> ownBlas(primitiveDescs.size(), 0);
+	for (uint32_t r = 0; r < static_cast<uint32_t>(refs.size()); ++r)
+	{
+		if (prototypeOfRef[r] == UINT32_MAX)
+		{
+			ownBlas[refs[r].primitive] = 1;
+		}
+	}
+	blases_.assign(primitiveDescs.size(), InvalidAccelerationStructureHandle);
+	ommBlases_.assign(primitiveDescs.size(), InvalidAccelerationStructureHandle);
+	for (uint32_t p = 0; p < static_cast<uint32_t>(primitiveDescs.size()); ++p)
+	{
+		if (!ownBlas[p])
+		{
+			continue;
+		}
+		blases_[p] = renderContext_->CreateBLAS(geometryOf(p, false));
+		if (hasMicromaps(p))
+		{
+			ommBlases_[p] = renderContext_->CreateBLAS(geometryOf(p, true));
+		}
+	}
+	prototypeBlases_.assign(prototypes.size(), InvalidAccelerationStructureHandle);
+	prototypeOmmBlases_.assign(prototypes.size(), InvalidAccelerationStructureHandle);
+	// Per prototype, whether its micromap TLAS instance can read the micromaps in 2-state mode: some part's
+	// micromaps are a mask's, and none a blended surface's.
+	std::vector<uint8_t> prototypeMask2State(prototypes.size(), 0);
+	std::vector<BLASGeometry> geometries;
+	for (size_t j = 0; j < prototypes.size(); ++j)
+	{
+		geometries.clear();
+		bool anyPartMicromaps = false;
+		bool anyMask = false;
+		bool anyBlended = false;
+		for (uint32_t p: prototypes[j])
+		{
+			geometries.push_back(geometryOf(p, false));
+			if (hasMicromaps(p))
+			{
+				anyPartMicromaps = true;
+				if (geometryFlags(p).opacityMicromap2State)
+				{
+					anyMask = true;
+				}
+				else
+				{
+					anyBlended = true;
+				}
+			}
+		}
+		prototypeBlases_[j] = renderContext_->CreateBLAS(geometries);
+		prototypeMask2State[j] = anyMask && !anyBlended;
+		if (anyPartMicromaps)
+		{
+			geometries.clear();
+			for (uint32_t p: prototypes[j])
+			{
+				geometries.push_back(geometryOf(p, hasMicromaps(p)));
+			}
+			prototypeOmmBlases_[j] = renderContext_->CreateBLAS(geometries);
 		}
 	}
 
 	// Built and compacted in submissions of their own, which leaves them none of the build's memory.
 	std::vector<AccelerationStructureHandle> builtBlases;
-	for (const std::vector<AccelerationStructureHandle> *list: { &blases_, &ommBlases_ })
+	for (const std::vector<AccelerationStructureHandle> *list: { &blases_, &ommBlases_, &prototypeBlases_, &prototypeOmmBlases_ })
 	{
 		std::copy_if(list->begin(),
 					 list->end(),
@@ -2403,48 +2583,122 @@ void RenderGPUScene::BuildAccelerationStructures()
 	}
 	renderContext_->BuildCompactedBLASes(builtBlases);
 
-	// One TLAS instance per (node, primitive). InstanceID is the primitive's row in the
-	// PrimitiveGPUDesc table, which is all the hit shader needs to find its data. The order must
-	// match the emitter buffer, which is indexed by InstanceIndex().
+	// Each prototype's rows again after the primitive descs, so that a hit's row is InstanceID() + GeometryIndex().
+	std::vector<uint32_t> prototypeRow(prototypes.size());
+	std::vector<PrimitiveGPUDesc> rows;
+	if (!prototypes.empty())
+	{
+		rows = primitiveDescs;
+		for (size_t j = 0; j < prototypes.size(); ++j)
+		{
+			prototypeRow[j] = static_cast<uint32_t>(rows.size());
+			for (uint32_t p: prototypes[j])
+			{
+				rows.push_back(primitiveDescs[p]);
+			}
+		}
+	}
+
+	// One TLAS instance per ref of its own and per merged group, in ref order. InstanceID is the row of its
+	// first geometry in the primitive table, which is all the hit shader needs to find its data.
 	std::vector<TLASInstance> tlasInstances;
 	std::vector<TLASInstance> ommTlasInstances;
 	std::vector<TLASInstance> omm2StateTlasInstances;
+	std::vector<TLASInstanceRef> tlasRefs;
+	std::vector<uint32_t> refOfTlasInstance;
 	bool anyMicromaps = false;
 	bool anyMaskMicromaps = false;
-	for (const TLASInstanceRef &ref: EnumerateTLASInstances())
+	for (uint32_t r = 0; r < static_cast<uint32_t>(refs.size()); ++r)
 	{
+		const uint32_t prototype = prototypeOfRef[r];
+		if (prototype != UINT32_MAX && !leadsGroup[r])
+		{
+			continue;
+		}
+		const TLASInstanceRef &ref = refs[r];
+
 		// The scene stores row-vector matrices; DXR wants the 3x4 for column vectors.
 		float transform[12];
 		Scene::RowMajorToBLASTransform(instances[ref.instance].worldMatrix, transform);
 
 		TLASInstance tlasInstance = {};
-		tlasInstance.blas = blases_[ref.primitive];
 		std::memcpy(tlasInstance.transform, transform, sizeof(tlasInstance.transform));
-		tlasInstance.instanceID = ref.primitive;
-		tlasInstance.instanceMask = materialGeometry_[primitiveDescs[ref.primitive].materialIndex].instanceMask;
+		// A merged group's parts all have this mask.
+		tlasInstance.instanceMask = geometryFlags(ref.primitive).instanceMask;
 		tlasInstance.hitGroupIndex = 0;
+		AccelerationStructureHandle ommBlas;
+		bool mask2State;
+		if (prototype == UINT32_MAX)
+		{
+			tlasInstance.blas = blases_[ref.primitive];
+			tlasInstance.instanceID = ref.primitive;
+			ommBlas = ommBlases_[ref.primitive];
+			mask2State = ommBlas != InvalidAccelerationStructureHandle && geometryFlags(ref.primitive).opacityMicromap2State;
+		}
+		else
+		{
+			tlasInstance.blas = prototypeBlases_[prototype];
+			tlasInstance.instanceID = prototypeRow[prototype];
+			ommBlas = prototypeOmmBlases_[prototype];
+			mask2State = prototypeMask2State[prototype] != 0;
+		}
 		tlasInstances.push_back(tlasInstance);
 
-		if (ommBlases_[ref.primitive] != InvalidAccelerationStructureHandle)
+		if (ommBlas != InvalidAccelerationStructureHandle)
 		{
-			tlasInstance.blas = ommBlases_[ref.primitive];
+			tlasInstance.blas = ommBlas;
 			anyMicromaps = true;
 		}
 		ommTlasInstances.push_back(tlasInstance);
 
-		if (ommBlases_[ref.primitive] != InvalidAccelerationStructureHandle &&
-			materialGeometry_[primitiveDescs[ref.primitive].materialIndex].opacityMicromap2State)
+		if (mask2State)
 		{
 			tlasInstance.flags = TLASInstanceFlagForceOpacityMicromap2State;
 			anyMaskMicromaps = true;
 		}
 		omm2StateTlasInstances.push_back(tlasInstance);
+		tlasRefs.push_back(ref);
+		refOfTlasInstance.push_back(r);
 	}
 
 	if (tlasInstances.empty())
 	{
 		logw("GPUScene: no instanced geometry, skipping TLAS build");
 		return;
+	}
+
+	// The tables the hit shaders index by InstanceID() and InstanceIndex(), where merging changed them.
+	if (!prototypes.empty())
+	{
+		const uint32_t shift = static_cast<uint32_t>(tlasInstances.size());
+		std::vector<uint32_t> emitters(shift + emitters_.size(), INVALID_LIGHT_INDEX);
+		for (uint32_t i = 0; i < shift; ++i)
+		{
+			const uint32_t r = refOfTlasInstance[i];
+			if (prototypeOfRef[r] == UINT32_MAX && r < emitters_.size() && emitters_[r] != INVALID_LIGHT_INDEX)
+			{
+				emitters[i] = emitters_[r] + shift;
+			}
+		}
+		std::copy(emitters_.begin(), emitters_.end(), emitters.begin() + shift);
+
+		const UploadBatchHandle batch = renderContext_->BeginUpload();
+		BufferDesc desc = {};
+		desc.sizeInBytes = rows.size() * sizeof(PrimitiveGPUDesc);
+		desc.structureByteStride = sizeof(PrimitiveGPUDesc);
+		desc.debugName = "Scene_TLASPrimitives";
+		tlasPrimitiveBuffer_ = renderContext_->CreateBuffer(desc, ResourceViewType::ShaderResource, rows.data(), batch);
+		desc.sizeInBytes = emitters.size() * sizeof(uint32_t);
+		desc.structureByteStride = sizeof(uint32_t);
+		desc.debugName = "Scene_TLASEmitters";
+		tlasEmitterBuffer_ = renderContext_->CreateBuffer(desc, ResourceViewType::ShaderResource, emitters.data(), batch);
+		renderContext_->EndUpload(batch);
+
+		logi("GPUScene: merged {} of {} primitive instance(s) into {} instance(s) of {} prototype(s)",
+			 mergedRefs,
+			 refs.size(),
+			 tlasInstances.size() - (refs.size() - mergedRefs),
+			 prototypes.size());
 	}
 
 	// Without a mask's micromaps 2-state mode changes nothing, and the micromap TLAS serves for it too.
@@ -2466,7 +2720,7 @@ void RenderGPUScene::BuildAccelerationStructures()
 		frame.poseGeneration = dynamicPoseGeneration_;
 	}
 	tlasInstancesGeneration_ = dynamicPoseGeneration_;
-	tlasRefs_ = EnumerateTLASInstances();
+	tlasRefs_ = std::move(tlasRefs);
 	tlasInstances_ = std::move(tlasInstances);
 	ommTlasInstances_ = anyMicromaps ? std::move(ommTlasInstances) : std::vector<TLASInstance>();
 	omm2StateTlasInstances_ = anyMaskMicromaps ? std::move(omm2StateTlasInstances) : std::vector<TLASInstance>();
@@ -2515,7 +2769,10 @@ void RenderGPUScene::BuildAccelerationStructures()
 		 builtBlases.size(),
 		 std::count_if(ommBlases_.begin(),
 					   ommBlases_.end(),
-					   [](AccelerationStructureHandle h) { return h != InvalidAccelerationStructureHandle; }),
+					   [](AccelerationStructureHandle h) { return h != InvalidAccelerationStructureHandle; }) +
+				 std::count_if(prototypeOmmBlases_.begin(),
+							   prototypeOmmBlases_.end(),
+							   [](AccelerationStructureHandle h) { return h != InvalidAccelerationStructureHandle; }),
 		 1 + (anyMicromaps ? 1 : 0) + (anyMaskMicromaps ? 1 : 0),
 		 tlasInstances_.size());
 }

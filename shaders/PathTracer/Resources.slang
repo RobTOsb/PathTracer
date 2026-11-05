@@ -93,6 +93,8 @@ StructuredBuffer<float4> g_AtmosphereLighting : register(t12);
 SamplerState g_LinearClamp : register(s2);
 #endif
 
+// index is a hit's InstanceID() + GeometryIndex(): a TLAS instance's first row, and its geometry within the BLAS
+// for the merged instances of several primitives (RenderGPUScene::SetMergeInstances).
 PrimitiveDesc LoadPrimitive(uint index)
 {
     return g_Primitives[index];

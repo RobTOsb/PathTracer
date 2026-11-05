@@ -64,6 +64,18 @@ public:
 
 	void BuildAccelerationStructures();
 
+	// Whether the static, non-emissive primitives that share a world transform and an instance mask bit (the
+	// parts of one plant, say) are one TLAS instance of a BLAS with a geometry per part, its prototype's,
+	// rather than a TLAS instance and BLAS each. Hits find their primitive row at InstanceID() + GeometryIndex()
+	// either way. SetMergeInstances rebuilds every BLAS and TLAS for the new choice: call it with the GPU idle,
+	// after BeginGraphicsCommandList and SetDescriptorHeaps, before UpdateAccelerationStructures.
+	bool GetMergeInstances() const
+	{
+		return mergeInstances_;
+	}
+
+	void SetMergeInstances(bool merge);
+
 	// The scene's glTF animations, which play together: whether there are any, and the time of the last key
 	// of any (they loop over it).
 	bool HasAnimation() const
@@ -192,7 +204,7 @@ public:
 		return srv != InvalidResourceHandle ? renderContext_->GetResourceViewInfo(srv).descriptorIndex : 0;
 	}
 
-	// Bindless indices of the material table (GpuMaterial) and primitive table (PrimitiveGPUDesc).
+	// Bindless indices of the material table (GpuMaterial) and primitive table (GetPrimitiveBuffer).
 	uint32_t GetMaterialBufferIndex() const
 	{
 		return materialBufferIndex_;
@@ -200,7 +212,9 @@ public:
 
 	uint32_t GetPrimitiveBufferIndex() const
 	{
-		return primitiveBufferIndex_;
+		return tlasPrimitiveBuffer_ != InvalidResourceHandle
+					   ? renderContext_->GetResourceViewInfo(tlasPrimitiveBuffer_).descriptorIndex
+					   : primitiveBufferIndex_;
 	}
 
 	ResourceHandle GetStreamBuffer(GPUStream stream) const
@@ -225,9 +239,11 @@ public:
 		return static_cast<uint32_t>(materialGeometry_.size());
 	}
 
+	// PrimitiveGPUDesc rows, indexed by InstanceID() + GeometryIndex(): the primitive descs, then with merged
+	// instances each prototype's rows again in its geometry order.
 	ResourceHandle GetPrimitiveBuffer() const
 	{
-		return primitiveBuffer_;
+		return tlasPrimitiveBuffer_ != InvalidResourceHandle ? tlasPrimitiveBuffer_ : primitiveBuffer_;
 	}
 
 	ResourceHandle GetLightBuffer() const
@@ -267,9 +283,10 @@ public:
 	// instance (indexed by InstanceIndex()) is the offset of that instance's triangle table in the
 	// same buffer, or INVALID_LIGHT_INDEX if it does not emit; the table then holds the light index
 	// of each triangle (indexed by PrimitiveIndex()), INVALID_LIGHT_INDEX for those that emit nothing.
+	// Merged instances never emit (see SetMergeInstances).
 	ResourceHandle GetEmitterBuffer() const
 	{
-		return emitterBuffer_;
+		return tlasEmitterBuffer_ != InvalidResourceHandle ? tlasEmitterBuffer_ : emitterBuffer_;
 	}
 
 	// Per light, its emissive instance (uint): where its scale is in the emission scale buffer.
@@ -321,8 +338,14 @@ private:
 		uint32_t primitive; // into primitiveDescs
 	};
 
-	// The TLAS instances in the order BuildAccelerationStructures adds them, which is their InstanceIndex().
+	// Every primitive of every scene instance, in scene instance order: the TLAS instances, in InstanceIndex()
+	// order, without merged instances. The emitter tables keep this order (emitters_).
 	std::vector<TLASInstanceRef> EnumerateTLASInstances() const;
+
+	// The BLASes, TLASes and the tables that follow the TLAS instances, for mergeInstances_. The BLASes are built
+	// and compacted on the compute queue; the TLAS builds are recorded on the current graphics command list.
+	void BuildInstanceStructures();
+	void DestroyInstanceStructures();
 
 	// A node an animation moves, through its own channels or a parent's. The table lists parents before
 	// their children.
@@ -425,7 +448,13 @@ private:
 	ResourceHandle materialBuffer_ = InvalidResourceHandle;
 	ResourceHandle instanceBuffer_ = InvalidResourceHandle;
 	ResourceHandle emitterBuffer_ = InvalidResourceHandle;
+	std::vector<uint32_t> emitters_; // emitterBuffer_'s contents, its first entries per EnumerateTLASInstances
 	ResourceHandle lightEmitterBuffer_ = InvalidResourceHandle;
+	// With merged instances: the primitive descs then the prototypes' rows, and the emitter buffer with one
+	// leading entry per TLAS instance in front of emitters_ (whose offsets it adds that many to).
+	ResourceHandle tlasPrimitiveBuffer_ = InvalidResourceHandle;
+	ResourceHandle tlasEmitterBuffer_ = InvalidResourceHandle;
+	bool mergeInstances_ = true;
 	uint32_t primitiveBufferIndex_ = InvalidResourceDescriptorIndex;
 	uint32_t materialBufferIndex_ = InvalidResourceDescriptorIndex;
 
@@ -499,8 +528,14 @@ private:
 	uint32_t compressedTextures_ = 0;
 	uint32_t uncompressedTextures_ = 0; // left as RGBA8 by CompressBC7 (not whole 4x4 blocks, or it failed)
 
-	std::vector<AccelerationStructureHandle> blases_; // one per primitive desc, invalid for skipped primitives
-	// The TLAS instances as built, in InstanceIndex() order, for UpdateAccelerationStructures.
+	// One per primitive desc, invalid for skipped primitives and, with merged instances, those only in prototypes.
+	std::vector<AccelerationStructureHandle> blases_;
+	// With merged instances, one per prototype (a set of primitives placed together), and its micromap twin
+	// (invalid without micromaps).
+	std::vector<AccelerationStructureHandle> prototypeBlases_;
+	std::vector<AccelerationStructureHandle> prototypeOmmBlases_;
+	// The TLAS instances as built, in InstanceIndex() order, for UpdateAccelerationStructures: a merged one by
+	// the ref of its first part (merged instances are static).
 	std::vector<TLASInstanceRef> tlasRefs_;
 	std::vector<TLASInstance> tlasInstances_;
 	std::vector<TLASInstance> ommTlasInstances_;

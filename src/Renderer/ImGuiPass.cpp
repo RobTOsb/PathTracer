@@ -625,6 +625,12 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SetItemTooltip("Shadow rays as inline ray queries, keeping the path's state in registers instead of "
 							  "saving it around a TraceRay");
 
+		ImGui::Checkbox("Merge co-located instances", &settings_.mergeInstances);
+		ImGui::SetItemTooltip("Static primitives with the same world matrix (the parts of one tree, say) as one TLAS "
+							  "instance of a BLAS with a geometry per part, instead of an instance and BLAS each, "
+							  "so rays enter one BVH per object rather than one per part. Rebuilds every BLAS and "
+							  "TLAS when changed");
+
 		const bool micromaps = scene_.HasOpacityMicromaps();
 		ImGui::BeginDisabled(!micromaps);
 		ImGui::Checkbox("Opacity micromaps", &settings_.opacityMicromaps);

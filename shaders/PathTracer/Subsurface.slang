@@ -137,7 +137,7 @@ SubsurfaceHit TraceSubsurfaceRay(float3 origin, float3 dir, float tMax, uint mat
     query.TraceRayInline(g_Scene, RAY_FLAG_NONE, 0xFF, ray);
     while (query.Proceed())
     {
-        if (LoadPrimitive(query.CandidateInstanceID()).materialIndex == materialIndex)
+        if (LoadPrimitive(query.CandidateInstanceID() + query.CandidateGeometryIndex()).materialIndex == materialIndex)
             query.CommitNonOpaqueTriangleHit();
     }
 
@@ -146,7 +146,7 @@ SubsurfaceHit TraceSubsurfaceRay(float3 origin, float3 dir, float tMax, uint mat
         return hit;
 
     // The normals as ClosestHit finds them.
-    uint3 tri = LoadTriangle(LoadPrimitive(query.CommittedInstanceID()), query.CommittedPrimitiveIndex());
+    uint3 tri = LoadTriangle(LoadPrimitive(query.CommittedInstanceID() + query.CommittedGeometryIndex()), query.CommittedPrimitiveIndex());
     float3 bary = Barycentrics(query.CommittedTriangleBarycentrics());
     GpuVertex v0 = g_Vertices[tri.x];
     GpuVertex v1 = g_Vertices[tri.y];

@@ -585,6 +585,16 @@ int Run(const char *scenePath)
 
 		renderContext->BeginGraphicsCommandList();
 		renderContext->SetDescriptorHeaps();
+		if (settings.mergeInstances != gpuScene.GetMergeInstances())
+		{
+			// The old acceleration structures may still be traced by frames in flight.
+			renderContext->WaitForGPUIdle();
+			const auto start = std::chrono::steady_clock::now();
+			gpuScene.SetMergeInstances(settings.mergeInstances);
+			logi("Rebuilt the acceleration structures {} merged instances in {:.2f} s",
+				 settings.mergeInstances ? "with" : "without",
+				 std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+		}
 		gpuScene.UpdateAccelerationStructures();
 		// Every light, static and dynamic, into a new tree on the GPU each frame.
 		gpuScene.BuildLightTree(static_cast<uint32_t>(settings.lights.maxLeafLights));

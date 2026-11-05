@@ -183,6 +183,9 @@ struct RenderSettings
 	bool inlineShadowRays = true;
 	bool opacityMicromaps = true;
 	int opacityMicromap2StateBounce = 1;
+	// Static primitives placed together (the same world matrix, the parts of one plant) as one TLAS instance
+	// of a multi-geometry BLAS (RenderGPUScene::SetMergeInstances). Changing it rebuilds every BLAS and TLAS.
+	bool mergeInstances = true;
 	bool specularMaterials = true;
 	bool transmissiveMaterials = true;
 	// Blended (ALPHA_MODE_BLEND) surfaces block shadow rays, as a mask at half their alpha. Off suits decals, which

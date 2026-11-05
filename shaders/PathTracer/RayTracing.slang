@@ -226,7 +226,7 @@ HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvat
                                               STANDARD_RAY_INDEX, ray, payload);
     if (reorder)
     {
-        uint materialHint = hitObject.IsHit() ? LoadPrimitive(hitObject.GetInstanceID()).materialIndex : 0;
+        uint materialHint = hitObject.IsHit() ? LoadPrimitive(hitObject.GetInstanceID() + hitObject.GetGeometryIndex()).materialIndex : 0;
         ReorderThread(hitObject, materialHint, g_Frame.serCoherenceHintBits);
     }
     // A fresh payload: only AnyHit read the traced one, so it need not survive the reorder.

@@ -28,7 +28,7 @@ float3 TraceShadowRayIn(RaytracingAccelerationStructure scene, float3 origin, fl
     while (query.Proceed())
     {
         float3 transmitted;
-        if (!ShadowCandidateTransmittance(LoadPrimitive(query.CandidateInstanceID()), query.CandidatePrimitiveIndex(),
+        if (!ShadowCandidateTransmittance(LoadPrimitive(query.CandidateInstanceID() + query.CandidateGeometryIndex()), query.CandidatePrimitiveIndex(),
                                           query.CandidateTriangleBarycentrics(),
                                           (float3x3)query.CandidateObjectToWorld3x4(), directionToLight, transmitted))
             continue;

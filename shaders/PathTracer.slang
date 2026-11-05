@@ -794,7 +794,7 @@ float TraceGuideHitDistance(float3 position, float3 N, float3 viewDir, float rou
     query.TraceRayInline(SceneFor(rayFlags), RayFlags(rayFlags), 0xFF, ray);
     while (query.Proceed())
     {
-        PrimitiveDesc prim = LoadPrimitive(query.CandidateInstanceID());
+        PrimitiveDesc prim = LoadPrimitive(query.CandidateInstanceID() + query.CandidateGeometryIndex());
         MaterialData material = LoadGpuMaterial(prim.materialIndex);
         float2 uv = InterpolateTexCoord(LoadTriangle(prim, query.CandidatePrimitiveIndex()),
                                         Barycentrics(query.CandidateTriangleBarycentrics()));
@@ -943,7 +943,7 @@ void Miss(inout HitPayload payload)
 [shader("closesthit")]
 void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
-    PrimitiveDesc prim = LoadPrimitive(InstanceID());
+    PrimitiveDesc prim = LoadPrimitive(InstanceID() + GeometryIndex());
     uint3 tri = LoadTriangle(prim, PrimitiveIndex());
     float3 bary = Barycentrics(attr.barycentrics);
 
@@ -1038,7 +1038,7 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
 [shader("anyhit")]
 void AnyHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
-    PrimitiveDesc prim = LoadPrimitive(InstanceID());
+    PrimitiveDesc prim = LoadPrimitive(InstanceID() + GeometryIndex());
     MaterialData material = LoadGpuMaterial(prim.materialIndex);
     if (material.alphaMode == ALPHA_MODE_OPAQUE)
         return;
@@ -1067,7 +1067,7 @@ void ShadowClosestHit(inout ShadowRayPayload payload, in BuiltInTriangleIntersec
 void ShadowAnyHit(inout ShadowRayPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
     float3 transmitted;
-    if (!ShadowCandidateTransmittance(LoadPrimitive(InstanceID()), PrimitiveIndex(), attr.barycentrics,
+    if (!ShadowCandidateTransmittance(LoadPrimitive(InstanceID() + GeometryIndex()), PrimitiveIndex(), attr.barycentrics,
                                       (float3x3)ObjectToWorld3x4(), WorldRayDirection(), transmitted))
         IgnoreHit();
     payload.visibility *= transmitted;
