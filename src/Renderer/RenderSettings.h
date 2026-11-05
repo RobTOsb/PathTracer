@@ -55,8 +55,8 @@ struct AnimationSettings
 	float speed = 1.0f;
 	// Into the animations: the main loop advances it while they play, and the UI can set it.
 	float seconds = 0.0f;
-	// While they play (not in the reference), the view follows the scene's animated glTF camera, its field of view
-	// too, and ignores the mouse and keys. Paused, the free camera carries on from where it was left.
+	// While they play (not in the reference) and the view is the user's, it follows the scene's animated glTF
+	// camera, its field of view too, and ignores the mouse and keys. Paused, the free camera carries on from there.
 	bool sceneCamera = true;
 };
 
@@ -265,8 +265,8 @@ struct RenderSettings
 	// ray in last frame's TLAS, and where the light was blocked differently DLSS-RR is told to trust the current
 	// frame over its history (bias current colour mask), so moving shadows do not ghost.
 	bool shadowChangeMask = true;
-	// Set by the main loop for a frame whose view does not follow on from the last (the scene camera starting,
-	// stopping or looping), so DLSS drops its history.
+	// Set by the main loop for a frame whose view does not follow on from the last (another view chosen, the
+	// scene camera starting, stopping or looping), so DLSS drops its history.
 	bool cameraCut = false;
 	// Debug: one guide in place of the image (GuideViewPass), or with guideViewChange how much it changed since
 	// last frame along the motion vectors, as heat scaled by guideViewGain. guideViewHeld tints the pixels that kept
@@ -276,9 +276,14 @@ struct RenderSettings
 	bool guideViewHeld = false;
 	float guideViewGain = 1.0f;
 
+	// The view: 0 = the user's free camera, k = the scene's k-th still glTF camera
+	// (RenderGPUScene::GetStillCameraPose(k - 1)), its field of view too, ignoring the mouse and keys. Back on 0,
+	// the free camera is where it was left.
+	uint32_t view = 0;
 	float cameraSpeed = 5.0f; // world units per second
 	// Set by the Camera panel, carried out (and cleared) by the main loop: the camera bookmark beside the
-	// scene, so captures for an A/B comparison can be taken from exactly the same view.
+	// scene, so captures for an A/B comparison can be taken from exactly the same view. Restoring goes back to
+	// the user's view.
 	enum class CameraBookmarkRequest
 	{
 		None,

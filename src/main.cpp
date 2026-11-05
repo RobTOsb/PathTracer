@@ -72,14 +72,15 @@ static float QueryDisplayPeakNits(void *hwnd)
 
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
 //constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
-//constexpr const char *kDefaultScenePath = "H:\\gltf-research-scenes\\scenes\\classroom2\\gltf\\classroom2.glb";
+//constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\bathroom2\\gltf\\bathroom2_extended.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\GlassHurricaneCandleHolder\\glTF-Binary\\GlassHurricaneCandleHolder.glb";
-constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
+//constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
 //constexpr const char *kDefaultScenePath = "h:\\suntemple.glb";
+//constexpr const char *kDefaultScenePath = "h:\\sanmiguel.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\SubsurfaceScene\\scene.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\SphereRoom\\SphereRoom.glb";
 //constexpr const char *kDefaultScenePath = "h:\\ZeroDay_pbr.glb";
-//constexpr const char *kDefaultScenePath = "c:\\Users\\Robert\\Downloads\\modern_apartment.glb";
+constexpr const char *kDefaultScenePath = "h:\\landscape.glb";
 
 constexpr uint kFramesInFlight = 2;
 constexpr uint kSwapchainImageCount = 3;
@@ -442,8 +443,13 @@ int Run(const char *scenePath)
 	auto lastTime = std::chrono::steady_clock::now();
 	float animatedSeconds = -1.0f; // the time the scene was last posed at, none yet
 	const float freeFovY = camera.GetFovY();
-	bool followedSceneCamera = false; // last frame's view was the scene camera's
+	bool followedSceneCamera = false; // last frame's view was the animated scene camera's
 	float followedSeconds = 0.0f; // the animation time it was posed at
+	uint32_t shownView = 0; // last frame's RenderSettings::view
+	// The user's free camera while a still scene camera is the view, to go back to.
+	float3 userPosition = camera.GetPosition();
+	float userYaw = camera.GetYaw();
+	float userPitch = camera.GetPitch();
 	while (window.ProcessEvents())
 	{
 		const auto now = std::chrono::steady_clock::now();
@@ -463,9 +469,26 @@ int Run(const char *scenePath)
 
 		// Last frame's matrices, for the motion vectors.
 		camera.UpdatePreviousMatrices();
-		const bool followSceneCamera = gpuScene.IsCameraAnimated() && settings.animation.play &&
+		// A still scene camera keeps the user's view to come back to. Restoring the bookmark goes back to it.
+		if (settings.cameraBookmarkRequest == RenderSettings::CameraBookmarkRequest::Restore ||
+			settings.view > gpuScene.GetStillCameraCount())
+		{
+			settings.view = 0;
+		}
+		if (settings.view != shownView && shownView == 0)
+		{
+			userPosition = camera.GetPosition();
+			userYaw = camera.GetYaw();
+			userPitch = camera.GetPitch();
+		}
+		else if (settings.view != shownView && settings.view == 0)
+		{
+			camera.SetPosition(userPosition);
+			camera.SetOrientation(userYaw, userPitch);
+		}
+		const bool followSceneCamera = settings.view == 0 && gpuScene.IsCameraAnimated() && settings.animation.play &&
 									   settings.animation.sceneCamera && settings.renderMode != RenderMode::Reference;
-		if (!followSceneCamera)
+		if (settings.view == 0 && !followSceneCamera)
 		{
 			UpdateCamera(window, camera, settings, deltaSeconds);
 		}
@@ -507,22 +530,29 @@ int Run(const char *scenePath)
 			}
 		}
 
-		// The scene camera, posed with the animation above. Starting, stopping (back to the free camera's field of
-		// view) and looping are cuts.
-		settings.cameraCut = followSceneCamera != followedSceneCamera;
-		if (followSceneCamera)
+		// The scene cameras, the animated one posed with the animation above. Choosing another view, the animated
+		// camera starting, stopping (back to the free camera's field of view) and looping are cuts.
+		settings.cameraCut = settings.view != shownView || followSceneCamera != followedSceneCamera;
+		if (settings.view != 0)
 		{
-			const RenderGPUScene::CameraPose pose = gpuScene.GetCameraPose();
+			const RenderGPUScene::CameraPose pose = gpuScene.GetStillCameraPose(settings.view - 1);
+			camera.SetView(pose.position, pose.front, pose.up);
+			camera.SetFovY(pose.yFov, window.GetAspectRatio());
+		}
+		else if (followSceneCamera)
+		{
+			const RenderGPUScene::CameraPose pose = gpuScene.GetAnimatedCameraPose();
 			camera.SetView(pose.position, pose.front, pose.up);
 			camera.SetFovY(pose.yFov, window.GetAspectRatio());
 			settings.cameraCut |= settings.animation.seconds < followedSeconds;
 			followedSeconds = settings.animation.seconds;
 		}
-		else if (followedSceneCamera)
+		else if (followedSceneCamera || shownView != 0)
 		{
 			camera.SetFovY(freeFovY, window.GetAspectRatio());
 		}
 		followedSceneCamera = followSceneCamera;
+		shownView = settings.view;
 
 		// Like the animations, the flashing holds still in the reference, which starts over if a bunny changes.
 		if (settings.lights.flashBunnies && settings.renderMode != RenderMode::Reference)

@@ -324,6 +324,55 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		}
 	}
 
+		if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		const uint32_t stillCameras = scene_.GetStillCameraCount();
+		if (stillCameras > 0)
+		{
+			char label[32];
+			const auto viewName = [&label](uint32_t view) {
+				if (view == 0)
+				{
+					return "User";
+				}
+				snprintf(label, sizeof(label), "Camera %u", view);
+				return static_cast<const char *>(label);
+			};
+			if (ImGui::BeginCombo("View", viewName(settings_.view)))
+			{
+				for (uint32_t view = 0; view <= stillCameras; ++view)
+				{
+					if (ImGui::Selectable(viewName(view), settings_.view == view))
+					{
+						settings_.view = view;
+					}
+				}
+				ImGui::EndCombo();
+			}
+			ImGui::SetItemTooltip("User is the free camera. Camera 1 and on are the scene's glTF cameras that do not "
+								  "move, their field of view too; they ignore the mouse and keys, and back on User "
+								  "the free camera is where it was left");
+		}
+		const float3 position = camera_.GetPosition();
+		const float3 front = camera_.GetFront();
+		ImGui::Text("Position  %.2f %.2f %.2f", position.x, position.y, position.z);
+		ImGui::Text("Forward   %.2f %.2f %.2f", front.x, front.y, front.z);
+		ImGui::DragFloat("Speed", &settings_.cameraSpeed, 0.1f, 0.01f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+		ImGui::TextDisabled("WASD move, Q/E down/up, Shift faster, RMB drag to look");
+		if (ImGui::Button("Save view"))
+		{
+			settings_.cameraBookmarkRequest = RenderSettings::CameraBookmarkRequest::Save;
+		}
+		ImGui::SameLine();
+		ImGui::BeginDisabled(!settings_.cameraBookmarkExists);
+		if (ImGui::Button("Restore view"))
+		{
+			settings_.cameraBookmarkRequest = RenderSettings::CameraBookmarkRequest::Restore;
+		}
+		ImGui::EndDisabled();
+		ImGui::TextDisabled("Saved beside the scene and restored at startup");
+	}
+
 	if (ImGui::CollapsingHeader("DLSS Ray Reconstruction", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		if (!rayReconstructionSupported_)
@@ -417,8 +466,8 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		if (scene_.IsCameraAnimated())
 		{
 			ImGui::Checkbox("Scene camera", &animation.sceneCamera);
-			ImGui::SetItemTooltip("While playing, the view follows the scene's animated camera and ignores the mouse "
-								  "and keys. Paused, the free camera carries on from there");
+			ImGui::SetItemTooltip("While playing with the User view, it follows the scene's animated camera and "
+								  "ignores the mouse and keys. Paused, the free camera carries on from there");
 		}
 	}
 
@@ -724,28 +773,6 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	if (ImGui::CollapsingHeader("Memory", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		MemoryUI(memoryStats);
-	}
-
-	if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen))
-	{
-		const float3 position = camera_.GetPosition();
-		const float3 front = camera_.GetFront();
-		ImGui::Text("Position  %.2f %.2f %.2f", position.x, position.y, position.z);
-		ImGui::Text("Forward   %.2f %.2f %.2f", front.x, front.y, front.z);
-		ImGui::DragFloat("Speed", &settings_.cameraSpeed, 0.1f, 0.01f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
-		ImGui::TextDisabled("WASD move, Q/E down/up, Shift faster, RMB drag to look");
-		if (ImGui::Button("Save view"))
-		{
-			settings_.cameraBookmarkRequest = RenderSettings::CameraBookmarkRequest::Save;
-		}
-		ImGui::SameLine();
-		ImGui::BeginDisabled(!settings_.cameraBookmarkExists);
-		if (ImGui::Button("Restore view"))
-		{
-			settings_.cameraBookmarkRequest = RenderSettings::CameraBookmarkRequest::Restore;
-		}
-		ImGui::EndDisabled();
-		ImGui::TextDisabled("Saved beside the scene and restored at startup");
 	}
 
 	ImGui::End();
