@@ -40,6 +40,9 @@ struct LightSettings
 	// Light tree: lights per leaf, picked by flux within it, 1 to LIGHT_TREE_MAX_LEAF_LIGHTS. More
 	// makes the tree shallower at the cost of ignoring where the leaf's lights are relative to each other.
 	int maxLeafLights = 4;
+	// Light tree: the share of the tree's light samples that select by power instead (defensive sampling), which
+	// bounds the noise of a light the tree's importance underrates. 0 for the tree alone.
+	float treePowerMix = 0.25f;
 	// Intel Sponza's emissive bunnies flash on clocks of their own, one like a broken light, so that the light
 	// tree's lights change every frame. The main loop finds them (the checkbox shows only if it did) and holds
 	// them still in the reference.

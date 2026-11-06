@@ -222,7 +222,11 @@ float LightSelectPmf(LightSelectVertex v, uint lightIndex)
 {
     float pmf;
     if (v.selection == LIGHT_SELECT_TREE)
-        pmf = LightTreePmf(g_LightTreeNodes, g_LightTreeParents, g_LightLeaves, MakeLightTreeShadingContext(v), lightIndex);
+    {
+        float mix = g_Frame.lightTreePowerMix;
+        pmf = (1.0 - mix) * LightTreePmf(g_LightTreeNodes, g_LightTreeParents, g_LightLeaves, MakeLightTreeShadingContext(v), lightIndex) +
+              mix * g_LightPower[lightIndex].pmf;
+    }
     else if (v.selection == LIGHT_SELECT_POWER)
         pmf = g_LightPower[lightIndex].pmf;
     else
@@ -246,6 +250,32 @@ float EmitterLightPdf(LightSelectVertex v, uint lightIndex, float3 dir, float3 p
     return LightSelectPmf(v, lightIndex) * 2.0 * d2 / (twiceArea * cosLight);
 }
 
+// Power selection: the light owning a point of the flux CDF (see GpuLightPowerEntry) at 31 bits, uSelect giving the
+// top 24 and uLow the rest. The guide table's bucket holding it bounds the search to the lights between the owners
+// of its start and of the next bucket's. False past the last light's interval, which the quantised flux leaves a
+// little short of 2^31.
+bool SamplePowerLight(float uSelect, float uLow, out uint lightIndex, out float pmf)
+{
+    uint target = (min(uint(uSelect * 16777216.0), 16777215u) << 7) | min(uint(uLow * 128.0), 127u);
+    uint guideBits = firstbithigh(g_Frame.lightCount);
+    uint bucket = target >> (31 - guideBits);
+    uint lo = g_LightPower[bucket].guide;
+    uint hi = bucket + 1 < (1u << guideBits) ? g_LightPower[bucket + 1].guide : g_Frame.lightCount - 1;
+    [loop]
+    while (lo < hi)
+    {
+        uint mid = (lo + hi) / 2;
+        if (g_LightPower[mid].cdfEnd > target)
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+    GpuLightPowerEntry entry = g_LightPower[lo];
+    lightIndex = lo;
+    pmf = entry.pmf;
+    return entry.cdfEnd > target;
+}
+
 // Picks the sun with sunSelectProbability, otherwise a light from the light buffer, and samples it.
 // The PDF includes the selection probability and is 0 when there is nothing to sample.
 LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
@@ -267,34 +297,32 @@ LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
     float pmf;
     if (v.selection == LIGHT_SELECT_TREE)
     {
-        if (!SampleLightTree(g_LightTreeNodes, g_LightTreeLeafLights, MakeLightTreeShadingContext(v), uSelect, lightIndex, pmf))
-            return ls;
+        // Defensive sampling: a share of the picks by power, and every pick weighed by the mix of both PMFs (the
+        // balance heuristic over the two strategies), which costs the other strategy's PMF: one load after a tree
+        // walk, a PMF walk after a power pick.
+        float mix = g_Frame.lightTreePowerMix;
+        LightTreeShadingContext treeCtx = MakeLightTreeShadingContext(v);
+        float treePmf;
+        float powerPmf;
+        if (uSelect < mix)
+        {
+            if (!SamplePowerLight(min(uSelect / mix, 0.99999994), u.y, lightIndex, powerPmf))
+                return ls;
+            treePmf = LightTreePmf(g_LightTreeNodes, g_LightTreeParents, g_LightLeaves, treeCtx, lightIndex);
+        }
+        else
+        {
+            float uTree = min((uSelect - mix) / (1.0 - mix), 0.99999994);
+            if (!SampleLightTree(g_LightTreeNodes, g_LightTreeLeafLights, treeCtx, uTree, lightIndex, treePmf))
+                return ls;
+            powerPmf = mix > 0.0 ? g_LightPower[lightIndex].pmf : 0.0;
+        }
+        pmf = (1.0 - mix) * treePmf + mix * powerPmf;
     }
     else if (v.selection == LIGHT_SELECT_POWER)
     {
-        // A point of the flux CDF (see GpuLightPowerEntry) at 31 bits: uSelect gives the top 24 and u.y, which
-        // only the sun uses otherwise, the rest. The guide table's bucket holding it bounds the search to the
-        // lights between the owners of its start and of the next bucket's.
-        uint target = (min(uint(uSelect * 16777216.0), 16777215u) << 7) | min(uint(u.y * 128.0), 127u);
-        uint guideBits = firstbithigh(g_Frame.lightCount);
-        uint bucket = target >> (31 - guideBits);
-        uint lo = g_LightPower[bucket].guide;
-        uint hi = bucket + 1 < (1u << guideBits) ? g_LightPower[bucket + 1].guide : g_Frame.lightCount - 1;
-        [loop]
-        while (lo < hi)
-        {
-            uint mid = (lo + hi) / 2;
-            if (g_LightPower[mid].cdfEnd > target)
-                hi = mid;
-            else
-                lo = mid + 1;
-        }
-        GpuLightPowerEntry entry = g_LightPower[lo];
-        // Past the last light's interval, which the quantised flux leaves a little short of 2^31.
-        if (entry.cdfEnd <= target)
+        if (!SamplePowerLight(uSelect, u.y, lightIndex, pmf))
             return ls;
-        lightIndex = lo;
-        pmf = entry.pmf;
     }
     else
     {

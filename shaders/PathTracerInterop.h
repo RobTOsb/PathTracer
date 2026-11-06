@@ -117,7 +117,10 @@ struct FrameConstants
 	// Instance mask shadow rays trace with: all instances, or all but the blended ones (InstanceMaskBits) when
 	// blended surfaces cast no shadows.
 	uint shadowInstanceMask;
-	uint pad3;
+	// Light tree selection picks by power with this probability, and weighs the pick by the mix of both PMFs, so a
+	// light the tree's importance underrates (a point light off a glossy lobe, or close by in a wide cluster) keeps
+	// at least this share of its power selection PMF.
+	float lightTreePowerMix;
 
 	// ATMOSPHERE: the cloud layer seen past the scene's geometry and shadowing its sunlight (see Clouds.slang).
 	CloudParameters clouds;

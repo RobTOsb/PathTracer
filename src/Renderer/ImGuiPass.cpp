@@ -504,6 +504,10 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 							  "later ones use the diffuse one only");
 		ImGui::SliderInt("Lights per leaf", &lights.maxLeafLights, 1, static_cast<int>(LIGHT_TREE_MAX_LEAF_LIGHTS));
 		ImGui::SetItemTooltip("Light tree leaf size; a leaf's lights are picked in proportion to their flux");
+		ImGui::SliderFloat("Power mix", &lights.treePowerMix, 0.0f, 1.0f, "%.2f");
+		ImGui::SetItemTooltip("Share of the tree's light samples that select by power instead, weighed by both "
+							  "PMFs: caps the noise of lights the tree underrates (point lights off glossy lobes "
+							  "or right next to a surface). 0 = the tree alone");
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 	}
