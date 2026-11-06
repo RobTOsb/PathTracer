@@ -107,12 +107,23 @@ uint PackOctahedralSnorm16x2(float3 v)
     return (uint(s.x) & 0xFFFF) | (uint(s.y) << 16);
 }
 
-// A one-sided Lambertian triangle, Phi = pi L A, times fluxScale. Anything else, and a light that emits nothing,
-// gets zero flux, which leaves it without a leaf.
+// A one-sided Lambertian triangle, Phi = pi L A, or an isotropic point light, Phi = 4 pi I, times fluxScale.
+// Anything else, and a light that emits nothing, gets zero flux, which leaves it without a leaf.
 GpuLightTreeCluster MakeLightCluster(GpuLight light, float fluxScale)
 {
     GpuLightTreeCluster c = (GpuLightTreeCluster)0;
-    if (light.GetLightType() != kLight_Area)
+    GpuLightType type = light.GetLightType();
+    if (type == kLight_Point)
+    {
+        float flux = 4.0 * LIGHT_TREE_BUILD_PI * LightTreeLuminance(light.radiance.xyz) * fluxScale;
+        if (!(flux > 0.0) || isinf(flux))
+            return c;
+        // No average direction, so the vMF is flat (sharpness 0), and no extent.
+        c.mean = light.v1.xyz;
+        c.flux = flux;
+        return c;
+    }
+    if (type != kLight_Area)
         return c;
 
     float3 p0 = light.v1.xyz;

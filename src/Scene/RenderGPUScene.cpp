@@ -340,16 +340,27 @@ namespace
 		return { std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z) };
 	}
 
-	// Bounds of the lights' triangle centroids, empty (min above max) without lights.
+	// Where the light tree build puts the light (MakeLightCluster): a triangle's centroid, a point light's position.
+	float3 LightCentroid(const GpuLight &light)
+	{
+		GpuLight copy = light; // GetLightType is not const
+		if (copy.GetLightType() == kLight_Point)
+		{
+			return float3(light.v1.x, light.v1.y, light.v1.z);
+		}
+		return float3((light.v1.x + light.v2.x + light.v3.x) * (1.0f / 3.0f),
+					  (light.v1.y + light.v2.y + light.v3.y) * (1.0f / 3.0f),
+					  (light.v1.z + light.v2.z + light.v3.z) * (1.0f / 3.0f));
+	}
+
+	// Bounds of the lights' centroids, empty (min above max) without lights.
 	void CentroidBounds(std::span<const GpuLight> lights, float3 &boundsMin, float3 &boundsMax)
 	{
 		boundsMin = float3(FLT_MAX, FLT_MAX, FLT_MAX);
 		boundsMax = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
 		for (const GpuLight &light: lights)
 		{
-			const float3 centroid = float3((light.v1.x + light.v2.x + light.v3.x) * (1.0f / 3.0f),
-										   (light.v1.y + light.v2.y + light.v3.y) * (1.0f / 3.0f),
-										   (light.v1.z + light.v2.z + light.v3.z) * (1.0f / 3.0f));
+			const float3 centroid = LightCentroid(light);
 			boundsMin = MinFloat3(boundsMin, centroid);
 			boundsMax = MaxFloat3(boundsMax, centroid);
 		}
@@ -424,9 +435,13 @@ void RenderGPUScene::DestroyLights()
 void RenderGPUScene::UpdateLights()
 {
 	const std::span<const GpuLight> lights = emissiveLights_;
+	const std::vector<GpuLight> pointLights = MakePointLights();
 	if (!lightTreeBuilt_)
 	{
-		lightTreeBuilder_->Reset(emissiveFluxScales_, lightEmitterBuffer_);
+		// The point lights have no texture to average, so their flux scale is 1.
+		std::vector<float> fluxScales = emissiveFluxScales_;
+		fluxScales.resize(lights.size() + pointLights.size(), 1.0f);
+		lightTreeBuilder_->Reset(fluxScales, lightEmitterBuffer_);
 		lightTreeBuilt_ = true;
 		++lightsGeneration_;
 		CentroidBounds(lights.first(staticLightCount_), staticLightBoundsMin_, staticLightBoundsMax_);
@@ -438,15 +453,16 @@ void RenderGPUScene::UpdateLights()
 		TransformDynamicLights();
 		dynamicLightsMoved_ = false;
 	}
-	lightCount_ = static_cast<uint32_t>(lights.size());
+	CentroidBounds(pointLights, pointLightBoundsMin_, pointLightBoundsMax_);
+	lightCount_ = static_cast<uint32_t>(lights.size() + pointLights.size());
 
 	// BeginFrame has waited for the frame that last read this slot, so it can be overwritten. The static
 	// lights only need writing once per reset, unless the buffer had to grow, the dynamic ones whenever
-	// they have moved since this slot last held them.
+	// they have moved since this slot last held them, and the point lights, which are few, every frame.
 	lightFrames_.resize(renderContext_->GetFramesInFlight());
 	lightFrame_ = renderContext_->GetCurrentFrameIndex();
 	LightFrameBuffers &frame = lightFrames_[lightFrame_];
-	const bool recreated = ReserveLightBuffer<GpuLight>(renderContext_, frame.lights, frame.lightCapacity, lights.size(), "Scene_Lights");
+	const bool recreated = ReserveLightBuffer<GpuLight>(renderContext_, frame.lights, frame.lightCapacity, lightCount_, "Scene_Lights");
 	if (recreated || frame.lightsGeneration != lightsGeneration_)
 	{
 		frame.lightsGeneration = lightsGeneration_;
@@ -458,6 +474,7 @@ void RenderGPUScene::UpdateLights()
 		frame.dynamicLightPose = dynamicLightPose_;
 		WriteLightRange(renderContext_, frame.lights, staticLightCount_, lights.subspan(staticLightCount_));
 	}
+	WriteLightRange<GpuLight>(renderContext_, frame.lights, lights.size(), pointLights);
 	ReserveLightBuffer<float>(renderContext_,
 							  frame.emissionScales,
 							  frame.emissionScaleCapacity,
@@ -476,14 +493,26 @@ void RenderGPUScene::BuildLightTree(uint32_t maxLeafLights)
 	LightTreeBuilder::Inputs inputs;
 	inputs.lights = frame.lights;
 	inputs.emissionScales = frame.emissionScales;
-	const bool anyStatic = staticLightCount_ > 0;
-	const bool anyDynamic = lightCount_ > staticLightCount_;
-	inputs.boundsMin = anyStatic ? staticLightBoundsMin_ : dynamicLightBoundsMin_;
-	inputs.boundsMax = anyStatic ? staticLightBoundsMax_ : dynamicLightBoundsMax_;
-	if (anyStatic && anyDynamic)
+	// Over the parts that have lights, as an empty part's bounds are inverted.
+	struct Part
 	{
-		inputs.boundsMin = MinFloat3(inputs.boundsMin, dynamicLightBoundsMin_);
-		inputs.boundsMax = MaxFloat3(inputs.boundsMax, dynamicLightBoundsMax_);
+		uint32_t count;
+		float3 boundsMin;
+		float3 boundsMax;
+	};
+	const uint32_t triangleLights = static_cast<uint32_t>(emissiveLights_.size());
+	const Part parts[] = { { staticLightCount_, staticLightBoundsMin_, staticLightBoundsMax_ },
+						   { triangleLights - staticLightCount_, dynamicLightBoundsMin_, dynamicLightBoundsMax_ },
+						   { static_cast<uint32_t>(pointLights_.size()), pointLightBoundsMin_, pointLightBoundsMax_ } };
+	inputs.boundsMin = float3(FLT_MAX, FLT_MAX, FLT_MAX);
+	inputs.boundsMax = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+	for (const Part &part: parts)
+	{
+		if (part.count > 0)
+		{
+			inputs.boundsMin = MinFloat3(inputs.boundsMin, part.boundsMin);
+			inputs.boundsMax = MaxFloat3(inputs.boundsMax, part.boundsMax);
+		}
 	}
 	inputs.maxLeafLights = maxLeafLights;
 	lightTreeBuilder_->Build(inputs);
@@ -558,6 +587,15 @@ void RenderGPUScene::Animate(float seconds)
 		{
 			const std::array<float, 12> &world = worlds[camera.animatedNode];
 			std::copy(world.begin(), world.end(), camera.worldMatrix);
+		}
+	}
+	// UpdateLights writes the point lights every frame.
+	for (PointLight &light: pointLights_)
+	{
+		if (light.animatedNode != UINT32_MAX)
+		{
+			const std::array<float, 12> &world = worlds[light.animatedNode];
+			light.position = float3(world[3], world[7], world[11]);
 		}
 	}
 
@@ -796,6 +834,28 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 	lightTreeBuilt_ = false;
 }
 
+void RenderGPUScene::AppendPointLightEmitters()
+{
+	const uint32_t firstSlot = static_cast<uint32_t>(emissionScales_.size());
+	for (uint32_t i = 0; i < static_cast<uint32_t>(pointLights_.size()); ++i)
+	{
+		lightEmitters_.push_back(firstSlot + i);
+	}
+	emissionScales_.resize(firstSlot + pointLights_.size(), 1.0f);
+	lightTreeBuilt_ = false;
+}
+
+std::vector<GpuLight> RenderGPUScene::MakePointLights() const
+{
+	std::vector<GpuLight> lights;
+	lights.reserve(pointLights_.size());
+	for (const PointLight &light: pointLights_)
+	{
+		lights.push_back(MakePointLight(light.intensity, light.position, light.range));
+	}
+	return lights;
+}
+
 void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene)
 {
 	BuildGPUScene(scene, {});
@@ -918,6 +978,7 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene, const std::fil
 	UploadMaterials(materials, batch);
 	std::vector<uint32_t> emitters = CollectEmitters(scene, materials);
 	PartitionDynamicLights(emitters);
+	AppendPointLightEmitters();
 	UploadEmitters(emitters, batch);
 	BakeOpacityMicromaps(scene, materials);
 	UploadOpacityMicromapIndices(batch);
@@ -986,6 +1047,7 @@ void RenderGPUScene::SerialiseTables(Archive &archive,
 	archive.Table(animationTimes_);
 	archive.Table(animationValues_);
 	archive.Table(sceneCameras_);
+	archive.Table(pointLights_);
 	archive.Value(boundsMin_);
 	archive.Value(boundsMax_);
 }
@@ -1112,6 +1174,13 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 			return false;
 		}
 	}
+	for (const PointLight &light: pointLights_)
+	{
+		if (light.animatedNode != UINT32_MAX && light.animatedNode >= animatedNodes_.size())
+		{
+			return false;
+		}
+	}
 	for (const AnimationChannel &channel: animationChannels_)
 	{
 		if (channel.node >= animatedNodes_.size() || channel.path > Scene::AnimationPath::Scale ||
@@ -1156,6 +1225,7 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 		animationTimes_.clear();
 		animationValues_.clear();
 		sceneCameras_.clear();
+		pointLights_.clear();
 		ReleaseStaging();
 		return false;
 	}
@@ -1217,6 +1287,7 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 	UploadMaterials(materials, batch);
 	PrepareAnimation();
 	PartitionDynamicLights(emitters);
+	AppendPointLightEmitters();
 	UploadEmitters(emitters, batch);
 	UploadOpacityMicromapIndices(batch);
 	lightTreeBuilt_ = false;
@@ -1224,7 +1295,7 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 	renderContext_->EndUpload(batch);
 
 	logi("GPUScene: loaded '{}': {} mesh(es), {} primitive(s), {} instance(s), {} vertices, {} triangles, "
-		 "{} texture(s), {} emissive triangle light(s)",
+		 "{} texture(s), {} emissive triangle light(s), {} point light(s)",
 		 cachePath.string(),
 		 meshDescs.size(),
 		 primitiveDescs.size(),
@@ -1232,7 +1303,8 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 		 vertices_.size(),
 		 indices_.size() / 3,
 		 textures_.size(),
-		 emissiveLights_.size());
+		 emissiveLights_.size(),
+		 pointLights_.size());
 
 	ReleaseStaging();
 	return true;
@@ -1347,6 +1419,49 @@ void RenderGPUScene::BuildAnimation(const Scene::GLTFScene &scene, const std::ve
 			 source.GetName(),
 			 camera.yFov * 180.0f / Pi,
 			 entry.animatedNode != UINT32_MAX ? "animated" : "still");
+	}
+
+	// The KHR_lights_punctual point lights at their nodes' origins; the nodes' rotation and scale do not change them.
+	pointLights_.clear();
+	uint32_t otherLights = 0;
+	uint32_t animatedLights = 0;
+	for (uint32_t n = 0; n < static_cast<uint32_t>(nodeCount); ++n)
+	{
+		const Scene::Instance &source = scene.GetInstance(n);
+		const int32_t lightIndex = source.GetLightIndex();
+		if (lightIndex < 0 || static_cast<size_t>(lightIndex) >= scene.GetLightCount())
+		{
+			continue;
+		}
+		const Scene::PunctualLight &light = scene.GetLight(lightIndex);
+		if (light.type != Scene::PunctualLightType::Point)
+		{
+			++otherLights;
+			continue;
+		}
+		const float3 intensity = float3(light.colour[0] * light.intensity,
+										light.colour[1] * light.intensity,
+										light.colour[2] * light.intensity);
+		const float luminance = Luminance(intensity);
+		if (!(luminance > 0.0f) || !std::isfinite(luminance))
+		{
+			continue;
+		}
+		PointLight &entry = pointLights_.emplace_back();
+		entry.intensity = intensity;
+		entry.range = light.range > 0.0f && std::isfinite(light.range) ? light.range : 0.0f;
+		const float *m = source.GetWorldMatrix();
+		entry.position = float3(m[3], m[7], m[11]);
+		entry.animatedNode = animatedOfNode[n];
+		animatedLights += entry.animatedNode != UINT32_MAX ? 1 : 0;
+	}
+	if (!pointLights_.empty())
+	{
+		logi("GPUScene: {} point light(s), {} of them animated", pointLights_.size(), animatedLights);
+	}
+	if (otherLights > 0)
+	{
+		logw("GPUScene: {} spot or directional light(s) left out, only point lights are rendered for now", otherLights);
 	}
 
 	for (size_t a = 0; a < scene.GetAnimationCount(); ++a)

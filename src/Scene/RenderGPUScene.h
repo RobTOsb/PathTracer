@@ -306,10 +306,21 @@ public:
 		return lightCount_;
 	}
 
-	// Lights before this index in the light buffer are static emitters, those from it on dynamic ones.
+	// The light buffer holds the emissive triangles, then the point lights. Triangle lights before
+	// GetStaticLightCount() are static emitters, those from it on dynamic ones.
+	uint32_t GetTriangleLightCount() const
+	{
+		return static_cast<uint32_t>(emissiveLights_.size());
+	}
+
 	uint32_t GetStaticLightCount() const
 	{
 		return staticLightCount_;
+	}
+
+	uint32_t GetPointLightCount() const
+	{
+		return static_cast<uint32_t>(pointLights_.size());
 	}
 
 	// Levels of node groups every light is under in the last tree.
@@ -423,7 +434,7 @@ private:
 	void ComputeBounds(const Scene::GLTFScene &scene);
 	// Returns each node's scene instance, UINT32_MAX for those without a mesh.
 	std::vector<uint32_t> FillInstances(const Scene::GLTFScene &scene);
-	// Fills the animation tables from the glTF's animations.
+	// Fills the animation tables from the glTF's animations, and the cameras and point lights, which may move.
 	void BuildAnimation(const Scene::GLTFScene &scene, const std::vector<uint32_t> &instanceOfNode);
 	// From the animation tables, their duration and the dynamic instances. Call before PartitionDynamicLights.
 	void PrepareAnimation();
@@ -488,10 +499,29 @@ private:
 	float3 dynamicLightBoundsMin_ = {};
 	float3 dynamicLightBoundsMax_ = {};
 
-	// Per emissive instance, its scene instance and SetEmissionScale's factor.
+	// Per emissive instance, its scene instance and SetEmissionScale's factor. The point lights have the slots
+	// after the emissive instances', at 1.
 	std::vector<uint32_t> emissiveInstances_;
 	std::vector<float> emissionScales_;
-	std::vector<uint32_t> lightEmitters_; // per light, its emissive instance
+	std::vector<uint32_t> lightEmitters_; // per light, its emission scale slot
+	// Gives the point lights their emission scale slots after the emissive instances' ones. Call after
+	// PartitionDynamicLights, before UploadEmitters.
+	void AppendPointLightEmitters();
+	// The point lights as GpuLights, where they are now.
+	std::vector<GpuLight> MakePointLights() const;
+
+	// The KHR_lights_punctual point lights, kept in the scene cache. They follow the triangle lights in the
+	// light buffer. Spot and directional lights are left out for now.
+	struct PointLight
+	{
+		float3 intensity; // candela, colour times intensity
+		float range; // 0 = infinite
+		float3 position; // world space, at rest, then as Animate last posed it
+		uint32_t animatedNode; // into animatedNodes_, or UINT32_MAX for a light that does not move
+	};
+	std::vector<PointLight> pointLights_;
+	float3 pointLightBoundsMin_ = {};
+	float3 pointLightBoundsMax_ = {};
 
 	// The animations, kept in the scene cache.
 	std::vector<AnimatedNode> animatedNodes_;

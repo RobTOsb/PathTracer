@@ -56,10 +56,40 @@ LightSample SampleSun(float3 position, float2 u)
     return ls;
 }
 
+// A KHR_lights_punctual point light (intensity in candela, v1 its position and range): I / d^2, inside a
+// finite range windowed as the extension recommends, (1 - (d / range)^4)^2 clamped to [0, 1]. A delta
+// light, so the PDF is 1 and only light sampling reaches it.
+LightSample SamplePointLight(GpuLight light, float3 position)
+{
+    LightSample ls;
+    float3 toLight = light.v1.xyz - position;
+    float d2 = max(dot(toLight, toLight), 1.0e-8);
+    float d = sqrt(d2);
+    float range = light.v1.w;
+    float window = 1.0;
+    if (range > 0.0)
+    {
+        float r2 = d2 / (range * range);
+        window = saturate(1.0 - r2 * r2);
+        window *= window;
+    }
+    ls.direction = toLight / d;
+    ls.distance = d;
+    ls.radiance = light.radiance.xyz * (window / d2);
+    // Past the range there is nothing to trace a shadow ray for.
+    ls.pdf = window > 0.0 ? 1.0 : 0.0;
+    ls.lightSamplingOnly = true;
+    return ls;
+}
+
 // Uniform area sample of an emissive triangle's front face (counter-clockwise v1, v2, v3) as seen
-// from position, as a solid angle PDF that excludes the selection probability.
+// from position, as a solid angle PDF that excludes the selection probability. Point lights go to
+// SamplePointLight.
 LightSample SampleBufferLight(GpuLight light, float3 position, float2 u)
 {
+    if (light.GetLightType() == kLight_Point)
+        return SamplePointLight(light, position);
+
     LightSample ls;
     float3 p0 = light.v1.xyz;
     float3 p1 = light.v2.xyz;

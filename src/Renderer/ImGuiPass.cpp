@@ -476,8 +476,9 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		LightSettings &lights = settings_.lights;
 		const uint32_t lightCount = scene_.GetLightCount();
 		ImGui::Text("%u emissive triangle(s), %u of them dynamic",
-					lightCount,
-					lightCount - scene_.GetStaticLightCount());
+					scene_.GetTriangleLightCount(),
+					scene_.GetTriangleLightCount() - scene_.GetStaticLightCount());
+		ImGui::Text("%u point light(s)", scene_.GetPointLightCount());
 		ImGui::Text("Tree depth: %u (4-wide), rebuilt on the GPU every frame", scene_.GetLightTreeDepth());
 		if (lights.bunnyCount > 0)
 		{

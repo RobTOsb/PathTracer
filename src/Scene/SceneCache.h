@@ -37,7 +37,7 @@
 // 24: the glTF camera the view can follow (RenderGPUScene::sceneCameras_).
 // 25: blended surfaces cut below alpha 16/255 instead of 1/255 (kBlendMinOpacity).
 // 26: every perspective glTF camera (RenderGPUScene::sceneCameras_), the still ones as views to choose from.
-constexpr uint32_t kSceneCacheVersion = 26;
+constexpr uint32_t kSceneCacheVersion = 27;
 
 struct SceneCacheTexture
 {
