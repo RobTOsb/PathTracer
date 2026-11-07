@@ -191,9 +191,12 @@ struct RenderSettings
 	bool mergeInstances = true;
 	bool specularMaterials = true;
 	bool transmissiveMaterials = true;
-	// Blended (ALPHA_MODE_BLEND) surfaces block shadow rays, as a mask at half their alpha. Off suits decals, which
+	// Blended (ALPHA_MODE_BLEND) surfaces block shadow rays, by chance at their alpha. Off suits decals, which
 	// would otherwise shadow the wall they lie on.
 	bool blendedShadows = false;
+	// DLSS-RR guides of blended surfaces: the layer mixed with what is behind it by opacity, deterministically,
+	// instead of whichever layer the camera ray took by chance (FrameConstants::blendGuides).
+	bool blendGuides = true;
 	int glassReflectionSplits = 2;
 	// Solid subsurface materials: the orders of scattering inside the object that are rendered, light
 	// straight through and one scattering event path traced, the rest from a diffusion profile. All off

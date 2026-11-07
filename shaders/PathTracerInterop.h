@@ -137,12 +137,15 @@ struct FrameConstants
 	float specularMotionMaxRoughness;
 	// OPACITY_MICROMAPS: bindless index of that TLAS. Blended surfaces keep 4-state micromaps in it, since a ray
 	// flag (RAY_FLAG_FORCE_OMM_2_STATE) would force 2-state on them too, which camera and bounce rays cannot take.
-	// Shadow rays use that flag on every bounce and trace the scene TLAS instead.
+	// Shadow rays trace it on every bounce, since blended surfaces block them by chance in the any-hit.
 	uint opacityMicromap2StateScene;
 	uint shadowChanges;
 	uint previousScene;
 	uint specularHitDistanceRay;
-	uint pad;
+	// DLSS_RR: the guides of a camera ray past or onto a blended surface mix it with what is behind by its opacity,
+	// from one deterministic guide ray in RayGen (ResolveBlendGuides), rather than being of whichever layer the
+	// path took. 0 = off, or the scene has no blended instance.
+	uint blendGuides;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of

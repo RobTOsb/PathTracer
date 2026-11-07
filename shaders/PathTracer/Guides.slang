@@ -37,6 +37,9 @@ struct PrimaryGuides
     bool hold;
     // A PSR chain ended on a surface that RayGen may put in these guides' place (FinishChainEnd).
     bool chainEnd;
+    // How much of the surface is there: below 1 for a blended surface the camera ray took by chance, which
+    // RayGen mixes with what is behind it (ResolveBlendGuides).
+    float blendOpacity;
 };
 
 PrimaryGuides DefaultGuides(float3 dir)
@@ -58,6 +61,7 @@ PrimaryGuides DefaultGuides(float3 dir)
     g.reflectorIsPane = false;
     g.hold = false;
     g.chainEnd = false;
+    g.blendOpacity = 1.0;
     return g;
 }
 

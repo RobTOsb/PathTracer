@@ -5,11 +5,10 @@ import PathTracer.Math;
 import PathTracer.RayTracing;
 import PathTracer.Resources;
 
-#ifdef OPACITY_MICROMAPS
-static const uint SHADOW_RAY_FLAGS = RAY_FLAG_FORCE_OMM_2_STATE;
-#else
+// Blended surfaces block a shadow ray by chance (CandidateThere), so their unknown micro-triangles must reach
+// the any-hit: no RAY_FLAG_FORCE_OMM_2_STATE, which would resolve them by its fixed cut. Shadow rays trace the
+// TLAS whose masks alone read their micromaps in 2-state mode instead (ShadowScene).
 static const uint SHADOW_RAY_FLAGS = RAY_FLAG_NONE;
-#endif
 
 // Visibility of the light from 0 (occluded) to 1 (unoccluded) per channel, in the given TLAS.
 float3 TraceShadowRayIn(RaytracingAccelerationStructure scene, float3 origin, float3 directionToLight, float tracingDistance)
@@ -29,8 +28,8 @@ float3 TraceShadowRayIn(RaytracingAccelerationStructure scene, float3 origin, fl
     {
         float3 transmitted;
         if (!ShadowCandidateTransmittance(LoadPrimitive(query.CandidateInstanceID() + query.CandidateGeometryIndex()), query.CandidatePrimitiveIndex(),
-                                          query.CandidateTriangleBarycentrics(),
-                                          (float3x3)query.CandidateObjectToWorld3x4(), directionToLight, transmitted))
+                                          query.CandidateTriangleBarycentrics(), (float3x3)query.CandidateObjectToWorld3x4(), origin,
+                                          directionToLight, query.CandidateTriangleRayT(), transmitted))
             continue;
         visibility *= transmitted;
         if (dot(visibility, 0.333) <= 0.001)
@@ -48,10 +47,17 @@ float3 TraceShadowRayIn(RaytracingAccelerationStructure scene, float3 origin, fl
 #endif
 }
 
+// The TLAS shadow rays trace: with micromaps, the one whose masks read them in 2-state mode (blended surfaces
+// keep 4-state there).
+RaytracingAccelerationStructure ShadowScene()
+{
+    return SceneFor(RAY_SCENE_OMM_2_STATE);
+}
+
 // Visibility of the light from 0 (occluded) to 1 (unoccluded) per channel.
 float3 TraceShadowRay(float3 origin, float3 directionToLight, float tracingDistance)
 {
-    return TraceShadowRayIn(g_Scene, origin, directionToLight, tracingDistance);
+    return TraceShadowRayIn(ShadowScene(), origin, directionToLight, tracingDistance);
 }
 
 // Shadow ray from a surface, offset to whichever side the light is on (below it for transmission).

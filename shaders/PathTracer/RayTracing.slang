@@ -240,6 +240,27 @@ HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvat
     return payload;
 }
 
+// HitPayload::shape.y on the way in: AnyHit takes every blended candidate of at least BLEND_MIN_OPACITY rather than
+// by chance, for guide rays, which must not be noisy.
+static const uint PAYLOAD_DETERMINISTIC_ALPHA = 1u;
+
+// A DLSS-RR guide ray: the closest hit in [tMin, tMax] among the instances of instanceMask (InstanceMaskBits), its
+// blended surfaces there whenever they are at all, with the shape and motion the guides need. False on a miss.
+bool TraceGuideSurface(float3 origin, float3 dir, float tMin, float tMax, uint instanceMask, out HitPayload payload)
+{
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = dir;
+    ray.TMin = tMin;
+    ray.TMax = tMax;
+
+    payload = (HitPayload)0;
+    payload.hitT = -1.0;
+    payload.shape = uint2(1u, PAYLOAD_DETERMINISTIC_ALPHA);
+    TraceRay(g_Scene, RAY_FLAG_NONE, instanceMask, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
+    return payload.hitT >= 0.0;
+}
+
 // Whether and how far the ray went, the rest of the hit left at zero.
 HitInfo HitDistance(HitPayload payload)
 {

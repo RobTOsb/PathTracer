@@ -2518,6 +2518,7 @@ void RenderGPUScene::DestroyInstanceStructures()
 
 void RenderGPUScene::BuildInstanceStructures()
 {
+	hasBlendedInstances_ = false;
 	const ResourceHandle indexBuffer = streamBuffers_[(uint32_t) GPUStream::Index];
 	const bool micromaps = renderContext_->SupportsOpacityMicromaps() && ommIndexBuffer_ != InvalidResourceHandle;
 	auto hasMicromaps = [&](uint32_t primitive) { return micromaps && ommIndexOffsets_[primitive] != kNoOpacityMicromaps; };
@@ -2740,6 +2741,7 @@ void RenderGPUScene::BuildInstanceStructures()
 		std::memcpy(tlasInstance.transform, transform, sizeof(tlasInstance.transform));
 		// A merged group's parts all have this mask.
 		tlasInstance.instanceMask = geometryFlags(ref.primitive).instanceMask;
+		hasBlendedInstances_ |= tlasInstance.instanceMask == INSTANCE_MASK_BLENDED;
 		tlasInstance.hitGroupIndex = 0;
 		AccelerationStructureHandle ommBlas;
 		bool mask2State;

@@ -2,6 +2,7 @@
 import OpenPBRBSDF;
 import PathTracer.Geometry;
 import PathTracer.Math;
+import PathTracer.Random;
 import PathTracer.RayTracing;
 import PathTracer.Resources;
 
@@ -466,17 +467,31 @@ float AlphaCutoff(MaterialData material)
     return material.alphaMode == ALPHA_MODE_BLEND ? BLEND_MIN_OPACITY : 0.0;
 }
 
-static const float BLEND_SHADOW_OPACITY = 0.5;
-
-float ShadowAlphaCutoff(MaterialData material)
+// A uniform number in [0, 1) for one ray meeting one candidate triangle t along it, hashed from the ray, the
+// candidate and the frame, so traversal needs no random state. The same ray traced twice (the shadow change
+// test's ray in last frame's TLAS) makes the same choices.
+float CandidateRand(float3 origin, float3 dir, float t, uint primitiveIndex)
 {
-    if (material.alphaMode == ALPHA_MODE_BLEND && material.albedoTexture != INVALIDDESCRIPTORHANDLE)
-        return BLEND_SHADOW_OPACITY;
-    return AlphaCutoff(material);
+    uint3 h = Pcg3d(asuint(origin) ^ uint3(asuint(t), primitiveIndex, g_Frame.frameIndex));
+    h = Pcg3d(h ^ asuint(dir));
+    return float(h.x >> 8) * (1.0 / 16777216.0);
+}
+
+// glTF alpha blending, stochastically in traversal (as nvpro's vk_gltf_renderer): a blended candidate is there,
+// and is committed or blocks a shadow ray, with probability its alpha, and is otherwise ignored as if a cut-out.
+// What is behind it is then found by the same traversal, so passing costs no bounce and no shading, and in
+// expectation the surface is opacity * itself + (1 - opacity) * straight through. Masks are cut at alphaCutoff.
+// u: CandidateRand, read only for blended materials.
+bool CandidateThere(MaterialData material, float alpha, float u)
+{
+    if (alpha < AlphaCutoff(material))
+        return false;
+    return material.alphaMode != ALPHA_MODE_BLEND || u < alpha;
 }
 
 // How much of a blended surface is there at the hit, its alpha filtered over a ray cone coneWidth wide as
-// LoadMaterial's textures are; 1 for any other.
+// LoadMaterial's textures are; 1 for any other. Only the DLSS-RR blend guides need it: the path's own choice is
+// the any-hit's (CandidateThere).
 float LoadOpacity(HitInfo hit, float coneWidth, bool anisotropic)
 {
     MaterialData material = LoadGpuMaterial(hit.materialId);
@@ -529,11 +544,10 @@ float3 PassThroughTransmittance(MaterialData material, float2 uv, float3 baseCol
     return ThinDeltaTransmittance(p, faceCosine);
 }
 
-// What a candidate triangle lets a shadow ray along dir through: pass-through surfaces some, blended ones of a
-// single alpha what of them is not there, anything else nothing. False for a cut-out (ShadowAlphaCutoff), which
-// the ray ignores.
+// What a candidate triangle t along the shadow ray (origin, dir) lets through: pass-through surfaces some,
+// anything else nothing. False for a candidate that is not there (CandidateThere), which the ray ignores.
 bool ShadowCandidateTransmittance(PrimitiveDesc prim, uint primitiveIndex, float2 barycentrics, float3x3 linearToWorld,
-                                  float3 dir, out float3 transmitted)
+                                  float3 origin, float3 dir, float t, out float3 transmitted)
 {
     transmitted = float3(0.0, 0.0, 0.0);
     MaterialData material = LoadGpuMaterial(prim.materialIndex);
@@ -541,16 +555,11 @@ bool ShadowCandidateTransmittance(PrimitiveDesc prim, uint primitiveIndex, float
     float2 uv = InterpolateTexCoord(tri, Barycentrics(barycentrics));
     float4 albedo = LoadBaseColourAlpha(material, uv);
 
-    if (albedo.a < ShadowAlphaCutoff(material))
+    float u = material.alphaMode == ALPHA_MODE_BLEND ? CandidateRand(origin, dir, t, primitiveIndex) : 0.0;
+    if (!CandidateThere(material, albedo.a, u))
         return false;
 
     if ((material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
         transmitted = PassThroughTransmittance(material, uv, albedo.rgb, FaceCosine(tri, linearToWorld, dir));
-    // The surface at its opacity, as the path's straight-through lobe has it.
-    if (material.alphaMode == ALPHA_MODE_BLEND && material.albedoTexture == INVALIDDESCRIPTORHANDLE)
-    {
-        float opacity = saturate(albedo.a);
-        transmitted = transmitted * opacity + (1.0 - opacity);
-    }
     return true;
 }

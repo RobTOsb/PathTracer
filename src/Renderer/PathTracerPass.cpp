@@ -312,6 +312,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	}
 	constants.serCoherenceHintBits = hintBits;
 	constants.shadowInstanceMask = settings_.blendedShadows ? 0xFFu : 0xFFu & ~static_cast<uint>(INSTANCE_MASK_BLENDED);
+	constants.blendGuides = settings_.blendGuides && scene_.HasBlendedInstances() ? 1u : 0u;
 	constants.materialOverrides = (settings_.specularMaterials ? 0u : MATERIAL_OVERRIDE_NO_SPECULAR) |
 								  (settings_.transmissiveMaterials ? 0u : MATERIAL_OVERRIDE_NO_TRANSMISSION);
 
@@ -416,12 +417,12 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 
 	const Pipeline *pipeline = SelectPipeline();
 
-	// Moving shadows are found against last frame's TLAS of the kind this pipeline traces.
+	// Moving shadows are found against last frame's TLAS of the kind this pipeline's shadow rays trace.
 	if (rayReconstruction_ && settings_.shadowChangeMask && scene_.MovedSinceLastFrame())
 	{
 		constants.shadowChanges = 1;
 		constants.previousScene =
-				renderContext->GetResourceViewInfo(scene_.GetPreviousTLASSRV(pipeline->opacityMicromaps)).descriptorIndex;
+				renderContext->GetResourceViewInfo(scene_.GetPreviousShadowTLASSRV(pipeline->opacityMicromaps)).descriptorIndex;
 	}
 
 	// The slot for this frame index was last read framesInFlight frames ago, and BeginFrame has

@@ -174,11 +174,14 @@ public:
 		return opacityMicromaps && HasOpacityMicromaps() ? frame.ommTlasSRV : frame.tlasSRV;
 	}
 
-	// Last frame's TLAS, of the same kind, which still holds the dynamic instances where last frame traced them.
-	ResourceHandle GetPreviousTLASSRV(bool opacityMicromaps = false) const
+	// Last frame's TLAS, which still holds the dynamic instances where last frame traced them, of the kind shadow
+	// rays trace: with micromaps, the one whose masks read them in 2-state mode.
+	ResourceHandle GetPreviousShadowTLASSRV(bool opacityMicromaps = false) const
 	{
 		const FrameTLASes &frame = frameTlases_[PreviousTLASFrame()];
-		return opacityMicromaps && HasOpacityMicromaps() ? frame.ommTlasSRV : frame.tlasSRV;
+		if (!opacityMicromaps || !HasOpacityMicromaps())
+			return frame.tlasSRV;
+		return frame.omm2StateTlasSRV != InvalidResourceHandle ? frame.omm2StateTlasSRV : frame.ommTlasSRV;
 	}
 
 	// The dynamic instances are elsewhere in the current frame's TLASes than in last frame's. Never in the first
@@ -187,6 +190,12 @@ public:
 	{
 		return tlasFramesUpdated_ >= 2 &&
 			   frameTlases_[tlasFrame_].poseGeneration != frameTlases_[PreviousTLASFrame()].poseGeneration;
+	}
+
+	// Some TLAS instance is a blended (ALPHA_MODE_BLEND) surface.
+	bool HasBlendedInstances() const
+	{
+		return hasBlendedInstances_;
 	}
 
 	// Some primitive has opacity micromaps and the device can trace them.
@@ -587,6 +596,7 @@ private:
 		uint32_t poseGeneration = 0; // the pose of the dynamic instances it was built with
 	};
 	std::vector<FrameTLASes> frameTlases_; // empty without instanced geometry
+	bool hasBlendedInstances_ = false; // some TLAS instance is INSTANCE_MASK_BLENDED
 	uint32_t tlasFrame_ = 0; // the set the current frame traces
 	uint32_t tlasFramesUpdated_ = 0; // frames UpdateAccelerationStructures has picked a set for, up to 2
 
