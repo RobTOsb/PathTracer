@@ -1848,6 +1848,13 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 									   std::clamp(attenuationColour[1], 0.0f, 1.0f),
 									   std::clamp(attenuationColour[2], 0.0f, 1.0f));
 		gpu.attenuationDistance = std::min(material.GetAttenuationDistance(), FLT_MAX);
+		// The medium on the side the normals face (pbrt's medium interface), which a thin wall has no use for.
+		const float *exteriorColour = material.GetExteriorAttenuationColour();
+		gpu.exteriorAttenuationColour = float3(std::clamp(exteriorColour[0], 0.0f, 1.0f),
+											   std::clamp(exteriorColour[1], 0.0f, 1.0f),
+											   std::clamp(exteriorColour[2], 0.0f, 1.0f));
+		gpu.exteriorAttenuationDistance =
+				material.IsThinWalled() ? FLT_MAX : std::min(material.GetExteriorAttenuationDistance(), FLT_MAX);
 		// OpenPBR subsurface from EXT_materials_subsurface. Like Blender, its colour is the base colour. On a
 		// thin wall it is split between reflection and diffuse transmission to the other side by the
 		// anisotropy; in a solid object it is a scattering medium whose mean free path is radius * scale.
@@ -1956,6 +1963,8 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 	fallback.transmissionTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.attenuationColour = float3(1.0f, 1.0f, 1.0f);
 	fallback.attenuationDistance = FLT_MAX;
+	fallback.exteriorAttenuationColour = float3(1.0f, 1.0f, 1.0f);
+	fallback.exteriorAttenuationDistance = FLT_MAX;
 	fallback.subsurfaceColour = float3(1.0f, 1.0f, 1.0f);
 	fallback.subsurfaceWeightTexture = INVALIDDESCRIPTORHANDLE;
 	fallback.subsurfaceColourTexture = INVALIDDESCRIPTORHANDLE;

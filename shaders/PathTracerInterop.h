@@ -233,6 +233,11 @@ struct MaterialData
 	// the medium. FLT_MAX or more: no absorption (always, while KHR_materials_volume is not loaded).
 	float3 attenuationColour;
 	float attenuationDistance;
+	// Not thin-walled only: the medium on the side the triangle's normal faces, in the same terms, for an
+	// interface inside a medium (pbrt's medium_interface: a teapot's glass where the tea touches it). FLT_MAX
+	// or more: air, as for every surface without one.
+	float3 exteriorAttenuationColour;
+	float exteriorAttenuationDistance;
 	// OpenPBR subsurface from EXT_materials_subsurface, coloured by the base colour. Thin-walled: split
 	// between reflection and diffuse transmission to the other side by subsurfaceScatterAnisotropy.
 	// Solid: a scattering medium under the surface whose multiple-scattering albedo is the colour.
@@ -287,7 +292,7 @@ struct MaterialData
 // base's diffuse and specular lobes (SimplifyMaterial). Set at upload, see IsSimpleMaterial.
 #define GPU_MATERIAL_SIMPLE (1u << 24)
 
-// One MaterialData per row of a StructuredBuffer, packed to 144 bytes: the factors as halves (x in the
+// One MaterialData per row of a StructuredBuffer, packed to 152 bytes: the factors as halves (x in the
 // low 16 bits), the coat's [0, 1] weight and roughness as unorm8, the texture indices whole, since the
 // descriptor heap holds up to a million of them. The fields are MaterialData's; PackGpuMaterial and LoadGpuMaterial
 // (Resources.slang) convert.
@@ -322,6 +327,7 @@ struct GpuMaterial
 	uint2 specularColourWeight; // half4: colour, then weight
 	uint specularTexture;
 	uint specularColourTexture;
+	uint2 exteriorAttenuation; // half4 like attenuation
 };
 
 #ifdef __cplusplus
@@ -372,6 +378,11 @@ inline GpuMaterial PackGpuMaterial(const MaterialData &m)
 	p.specularColourWeight = uint2(pair(m.specularColour.x, m.specularColour.y), pair(m.specularColour.z, m.specularWeight));
 	p.specularTexture = m.specularTexture;
 	p.specularColourTexture = m.specularColourTexture;
+	p.exteriorAttenuation = uint2(pair(m.exteriorAttenuationColour.x, m.exteriorAttenuationColour.y),
+								  half(m.exteriorAttenuationColour.z) |
+										  ((m.exteriorAttenuationDistance > 65504.0f ? infinity
+																					 : half(m.exteriorAttenuationDistance))
+										   << 16));
 	return p;
 }
 
@@ -428,6 +439,9 @@ inline MaterialData UnpackGpuMaterial(const GpuMaterial &p)
 	m.specularWeight = hi(p.specularColourWeight.y);
 	m.specularTexture = p.specularTexture;
 	m.specularColourTexture = p.specularColourTexture;
+	m.exteriorAttenuationColour =
+			float3(lo(p.exteriorAttenuation.x), hi(p.exteriorAttenuation.x), lo(p.exteriorAttenuation.y));
+	m.exteriorAttenuationDistance = hi(p.exteriorAttenuation.y);
 	return m;
 }
 
@@ -608,7 +622,7 @@ struct AutoExposureConstants
 static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
 static_assert(sizeof(FrameConstants) == 640,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
-static_assert(sizeof(GpuMaterial) == 144,"GpuMaterial must match the structured buffer stride");
+static_assert(sizeof(GpuMaterial) == 152,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
 static_assert(sizeof(GpuCameraGuides) == 48 && sizeof(GpuSpecularChain) == 76 && sizeof(GpuChainEnd) == 48 &&

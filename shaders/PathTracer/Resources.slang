@@ -135,6 +135,8 @@ MaterialData LoadGpuMaterial(uint index)
     float2 emissive = UnpackMaterialHalves(p.emissiveFlags.x);
     float2 attenuation0 = UnpackMaterialHalves(p.attenuation.x);
     float2 attenuation1 = UnpackMaterialHalves(p.attenuation.y);
+    float2 exteriorAttenuation0 = UnpackMaterialHalves(p.exteriorAttenuation.x);
+    float2 exteriorAttenuation1 = UnpackMaterialHalves(p.exteriorAttenuation.y);
     float2 subsurfaceColour0 = UnpackMaterialHalves(p.subsurfaceColourWeight.x);
     float2 subsurfaceColour1 = UnpackMaterialHalves(p.subsurfaceColourWeight.y);
     float2 subsurfaceRadius0 = UnpackMaterialHalves(p.subsurfaceRadiusAnisotropy.x);
@@ -162,6 +164,8 @@ MaterialData LoadGpuMaterial(uint index)
     m.emissiveTexture = p.emissiveTexture;
     m.attenuationColour = float3(attenuation0, attenuation1.x);
     m.attenuationDistance = attenuation1.y;
+    m.exteriorAttenuationColour = float3(exteriorAttenuation0, exteriorAttenuation1.x);
+    m.exteriorAttenuationDistance = exteriorAttenuation1.y;
     m.subsurfaceColour = float3(subsurfaceColour0, subsurfaceColour1.x);
     m.subsurfaceWeight = subsurfaceColour1.y;
     m.subsurfaceWeightTexture = p.subsurfaceWeightTexture;

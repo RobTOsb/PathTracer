@@ -266,11 +266,16 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         {
             // The last segment takes no BSDF sample, which leaves NEE as the only strategy there.
             float w = ls.lightSamplingOnly || lastSegment ? 1.0 : PowerHeuristic(ls.pdf, bsdfPdf);
-            bool intoMedium = !opaque && dot(ls.direction, hit.Ng) < 0.0 && !mat.geometryThinWalled;
+            // A solid's own medium is on the far side of Ng, and an interface inside a medium has one on the near side.
+            bool solid = !opaque && !mat.geometryThinWalled;
+            float3 shadowExtinction = !solid ? float3(0.0, 0.0, 0.0)
+                                      : dot(ls.direction, hit.Ng) < 0.0 ? extinction
+                                                                         : ExteriorExtinction(hit.materialId);
             // The sun is FLT_MAX away. Capped, so a zero extinction cannot meet an overflowed distance
             // (0 * inf) once the compiler folds exp's log2(e) into it; any medium is far shorter.
-            float3 shadowTransmittance = intoMedium ? exp(-extinction * min(ls.distance, MAX_MEDIUM_DISTANCE))
-                                                    : AtmosphereTransmittance(ls.distance);
+            float3 shadowTransmittance = any(shadowExtinction > 0.0)
+                                             ? exp(-shadowExtinction * min(ls.distance, MAX_MEDIUM_DISTANCE))
+                                             : AtmosphereTransmittance(ls.distance);
             // Clamped unshadowed, which the shadow ray's visibility (at most 1) only scales down.
             neeContribution = ClampFirefly(throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf), false, visible);
             traceShadowRay = true;
@@ -378,8 +383,13 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         // Surface curvature is ignored. The cap stops a tiny pdf from making the width infinite.
         cone.spread = min(cone.spread + g_Frame.rayConeBsdfSpread * SampledConeSpread(bs.pdf / lobeProbability), PI);
 
-        // Heading into the object means travelling through its medium until the next hit.
-        segmentExtinction = dot(bs.wi, hit.Ng) < 0.0 ? extinction : float3(0.0, 0.0, 0.0);
+        // Heading into the object means travelling through its medium until the next hit, and leaving it
+        // through the medium outside, air unless the surface is an interface inside one (the tea against a
+        // teapot's glass). Opaque and thin-walled frames face the viewer, so only solid glass has an outside.
+        if (dot(bs.wi, hit.Ng) < 0.0)
+            segmentExtinction = extinction;
+        else
+            segmentExtinction = opaque || mat.geometryThinWalled ? float3(0.0, 0.0, 0.0) : ExteriorExtinction(hit.materialId);
         dir = bs.wi;
     }
     // Lights the next segment finds come at full weight if this vertex left them to its BSDF sample, or,

@@ -446,6 +446,14 @@ float3 MediumExtinction(OpenPBRBaseParams p)
     return -log(max(p.transmissionColour, 1.0e-4)) / p.transmissionDepth;
 }
 
+float3 ExteriorExtinction(uint materialIndex)
+{
+    MaterialData material = LoadGpuMaterial(materialIndex);
+    if (!(material.exteriorAttenuationDistance < FLT_MAX))
+        return float3(0.0, 0.0, 0.0);
+    return -log(max(material.exteriorAttenuationColour, 1.0e-4)) / material.exteriorAttenuationDistance;
+}
+
 // Base colour and alpha at a candidate hit, for the any-hit shaders and the inline shadow query.
 float4 LoadBaseColourAlpha(MaterialData material, float2 uv)
 {
