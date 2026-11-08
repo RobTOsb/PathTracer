@@ -349,6 +349,8 @@ public:
 		return boundsMax_;
 	}
 
+	void CollectPhotonCasters(float maxRoughness, std::vector<std::pair<float3, float3>> &bounds) const;
+
 private:
 	// One TLAS instance: a primitive of a scene instance's mesh.
 	struct TLASInstanceRef
@@ -559,6 +561,11 @@ private:
 	std::vector<ResourceHandle> textures_;
 	// Per GpuMaterial row; decides the geometry flags of each BLAS that uses it.
 	std::vector<MaterialGeometryFlags> materialGeometry_;
+	// Per GpuMaterial row, the roughness factor of its smoothest lobe that can make a caustic (CollectPhotonCasters),
+	// FLT_MAX for none.
+	std::vector<float> materialCasterRoughness_;
+	// Per primitiveDescs row, its object-space bounds (min, max), kept from the vertices before ReleaseStaging.
+	std::vector<std::pair<float3, float3>> primitiveBounds_;
 	uint64_t pendingUploadBytes_ = 0;
 	SceneCacheWriter *cacheWriter_ = nullptr; // during a BuildGPUScene that writes a cache
 	double mipBuildMs_ = 0.0; // CPU time spent filtering texture mips during the last BuildGPUScene

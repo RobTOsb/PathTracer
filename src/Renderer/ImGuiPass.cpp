@@ -455,6 +455,39 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::DragFloat("Intensity", &sun.intensity, 0.05f, 0.0f, 1000.0f, "%.2f");
 	}
 
+	if (ImGui::CollapsingHeader("Caustic photons", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		PhotonSettings &photons = settings_.photons;
+		ImGui::Checkbox("Enabled##photons", &photons.enabled);
+		ImGui::SetItemTooltip("Sun photons through smooth glass and mirrors into a hash grid, read at the first diffuse "
+							  "surface the camera sees (also through glass and mirrors). The sun disc found through "
+							  "glass after that surface is left out, so it is not counted twice");
+		ImGui::BeginDisabled(!photons.enabled);
+		ImGui::SliderInt("Photons per frame", &photons.photonsPerFrame, 1024, 4194304, "%d", ImGuiSliderFlags_Logarithmic);
+		ImGui::SliderFloat("Cell size (pixels)", &photons.cellPixels, 0.1f, 32.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Sharper caustics when smaller, noisier too");
+		ImGui::SliderFloat("Blend##photons", &photons.blend, 0.01f, 1.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Weight of a new frame in each cell's running average: smaller is smoother and lags more");
+		ImGui::SliderFloat("Min photons per cell", &photons.minPhotons, 0.5f, 128.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Cells averaging fewer photons a frame give way to cells 4 times wider: higher is smoother "
+							  "and blurrier where light is sparse");
+		ImGui::SliderFloat("Min blend##photons", &photons.minBlend, 0.001f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Running average weight for the sparsest cells: cells averaging fewer than 'Min photons per "
+							  "cell' blend more slowly, down to this. Smaller is calmer where light is sparse, and lags more");
+		ImGui::SliderFloat("Min wide photons", &photons.minWidePhotons, 0.0f, 16.0f, "%.2f");
+		ImGui::SetItemTooltip("Photons a frame the 4 times wider cells must average for full brightness: sparser light, "
+							  "spread thin far from its caster, fades out instead of sparkling. 0 = no fade");
+		ImGui::SliderFloat("Max roughness##photons", &photons.maxRoughness, 0.0f, 0.5f, "%.2f");
+		ImGui::SetItemTooltip("Lobes up to this perceptual roughness pass photons; materials up to it cast caustics");
+		ImGui::SliderInt("Max bounces##photons", &photons.maxBounces, 1, 16);
+		ImGui::SliderInt("Evict after (frames)", &photons.evictFrames, 8, 1000, "%d", ImGuiSliderFlags_Logarithmic);
+		if (ImGui::Button("Clear grid"))
+		{
+			++photons.resetCount;
+		}
+		ImGui::EndDisabled();
+	}
+
 	if (scene_.HasAnimation() && ImGui::CollapsingHeader("Animation", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		AnimationSettings &animation = settings_.animation;

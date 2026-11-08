@@ -1011,6 +1011,26 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene, const std::fil
 
 void RenderGPUScene::ReleaseStaging()
 {
+	// The caustic photons aim at primitives by their bounds, which need the vertices.
+	primitiveBounds_.assign(primitiveDescs.size(), { float3{ 0.0f, 0.0f, 0.0f }, float3{ 0.0f, 0.0f, 0.0f } });
+	for (size_t p = 0; p < primitiveDescs.size(); ++p)
+	{
+		const PrimitiveGPUDesc &desc = primitiveDescs[p];
+		if (desc.vertexCount == 0 || static_cast<uint64_t>(desc.vertexOffset) + desc.vertexCount > vertices_.size())
+		{
+			continue;
+		}
+		float3 lo = vertices_[desc.vertexOffset].position;
+		float3 hi = lo;
+		for (uint32_t v = 1; v < desc.vertexCount; ++v)
+		{
+			const float3 &q = vertices_[desc.vertexOffset + v].position;
+			lo = { std::min(lo.x, q.x), std::min(lo.y, q.y), std::min(lo.z, q.z) };
+			hi = { std::max(hi.x, q.x), std::max(hi.y, q.y), std::max(hi.z, q.z) };
+		}
+		primitiveBounds_[p] = { lo, hi };
+	}
+
 	// The GPU has its own copies now.
 	std::vector<GpuVertex>().swap(vertices_);
 	for (std::vector<uint32_t> *stream: { &indices_, &meshletData_, &meshletVertices_, &meshletTriangles_ })
@@ -1989,6 +2009,8 @@ void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMater
 	std::vector<GpuMaterial> materials = sourceMaterials;
 	materialGeometry_.clear();
 	materialGeometry_.reserve(materials.size());
+	materialCasterRoughness_.clear();
+	materialCasterRoughness_.reserve(materials.size());
 	for (GpuMaterial &packed: materials)
 	{
 		// Clamped here rather than baked, so cached scenes get it too.
@@ -2004,6 +2026,21 @@ void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMater
 			packed.emissiveFlags.y |= GPU_MATERIAL_SIMPLE;
 		}
 		materialGeometry_.push_back(MaterialGeometryFlags(material));
+		// Solid glass refracts and metal mirrors. Thin-walled materials cast none at all (TracePhoton stops photons at
+		// their lobes): a pane lets light straight through, which is direct light, and its glints are left out.
+		float casterRoughness = FLT_MAX;
+		if ((material.transmissionFlags & TRANSMISSION_THIN_WALLED) == 0)
+		{
+			if (material.transmission > 0.0f || material.metallic >= 0.5f)
+			{
+				casterRoughness = material.roughness;
+			}
+			if (material.coatWeight > 0.0f)
+			{
+				casterRoughness = std::min(casterRoughness, material.coatRoughness);
+			}
+		}
+		materialCasterRoughness_.push_back(casterRoughness);
 	}
 
 	materialBuffer_ = UploadStream(materials.data(),
@@ -2012,6 +2049,37 @@ void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMater
 								   "Scene_Materials",
 								   batch);
 	materialBufferIndex_ = renderContext_->GetResourceViewInfo(materialBuffer_).descriptorIndex;
+}
+
+void RenderGPUScene::CollectPhotonCasters(float maxRoughness, std::vector<std::pair<float3, float3>> &bounds) const
+{
+	bounds.clear();
+	if (primitiveBounds_.size() != primitiveDescs.size())
+	{
+		return;
+	}
+	for (const TLASInstanceRef &ref: EnumerateTLASInstances())
+	{
+		const uint32_t material = primitiveDescs[ref.primitive].materialIndex;
+		if (material >= materialCasterRoughness_.size() || !(materialCasterRoughness_[material] <= maxRoughness))
+		{
+			continue;
+		}
+		const auto &[lo, hi] = primitiveBounds_[ref.primitive];
+		const float *m = instances[ref.instance].worldMatrix;
+		float3 worldLo = { FLT_MAX, FLT_MAX, FLT_MAX };
+		float3 worldHi = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+		for (uint32_t corner = 0; corner < 8; ++corner)
+		{
+			const float3 w = TransformPoint(m,
+											(corner & 1) != 0 ? hi.x : lo.x,
+											(corner & 2) != 0 ? hi.y : lo.y,
+											(corner & 4) != 0 ? hi.z : lo.z);
+			worldLo = { std::min(worldLo.x, w.x), std::min(worldLo.y, w.y), std::min(worldLo.z, w.z) };
+			worldHi = { std::max(worldHi.x, w.x), std::max(worldHi.y, w.y), std::max(worldHi.z, w.z) };
+		}
+		bounds.emplace_back(worldLo, worldHi);
+	}
 }
 
 void RenderGPUScene::UpdateInstances(const Scene::GLTFScene &scene)

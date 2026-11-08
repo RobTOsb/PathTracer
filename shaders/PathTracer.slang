@@ -13,6 +13,7 @@ import PathTracer.Psr;
 import PathTracer.CameraState;
 import PathTracer.GlassSplit;
 import PathTracer.Subsurface;
+import PathTracer.Photons;
 
 static const uint RR_START_BOUNCE = 1;
 // Longest path through a medium that absorption is evaluated over
@@ -37,8 +38,28 @@ static const uint PATH_DIFFUSE_BOUNCES_MASK = 0xF;
 static const uint PATH_MIRROR_SEGMENT = 0x2000;
 // A chain ended on a specular reflection, so the next hit gives the hit distance of the surface it ended on.
 static const uint PATH_END_HIT_PENDING = 0x8000;
-static const uint PATH_SPLITS_SHIFT = 16; // glass splits so far, 8 bits
-static const uint PATH_SPLITS_MASK = 0xFF;
+static const uint PATH_SPLITS_SHIFT = 16; // glass splits so far, 7 bits
+static const uint PATH_SPLITS_MASK = 0x7F;
+// Caustic photons (PathTracer/Photons.slang): where the path stands towards them, two bits (14 and 23) of PHOTON_*.
+static const uint PATH_PHOTON_LOW = 0x4000;
+static const uint PATH_PHOTON_HIGH = 0x800000;
+static const uint PHOTON_NONE = 0;
+// Only smooth surfaces since the camera: the next surface with a diffuse part reads the photons.
+static const uint PHOTON_CAMERA = 1;
+// The surface that read them scattered diffusely, and only pass-throughs since.
+static const uint PHOTON_ARMED = 2;
+// And smooth surfaces since: the sunlight the path finds now is what the photons brought, so it is left out.
+static const uint PHOTON_COVERED = 3;
+
+uint PhotonState(uint flags)
+{
+    return ((flags >> 14) & 1u) | ((flags >> 22) & 2u);
+}
+
+uint SetPhotonState(uint flags, uint state)
+{
+    return (flags & ~(PATH_PHOTON_LOW | PATH_PHOTON_HIGH)) | ((state & 1u) << 14) | ((state & 2u) << 22);
+}
 
 // The lobes whose samples spend the diffuse bounce budget, the others spend the specular one.
 static const uint DIFFUSE_BOUNCE_LOBES = LOBE_DIFFUSE | LOBE_DIFFUSE_TRANSMISSION | LOBE_SUBSURFACE | LOBE_FUZZ;
@@ -253,6 +274,18 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     mat = UnpackMaterial(packedMat, SIMPLE);
     ctx = OpenPBRSetup(mat, wo);
     float3 extinction = MediumExtinction(mat);
+
+    // Caustics: the first surface with a diffuse part on a camera path that met only smooth ones reflects the photons'
+    // irradiance by its diffuse albedo, under its specular reflection.
+    const uint photonState = PhotonState(flags);
+    if (photonState == PHOTON_CAMERA && ctx.probDiffuse > 0.0)
+    {
+        PrimaryGuides reflectance = (PrimaryGuides)0;
+        ReflectanceGuides(mat, ctx, wo, reflectance);
+        float3 albedo = reflectance.diffuseAlbedo * saturate(1.0 - reflectance.specularAlbedo);
+        float3 n = dot(hit.Ng, wo) >= 0.0 ? hit.Ng : -hit.Ng;
+        radiance += throughput * albedo * (1.0 / PI) * LookUpPhotonIrradiance(hit.position, n, Rand3(rng).xy);
+    }
     bool deltaTransmission = HasDeltaTransmission(mat);
     float3 neeContribution = float3(0.0, 0.0, 0.0);
     bool traceShadowRay = false;
@@ -396,6 +429,20 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     // through a pass-through wall, if the vertex the segment continues from did.
     // From the camera, which sampled none, lights come at full weight too.
     flags = SetFlag(flags, DEFERRED_SMOOTH_SEGMENT, passThrough ? smoothSegment || fromCamera : !sampleLights);
+    // The photons' part of the path: a pass-through keeps it; a smooth lobe keeps the camera's chain going, or covers what
+    // a diffuse bounce from where the photons were read goes on to find; anything else ends it. Thin-walled surfaces
+    // cast no photons (TracePhoton), so they cover nothing: the sunlight found past one is the path tracer's to count.
+    // The camera may still see caustics in them.
+    if (photonState != PHOTON_NONE && !passThrough)
+    {
+        bool smooth = continuePath && PhotonSmoothLobe(ctx, lobe);
+        uint next = PHOTON_NONE;
+        if (photonState == PHOTON_CAMERA)
+            next = smooth ? PHOTON_CAMERA : lobe == LOBE_DIFFUSE ? PHOTON_ARMED : PHOTON_NONE;
+        else
+            next = smooth && !mat.geometryThinWalled ? PHOTON_COVERED : PHOTON_NONE;
+        flags = SetPhotonState(flags, next);
+    }
 
     // DLSS-RR guides: the primary surface, or the first surface past the mirrors and glass in front
     // of it. A surface that takes another lobe, or ends the path, ends the chain on itself.
@@ -581,7 +628,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
 // The DLSS-RR guides come out in g_CameraState, see FinishGuides.
 float3 TracePath(float3 origin, float3 dir, inout uint rng)
 {
-    uint flags = PATH_FROM_CAMERA;
+    uint flags = SetPhotonState(PATH_FROM_CAMERA, g_Frame.photons.enabled != 0 ? PHOTON_CAMERA : PHOTON_NONE);
     uint2 segmentMedium = SEGMENT_MEDIUM_AIR;
 
     float3 radiance = float3(0.0, 0.0, 0.0);
@@ -662,7 +709,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 {
                     // The sky is never light sampled, so BSDF sampling gets its full contribution. The sun disc is
                     // also reached by NEE, so weight it against light sampling.
-                    float3 Lsun = SunRadiance(dir);
+                    // The sun through glass after a diffuse bounce from where the photons were read is theirs.
+                    float3 Lsun = PhotonState(flags) == PHOTON_COVERED ? float3(0.0, 0.0, 0.0) : SunRadiance(dir);
                     if (any(Lsun > 0.0))
                         Lsun *= fromCamera || smoothSegment ? 1.0 : PowerHeuristic(prevBsdfPdf, LightPdf(origin, dir, hit));
                     float3 sky = SkyRadiance(origin, dir, Lsun, fromCamera || chainActive, rng);
@@ -729,6 +777,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         // Glass splits only where the camera sees, so every bounce before the branch is specular.
         flags &= ~(DEFERRED_MASK | PATH_HIT_DISTANCE_PENDING | PATH_END_HIT_PENDING |
                    (PATH_DIFFUSE_BOUNCES_MASK << PATH_DIFFUSE_BOUNCES_SHIFT));
+        // Both branches leave the glass the camera sees by a smooth lobe.
+        flags = SetPhotonState(flags, g_Frame.photons.enabled != 0 ? PHOTON_CAMERA : PHOTON_NONE);
         if ((deferredFlags & DEFERRED_REFLECTION) != 0)
         {
             // Solid glass's reflection leaves the surface the camera saw.
@@ -864,6 +914,23 @@ void ResolveBlendGuides(inout CameraState s, float3 origin)
 #endif
 
 // Entry points
+
+// Caustic photons from the sun into the hash grid (PathTracer/Photons.slang), one per thread, rows of
+// PHOTON_DISPATCH_WIDTH.
+[shader("raygeneration")]
+void PhotonRayGen()
+{
+#ifdef OPACITY_MICROMAPS
+    AllowOpacityMicromapsInRayQueries();
+#endif
+    uint index = DispatchRaysIndex().y * DispatchRaysDimensions().x + DispatchRaysIndex().x;
+    if (index >= g_Frame.photons.photonCount)
+        return;
+    uint rng = RngInit(g_Frame.frameIndex);
+    float3 origin, dir, power;
+    if (EmitSunPhoton(rng, origin, dir, power))
+        TracePhoton(origin, dir, power, rng);
+}
 
 [shader("raygeneration")]
 void RayGen()

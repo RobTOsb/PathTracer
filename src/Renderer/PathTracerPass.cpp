@@ -84,6 +84,21 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 	{
 		constants = renderContext->CreateConstantBuffer(sizeof(FrameConstants), "PathTracer_FrameConstants");
 	}
+
+	photonResolvePipeline_ = renderContext->CreateComputePipeline(PATHTRACER_SHADER_DIR "PhotonResolve.slang", "ResolvePhotons");
+	if (photonResolvePipeline_ == InvalidPipelineHandle)
+	{
+		throw std::runtime_error("Failed to create the photon resolve pipeline (see the shader log above).");
+	}
+	BufferDesc rectDesc = {};
+	rectDesc.sizeInBytes = PHOTON_MAX_RECTS * sizeof(GpuPhotonRect);
+	rectDesc.structureByteStride = sizeof(GpuPhotonRect);
+	rectDesc.debugName = "PathTracer_PhotonRects";
+	photonRects_.resize(renderContext->GetFramesInFlight());
+	for (ResourceHandle &rects: photonRects_)
+	{
+		rects = renderContext->CreateUploadBuffer(rectDesc, ResourceViewType::ShaderResource);
+	}
 }
 
 PathTracerPass::~PathTracerPass()
@@ -99,7 +114,10 @@ PathTracerPass::~PathTracerPass()
 								  guides_.shadowChanges,
 								  cameraState_,
 								  deferredBranches_,
-								  accumulation_ })
+								  accumulation_,
+								  photonGridKeys_,
+								  photonGridAccum_,
+								  photonGridCache_ })
 	{
 		if (target != InvalidResourceHandle)
 		{
@@ -109,6 +127,10 @@ PathTracerPass::~PathTracerPass()
 	for (ResourceHandle constants: frameConstants_)
 	{
 		renderContext_->DestroyResource(constants);
+	}
+	for (ResourceHandle rects: photonRects_)
+	{
+		renderContext_->DestroyResource(rects);
 	}
 }
 
@@ -165,7 +187,7 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 														 bool inlineShadows, bool opacityMicromaps, bool psr) const
 {
 	RaytracingPipelineDesc desc = {};
-	desc.exports = { "RayGen", "Miss", "ClosestHit", "AnyHit" };
+	desc.exports = { "RayGen", "PhotonRayGen", "Miss", "ClosestHit", "AnyHit" };
 	desc.hitGroups = { RaytracingHitGroup{ "HitGroup", "ClosestHit", "AnyHit", "" } };
 	// Inline shadow rays are ray queries, so that permutation has no shadow shaders.
 	if (!inlineShadows)
@@ -218,18 +240,181 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 		return result;
 	}
 
-	result.shaderTable = renderContext_->CreateShaderTable(result.pipeline);
-	renderContext_->AddRayGenShaderRecord(result.shaderTable, "RayGen");
-	// Record order matches STANDARD_RAY_INDEX and SHADOW_RAY_INDEX in PathTracer/RayTracing.slang.
-	renderContext_->AddMissShaderRecord(result.shaderTable, "Miss");
-	renderContext_->AddHitGroupShaderRecord(result.shaderTable, "HitGroup");
-	if (!inlineShadows)
+	// The paths' table and the photons', which differ only in their ray generation shader.
+	auto createTable = [&](const char *rayGen)
 	{
-		renderContext_->AddMissShaderRecord(result.shaderTable, "ShadowMiss");
-		renderContext_->AddHitGroupShaderRecord(result.shaderTable, "ShadowHitGroup");
-	}
-	renderContext_->BuildShaderTable(result.shaderTable);
+		ShaderTableHandle table = renderContext_->CreateShaderTable(result.pipeline);
+		renderContext_->AddRayGenShaderRecord(table, rayGen);
+		// Record order matches STANDARD_RAY_INDEX and SHADOW_RAY_INDEX in PathTracer/RayTracing.slang.
+		renderContext_->AddMissShaderRecord(table, "Miss");
+		renderContext_->AddHitGroupShaderRecord(table, "HitGroup");
+		if (!inlineShadows)
+		{
+			renderContext_->AddMissShaderRecord(table, "ShadowMiss");
+			renderContext_->AddHitGroupShaderRecord(table, "ShadowHitGroup");
+		}
+		renderContext_->BuildShaderTable(table);
+		return table;
+	};
+	result.shaderTable = createTable("RayGen");
+	result.photonShaderTable = createTable("PhotonRayGen");
 	return result;
+}
+
+void PathTracerPass::PreparePhotons(FrameConstants &constants, bool sunActive, float sunAngularRadius)
+{
+	const PhotonSettings &settings = settings_.photons;
+	constants.photons = {};
+	if (!settings.enabled || !sunActive)
+	{
+		return;
+	}
+	const float maxRoughness = std::clamp(settings.maxRoughness, 0.0f, 1.0f);
+	scene_.CollectPhotonCasters(maxRoughness, photonCasters_);
+	if (photonCasters_.empty())
+	{
+		return;
+	}
+
+	// The plane perpendicular to the sun, photons starting on it above the whole scene so that nothing is skipped.
+	const float3 s = constants.sunDirection;
+	const float3 helper = fabsf(s.y) < 0.99f ? float3{ 0.0f, 1.0f, 0.0f } : float3{ 1.0f, 0.0f, 0.0f };
+	float3 u = Cross(helper, s);
+	NormaliseFloat3(u);
+	const float3 v = Cross(s, u);
+	const float3 sceneLo = scene_.GetBoundsMin();
+	const float3 sceneHi = scene_.GetBoundsMax();
+	const float3 sceneExtent = sceneHi - sceneLo;
+	const float sceneDiagonal = std::max(sqrtf(Dot(sceneExtent, sceneExtent)), 1.0e-3f);
+	float planeHeight = -FLT_MAX;
+	for (uint32_t corner = 0; corner < 8; ++corner)
+	{
+		const float3 c = { (corner & 1) != 0 ? sceneHi.x : sceneLo.x,
+						   (corner & 2) != 0 ? sceneHi.y : sceneLo.y,
+						   (corner & 4) != 0 ? sceneHi.z : sceneLo.z };
+		planeHeight = std::max(planeHeight, Dot(c, s));
+	}
+	planeHeight += 0.01f * sceneDiagonal;
+	// Directions across the sun disc drift sideways on the way down, which the rectangles widen for.
+	const float spread = tanf(std::min(sunAngularRadius, 0.5f));
+
+	// One rectangle per caster, or one around them all past PHOTON_MAX_RECTS.
+	photonRectData_.clear();
+	auto addRect = [&](const float3 &lo, const float3 &hi)
+	{
+		float2 a = { FLT_MAX, FLT_MAX };
+		float2 b = { -FLT_MAX, -FLT_MAX };
+		float lowest = FLT_MAX;
+		for (uint32_t corner = 0; corner < 8; ++corner)
+		{
+			const float3 c = { (corner & 1) != 0 ? hi.x : lo.x, (corner & 2) != 0 ? hi.y : lo.y, (corner & 4) != 0 ? hi.z : lo.z };
+			const float pu = Dot(c, u);
+			const float pv = Dot(c, v);
+			a = { std::min(a.x, pu), std::min(a.y, pv) };
+			b = { std::max(b.x, pu), std::max(b.y, pv) };
+			lowest = std::min(lowest, Dot(c, s));
+		}
+		const float margin = (planeHeight - lowest) * spread + 1.0e-4f * sceneDiagonal;
+		GpuPhotonRect rect = {};
+		rect.lo = { a.x - margin, a.y - margin };
+		rect.hi = { b.x + margin, b.y + margin };
+		photonRectData_.push_back(rect);
+	};
+	if (photonCasters_.size() <= PHOTON_MAX_RECTS)
+	{
+		for (const auto &[lo, hi]: photonCasters_)
+		{
+			addRect(lo, hi);
+		}
+	}
+	else
+	{
+		float3 lo = photonCasters_[0].first;
+		float3 hi = photonCasters_[0].second;
+		for (const auto &[casterLo, casterHi]: photonCasters_)
+		{
+			lo = { std::min(lo.x, casterLo.x), std::min(lo.y, casterLo.y), std::min(lo.z, casterLo.z) };
+			hi = { std::max(hi.x, casterHi.x), std::max(hi.y, casterHi.y), std::max(hi.z, casterHi.z) };
+		}
+		addRect(lo, hi);
+	}
+	double totalArea = 0.0;
+	for (const GpuPhotonRect &rect: photonRectData_)
+	{
+		totalArea += static_cast<double>(rect.hi.x - rect.lo.x) * (rect.hi.y - rect.lo.y);
+	}
+	if (!(totalArea > 0.0))
+	{
+		return;
+	}
+	double cdf = 0.0;
+	for (GpuPhotonRect &rect: photonRectData_)
+	{
+		cdf += static_cast<double>(rect.hi.x - rect.lo.x) * (rect.hi.y - rect.lo.y);
+		rect.cdf = static_cast<float>(cdf / totalArea);
+	}
+	photonRectData_.back().cdf = 2.0f; // past any u
+
+	const ResourceHandle rects = photonRects_[renderContext_->GetCurrentFrameIndex()];
+	renderContext_->UpdateUploadBuffer(rects, photonRectData_.data(), 0, photonRectData_.size() * sizeof(GpuPhotonRect));
+
+	// The grid, on first use: 2^21 rows of 4 + 16 + 16 bytes.
+	if (photonGridKeys_ == InvalidResourceHandle)
+	{
+		auto create = [&](uint32_t stride, const char *debugName)
+		{
+			BufferDesc desc = {};
+			desc.sizeInBytes = static_cast<uint64_t>(PHOTON_GRID_CAPACITY) * stride;
+			desc.structureByteStride = stride;
+			desc.usageFlags = ResourceUsageFlags::UnorderedAccess;
+			desc.debugName = debugName;
+			return renderContext_->CreateBuffer(desc, ResourceViewType::UnorderedAccess);
+		};
+		photonGridKeys_ = create(sizeof(uint32_t), "PathTracer_PhotonGridKeys");
+		photonGridAccum_ = create(4 * sizeof(uint32_t), "PathTracer_PhotonGridAccum");
+		photonGridCache_ = create(4 * sizeof(float), "PathTracer_PhotonGridCache");
+		photonGridValid_ = false;
+	}
+
+	const float3 irradiance = settings_.sun.colour * settings_.sun.intensity;
+	const float peak = std::max({ irradiance.x, irradiance.y, irradiance.z });
+	const uint photonCount = static_cast<uint>(std::clamp(settings.photonsPerFrame, 1, 1 << 24));
+	PhotonParameters &photons = constants.photons;
+	photons.basisU = u;
+	photons.basisV = v;
+	photons.planeHeight = planeHeight;
+	photons.totalArea = static_cast<float>(totalArea);
+	photons.enabled = 1;
+	photons.rectCount = static_cast<uint>(photonRectData_.size());
+	photons.rects = renderContext_->GetResourceViewInfo(rects).descriptorIndex;
+	photons.photonCount = photonCount;
+	photons.gridKeys = renderContext_->GetResourceViewInfo(photonGridKeys_).descriptorIndex;
+	photons.gridAccum = renderContext_->GetResourceViewInfo(photonGridAccum_).descriptorIndex;
+	photons.gridCache = renderContext_->GetResourceViewInfo(photonGridCache_).descriptorIndex;
+	photons.maxBounces = static_cast<uint>(std::clamp(settings.maxBounces, 1, 64));
+	// A photon of the brightest channel over the area per photon counts PHOTON_FIXED_POINT_SCALE units.
+	photons.unitPower = std::max(peak * static_cast<float>(totalArea) / static_cast<float>(photonCount), 1.0e-30f);
+	photons.maxAlpha = maxRoughness * maxRoughness;
+	photons.cellPixels = std::max(settings.cellPixels, 0.1f);
+	photons.minPhotons = std::max(settings.minPhotons, 0.01f);
+	photons.minWidePhotons = std::max(settings.minWidePhotons, 0.0f);
+}
+
+void PathTracerPass::DispatchPhotonResolve(RenderContext *renderContext, bool reset)
+{
+	PhotonResolveConstants resolve = {};
+	resolve.gridKeys = renderContext->GetResourceViewInfo(photonGridKeys_).descriptorIndex;
+	resolve.gridAccum = renderContext->GetResourceViewInfo(photonGridAccum_).descriptorIndex;
+	resolve.gridCache = renderContext->GetResourceViewInfo(photonGridCache_).descriptorIndex;
+	resolve.reset = reset ? 1u : 0u;
+	resolve.unitScale = lastPhotonUnitPower_ / PHOTON_FIXED_POINT_SCALE;
+	resolve.blend = std::clamp(settings_.photons.blend, 0.001f, 1.0f);
+	resolve.evictFrames = static_cast<uint>(std::max(settings_.photons.evictFrames, 1));
+	resolve.minBlend = std::clamp(settings_.photons.minBlend, 0.0001f, resolve.blend);
+	resolve.minPhotons = std::max(settings_.photons.minPhotons, 0.01f);
+	renderContext->SetComputePipeline(photonResolvePipeline_);
+	renderContext->SetCompute32BitConstants(&resolve, sizeof(resolve) / sizeof(uint32_t));
+	renderContext->Dispatch(PHOTON_GRID_CAPACITY / PHOTON_RESOLVE_GROUP_SIZE, 1, 1);
 }
 
 ResourceHandle PathTracerPass::CreateTarget(Format format, const char *debugName) const
@@ -324,8 +509,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.textureLodScale =
 			settings_.rayConeTextureLod ? exp2f(settings_.textureLodBias + upscalerBias) : 0.0f;
 	constants.anisotropicSegments = static_cast<uint>(std::max(settings_.anisotropicSegments, 0));
-	// TracePath counts splits in 8 bits.
-	constants.glassReflectionSplits = static_cast<uint>(std::clamp(settings_.glassReflectionSplits, 0, 255));
+	// TracePath counts splits in 7 bits.
+	constants.glassReflectionSplits = static_cast<uint>(std::clamp(settings_.glassReflectionSplits, 0, 127));
 	constants.indirectClamp = settings_.clampIndirect && approximations ? std::max(settings_.indirectClampValue, 0.0f) : FLT_MAX;
 	constants.directClamp = settings_.clampDirect && approximations ? std::max(settings_.directClampValue, 0.0f) : FLT_MAX;
 	constants.subsurfaceComponents = (settings_.subsurfaceZeroScattering ? SUBSURFACE_ZERO_SCATTERING : 0u) |
@@ -367,6 +552,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		constants.clouds = atmosphere_.GetCloudParameters();
 	}
 	constants.frameIndex = renderContext->GetCurrentFrame();
+	PreparePhotons(constants, sunActive, halfRadius * 2.0f);
 	// TracePath keeps the diffuse bounces in 4 bits, up to one past the budget.
 	constants.maxDiffuseBounces = static_cast<uint>(std::clamp(settings_.maxDiffuseBounces, 0, kMaxBounces));
 	constants.maxSpecularBounces = static_cast<uint>(std::clamp(settings_.maxSpecularBounces, 0, kMaxBounces));
@@ -383,6 +569,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		key.opacityMicromap2StateScene = 0;
 		key.previousScene = 0;
 		key.samplesPerFrame = 0; // the reference's own, set below
+		key.photons.rects = 0; // a buffer per frame in flight
 		const ReferenceSettings &reference = settings_.reference;
 		if (accumulatedSamples_ == 0 || std::memcmp(&key, &accumulationKey_, sizeof(key)) != 0 ||
 			std::memcmp(&atmosphere_.GetParameters(), &accumulationAtmosphere_, sizeof(AtmosphereParameters)) != 0 ||
@@ -432,6 +619,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 
 	renderContext->BeginEvent("PathTracer");
 	renderContext->BeginProfileScope("PathTracer");
+	const bool photons = constants.photons.enabled != 0;
+	lastPhotonUnitPower_ = constants.photons.unitPower;
 
 	// The output, the guides and the camera state, in their u0..u8 register order.
 	const ResourceHandle targets[] = { output_,
@@ -463,51 +652,97 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 										  ResourceAccess::UnorderedAccess);
 	}
 
-	renderContext->SetRaytracingPipeline(pipeline->pipeline);
-	renderContext->SetRaytracingConstantBuffer(0, constantBuffer);
-	renderContext->SetRaytracingSRV(0, scene_.GetTLASSRV(pipeline->opacityMicromaps));
-	// Scene buffers are root SRVs, registers must match PathTracer/Resources.slang.
-	renderContext->SetRaytracingSRV(1, scene_.GetPrimitiveBuffer());
-	renderContext->SetRaytracingSRV(2, scene_.GetStreamBuffer(GPUStream::Index));
-	renderContext->SetRaytracingSRV(3, scene_.GetVertexBuffer());
-	renderContext->SetRaytracingSRV(4, scene_.GetMaterialBuffer());
-	renderContext->SetRaytracingSRV(5, scene_.GetLightBuffer());
-	renderContext->SetRaytracingSRV(6, scene_.GetLightTreeNodeBuffer());
-	renderContext->SetRaytracingSRV(7, scene_.GetLightLeafBuffer());
-	renderContext->SetRaytracingSRV(8, scene_.GetEmitterBuffer());
-	renderContext->SetRaytracingSRV(9, scene_.GetLightTreeParentBuffer());
-	renderContext->SetRaytracingSRV(10, scene_.GetLightTreeLeafLightBuffer());
-	renderContext->SetRaytracingSRV(13, scene_.GetLightPowerBuffer());
-	renderContext->SetRaytracingSRV(14, scene_.GetLightEmitterBuffer());
-	renderContext->SetRaytracingSRV(15, scene_.GetEmissionScaleBuffer());
-	if (rayReconstruction_)
+	// Bound again after the photon resolve, whose compute pipeline replaces the root signature.
+	auto bindRaytracing = [&]()
 	{
-		renderContext->SetRaytracingSRV(16, scene_.GetPreviousTransformBuffer());
+		renderContext->SetRaytracingPipeline(pipeline->pipeline);
+		renderContext->SetRaytracingConstantBuffer(0, constantBuffer);
+		renderContext->SetRaytracingSRV(0, scene_.GetTLASSRV(pipeline->opacityMicromaps));
+		// Scene buffers are root SRVs, registers must match PathTracer/Resources.slang.
+		renderContext->SetRaytracingSRV(1, scene_.GetPrimitiveBuffer());
+		renderContext->SetRaytracingSRV(2, scene_.GetStreamBuffer(GPUStream::Index));
+		renderContext->SetRaytracingSRV(3, scene_.GetVertexBuffer());
+		renderContext->SetRaytracingSRV(4, scene_.GetMaterialBuffer());
+		renderContext->SetRaytracingSRV(5, scene_.GetLightBuffer());
+		renderContext->SetRaytracingSRV(6, scene_.GetLightTreeNodeBuffer());
+		renderContext->SetRaytracingSRV(7, scene_.GetLightLeafBuffer());
+		renderContext->SetRaytracingSRV(8, scene_.GetEmitterBuffer());
+		renderContext->SetRaytracingSRV(9, scene_.GetLightTreeParentBuffer());
+		renderContext->SetRaytracingSRV(10, scene_.GetLightTreeLeafLightBuffer());
+		renderContext->SetRaytracingSRV(13, scene_.GetLightPowerBuffer());
+		renderContext->SetRaytracingSRV(14, scene_.GetLightEmitterBuffer());
+		renderContext->SetRaytracingSRV(15, scene_.GetEmissionScaleBuffer());
+		if (rayReconstruction_)
+		{
+			renderContext->SetRaytracingSRV(16, scene_.GetPreviousTransformBuffer());
+		}
+
+		if (atmosphere)
+		{
+			renderContext->SetRaytracingSRV(11, atmosphere_.GetSkyViewLUT());
+			renderContext->SetRaytracingSRV(12, atmosphere_.GetSceneLighting());
+		}
+
+		for (uint32_t i = 0; i < targetCount; ++i)
+		{
+			renderContext->SetRaytracingUAV(i, targets[i]);
+		}
+		renderContext->SetRaytracingUAV(9, deferredBranches_);
+		if (rayReconstruction_)
+		{
+			renderContext->SetRaytracingUAV(10, guides_.shadowChanges);
+		}
+		if (reference_)
+		{
+			renderContext->TransitionResource(accumulation_,
+											  ResourceLayout::UnorderedAccess,
+											  ResourceSync::Raytracing,
+											  ResourceAccess::UnorderedAccess);
+			renderContext->SetRaytracingUAV(1, accumulation_);
+		}
+	};
+
+	// Caustic photons into the grid, then this frame's deposits into its running averages, before the paths read it.
+	// A grid that photons skipped frames of, or the UI cleared, starts empty.
+	if (!photons)
+	{
+		photonGridValid_ = false;
+	}
+	else
+	{
+		renderContext->BeginProfileScope("Photons");
+		for (ResourceHandle buffer: { photonGridKeys_, photonGridAccum_, photonGridCache_ })
+		{
+			renderContext->TransitionResource(buffer, ResourceLayout::UnorderedAccess, ResourceSync::All, ResourceAccess::UnorderedAccess);
+		}
+		// Last frame's paths read the grid that this frame's photons and resolve write.
+		renderContext->GlobalBarrier(ResourceSync::All, ResourceAccess::UnorderedAccess, ResourceSync::All, ResourceAccess::UnorderedAccess);
+		if (!photonGridValid_ || photonResetCount_ != settings_.photons.resetCount)
+		{
+			DispatchPhotonResolve(renderContext, true);
+			renderContext->GlobalBarrier(ResourceSync::ComputeShading,
+										 ResourceAccess::UnorderedAccess,
+										 ResourceSync::Raytracing,
+										 ResourceAccess::UnorderedAccess);
+			photonGridValid_ = true;
+			photonResetCount_ = settings_.photons.resetCount;
+		}
+		bindRaytracing();
+		const uint32_t rows = (constants.photons.photonCount + PHOTON_DISPATCH_WIDTH - 1) / PHOTON_DISPATCH_WIDTH;
+		renderContext->DispatchRays(pipeline->photonShaderTable, PHOTON_DISPATCH_WIDTH, rows, 1);
+		renderContext->GlobalBarrier(ResourceSync::Raytracing,
+									 ResourceAccess::UnorderedAccess,
+									 ResourceSync::ComputeShading,
+									 ResourceAccess::UnorderedAccess);
+		DispatchPhotonResolve(renderContext, false);
+		renderContext->GlobalBarrier(ResourceSync::ComputeShading,
+									 ResourceAccess::UnorderedAccess,
+									 ResourceSync::Raytracing,
+									 ResourceAccess::UnorderedAccess);
+		renderContext->EndProfileScope();
 	}
 
-	if (atmosphere)
-	{
-		renderContext->SetRaytracingSRV(11, atmosphere_.GetSkyViewLUT());
-		renderContext->SetRaytracingSRV(12, atmosphere_.GetSceneLighting());
-	}
-
-	for (uint32_t i = 0; i < targetCount; ++i)
-	{
-		renderContext->SetRaytracingUAV(i, targets[i]);
-	}
-	renderContext->SetRaytracingUAV(9, deferredBranches_);
-	if (rayReconstruction_)
-	{
-		renderContext->SetRaytracingUAV(10, guides_.shadowChanges);
-	}
-	if (reference_)
-	{
-		renderContext->TransitionResource(accumulation_,
-										  ResourceLayout::UnorderedAccess,
-										  ResourceSync::Raytracing,
-										  ResourceAccess::UnorderedAccess);
-		renderContext->SetRaytracingUAV(1, accumulation_);
-	}
+	bindRaytracing();
 	renderContext->DispatchRays(pipeline->shaderTable, width_, height_, 1);
 
 	renderContext->EndProfileScope();

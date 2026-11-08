@@ -135,6 +135,34 @@ enum class RenderMode
 	Reference, // paths accumulated at the window's resolution without DLSS
 };
 
+// Caustics from sun photons (PathTracer/Photons.slang): traced from the sun through smooth glass and mirrors into a
+// world-space hash grid, read at the first diffuse surface of camera paths.
+struct PhotonSettings
+{
+	bool enabled = true;
+	int photonsPerFrame = 1048576;
+	// Cell size in pixels of footprint at the cell's distance: smaller is sharper and noisier.
+	float cellPixels = 4.0f;
+	// A cell's running average weighs a new frame by at least this: smaller is smoother and lags more.
+	float blend = 0.15f;
+	// Photons a frame a cell must average for its own estimate: sparser light falls back to cells 4 times wider, so a
+	// few stray photons blur instead of speckling.
+	float minPhotons = 8.0f;
+	// Running average weight of a new frame for the sparsest cells: cells averaging fewer than minPhotons blend by
+	// blend scaled down by their photon count, down to this, so they average over more frames.
+	float minBlend = 0.015f;
+	// Photons a frame the cells 4 times wider must average for full brightness; sparser light (spread thin far from
+	// its caster) fades out rather than sparkling. 0 = no fade.
+	float minWidePhotons = 0.5f;
+	// Perceptual roughness up to which a lobe passes photons (and counts as smooth on camera paths), also the
+	// roughness factor up to which a material's primitives are aimed at as casters.
+	float maxRoughness = 0.20f;
+	int maxBounces = 8; // smooth bounces a photon may take
+	int evictFrames = 120; // frames without photons before a cell is emptied
+	// The UI bumps this to empty the grid.
+	uint resetCount = 0;
+};
+
 struct ReferenceSettings
 {
 	int samples = 1024; // paths per pixel to stop at, 0 = never stop
@@ -156,6 +184,7 @@ struct RenderSettings
 	LightSettings lights;
 	AnimationSettings animation;
 	SpecularAASettings specularAA;
+	PhotonSettings photons;
 	AtmosphereSettings atmosphere;
 	CloudSettings clouds;
 

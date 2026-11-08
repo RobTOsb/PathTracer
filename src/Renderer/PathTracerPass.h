@@ -9,6 +9,7 @@
 #include "SkyAtmosphereInterop.h"
 
 #include <chrono>
+#include <utility>
 #include <vector>
 
 class Camera;
@@ -43,6 +44,8 @@ struct PathTracerGuides
 // randomly jittered paths per pixel each frame into an accumulation target and outputs their mean, starting
 // over whenever the camera or anything else the image depends on changes, and stops tracing once it has
 // RenderSettings::reference.samples.
+// With RenderSettings::photons on and a sun, it first traces caustic photons from the sun (PhotonRayGen) into a hash
+// grid and resolves the grid (PhotonResolve.slang), which the paths then read (PathTracer/Photons.slang).
 // Leaves the output and the guides in the UnorderedAccess layout.
 class PathTracerPass final : public RenderPass
 {
@@ -118,6 +121,7 @@ private:
 	{
 		PipelineHandle pipeline = InvalidPipelineHandle;
 		ShaderTableHandle shaderTable = InvalidShaderTableHandle;
+		ShaderTableHandle photonShaderTable = InvalidShaderTableHandle; // PhotonRayGen with the same hit groups
 		bool opacityMicromaps = false; // traces the scene's micromap TLAS
 	};
 
@@ -127,6 +131,9 @@ private:
 	Pipeline CreatePipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps,
 							bool psr) const;
 	ResourceHandle CreateTarget(Format format, const char *debugName) const;
+	// Fills constants.photons for this frame (aiming the sun photons at the casters), enabled or not.
+	void PreparePhotons(FrameConstants &constants, bool sunActive, float sunAngularRadius);
+	void DispatchPhotonResolve(RenderContext *renderContext, bool reset);
 
 	RenderContext *renderContext_ = nullptr;
 	const RenderGPUScene &scene_;
@@ -145,6 +152,18 @@ private:
 	PathTracerGuides guides_;
 	ResourceHandle cameraState_ = InvalidResourceHandle; // GpuCameraState per pixel, DLSS-RR only
 	ResourceHandle deferredBranches_ = InvalidResourceHandle; // GpuDeferredBranch per pixel
+
+	// Caustic photons: the hash grid (created on first use), the caster rectangles per frame in flight.
+	PipelineHandle photonResolvePipeline_ = InvalidPipelineHandle;
+	ResourceHandle photonGridKeys_ = InvalidResourceHandle;
+	ResourceHandle photonGridAccum_ = InvalidResourceHandle;
+	ResourceHandle photonGridCache_ = InvalidResourceHandle;
+	std::vector<ResourceHandle> photonRects_;
+	std::vector<std::pair<float3, float3>> photonCasters_;
+	std::vector<GpuPhotonRect> photonRectData_;
+	bool photonGridValid_ = false; // emptied since it was created, and photons have run every frame since
+	uint photonResetCount_ = 0;
+	float lastPhotonUnitPower_ = 1.0f; // this frame's PhotonParameters::unitPower, for the resolve
 	std::vector<ResourceHandle> frameConstants_; // one per frame in flight, CPU-written each frame
 	uint width_ = 0;
 	uint height_ = 0;

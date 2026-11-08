@@ -2,6 +2,7 @@
 #define PATH_TRACER_INTEROP_H
 
 #include "ShaderInterop.h"
+#include "PhotonInterop.h"
 
 // CloudParameters. PathTracer/Resources.slang imports the SkyAtmosphere module, which already declares it, and
 // defines SKY_ATMOSPHERE_IMPORTED so that its types are not declared twice.
@@ -146,6 +147,8 @@ struct FrameConstants
 	// from one deterministic guide ray in RayGen (ResolveBlendGuides), rather than being of whichever layer the
 	// path took. 0 = off, or the scene has no blended instance.
 	uint blendGuides;
+	// Caustic photons from the sun (PathTracer/Photons.slang), see PathTracerPass.
+	PhotonParameters photons;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -620,7 +623,7 @@ struct AutoExposureConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
-static_assert(sizeof(FrameConstants) == 640,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 736,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
 static_assert(sizeof(GpuMaterial) == 152,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,

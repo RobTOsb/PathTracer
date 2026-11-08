@@ -72,8 +72,8 @@ static float QueryDisplayPeakNits(void *hwnd)
 
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
 //constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
-constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\teapot-full\\gltf\\teapot_full_extended.gltf";
-//constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\GlassHurricaneCandleHolder\\glTF-Binary\\GlassHurricaneCandleHolder.glb";
+//constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\teapot-full\\gltf\\teapot_full_extended.gltf";
+//constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\DragonAttenuation\\glTF-Binary\\DragonAttenuation.glb";
 //constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
 //constexpr const char *kDefaultScenePath = "h:\\suntemple.glb";
 //constexpr const char *kDefaultScenePath = "h:\\sanmiguel.glb";
