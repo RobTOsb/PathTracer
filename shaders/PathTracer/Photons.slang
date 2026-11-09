@@ -23,24 +23,25 @@ bool PhotonSmoothLobe(OpenPBRContext ctx, uint lobe)
 
 // Receivers: the surface with a diffuse part the camera ray of this pixel meets first (also through pass-through
 // panes, which leave it straight), on which PhotonMap.slang splats the photons and adds their light by reflectance,
-// its diffuse reflectance over pi times the path's throughput.
+// its diffuse reflectance over pi times the path's throughput. Two planes (PhotonParameters::receivers): what the splat
+// reads, then the reflectance.
 uint PhotonReceiverIndex()
 {
-    return 2u * (DispatchRaysIndex().y * g_Frame.photons.width + DispatchRaysIndex().x);
+    return DispatchRaysIndex().y * g_Frame.photons.width + DispatchRaysIndex().x;
 }
 
 void ClearPhotonReceiver()
 {
-    RWStructuredBuffer<float4> receivers = ResourceDescriptorHeap[g_Frame.photons.receivers];
-    receivers[PhotonReceiverIndex()] = float4(0.0, 0.0, 0.0, 0.0);
+    RWStructuredBuffer<uint4> receivers = ResourceDescriptorHeap[g_Frame.photons.receivers];
+    receivers[PhotonReceiverIndex()] = uint4(0u, 0u, 0u, PHOTON_NO_RECEIVER);
 }
 
 void WritePhotonReceiver(float3 position, float3 n, float3 reflectance)
 {
-    RWStructuredBuffer<float4> receivers = ResourceDescriptorHeap[g_Frame.photons.receivers];
+    RWStructuredBuffer<uint4> receivers = ResourceDescriptorHeap[g_Frame.photons.receivers];
     uint i = PhotonReceiverIndex();
-    receivers[i] = float4(position, 1.0);
-    receivers[i + 1u] = float4(reflectance, asfloat(OctEncode(n)));
+    receivers[i] = uint4(asuint(position), OctEncode(n));
+    receivers[g_Frame.photons.width * g_Frame.photons.height + i] = uint4(asuint(reflectance), 0u);
 }
 
 // The cell at distance d along a Hilbert curve over a 2^order square of cells.

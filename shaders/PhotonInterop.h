@@ -30,6 +30,10 @@
 #define PHOTON_IRRADIANCE_SCALE 4096.0f
 // Pixels one footprint's splat visits at most: a wider one visits every few, weighted up to match.
 #define PHOTON_MAX_SPLAT_PIXELS 1024u
+// Splats of more pixel visits than this are shared across a wave's lanes, one at a time; smaller ones stay per thread.
+#define PHOTON_SPLAT_SHARED_PIXELS 16u
+// A receiver's normal bits for none: OctEncode clamps to +-32767 and never writes -32768 (0x8000) in either half.
+#define PHOTON_NO_RECEIVER 0x80008000u
 // The feedback's sums in fixed point: units per pixel of footprint area, and per unit of caustics variance.
 #define PHOTON_AREA_SCALE 16.0f
 #define PHOTON_VARIANCE_SCALE 4096.0f
@@ -76,8 +80,9 @@ struct PhotonParameters
 	uint records; // bindless RWStructuredBuffer<GpuPhotonRecord>
 	uint recordCount; // bindless RWStructuredBuffer<uint>: [0] = records written this frame, past the capacity too
 	uint feedback; // bindless RWStructuredBuffer<uint4>: per texel, fixed point area and variance sums and photons
-	// bindless RWStructuredBuffer<float4>, two per pixel: the receiver's position (w = 1, 0 for none) and its diffuse
-	// reflectance over pi times the path's throughput (rgb), w = asfloat(OctEncode of its normal towards the camera)
+	// bindless RWStructuredBuffer<uint4>, two planes of width * height: per pixel the receiver's position (asuint xyz)
+	// and OctEncode of its normal towards the camera (w, PHOTON_NO_RECEIVER for none), the splat's one read; then its
+	// diffuse reflectance over pi times the path's throughput (asuint xyz), which only the composite reads
 	uint receivers;
 	uint width; // render size
 	float footprintScale; // a photon's footprint is this times its positional differentials across (1 sigma = half)
