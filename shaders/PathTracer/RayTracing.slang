@@ -18,7 +18,7 @@ struct HitInfo
     uint materialId;
     uint emitter; // entry of the hit triangle in g_Emitters, INVALID_LIGHT_INDEX if its instance does not emit
     // How N turns as the hit point moves over the triangle (the derivative of the normalised interpolated
-    // vertex normal), as a 2x2 matrix in the frame (T, cross(N, T)): see NormalDerivative. DLSS_RR only.
+    // vertex normal), as a 2x2 matrix in the frame (T, cross(N, T)): see NormalDerivative.
     float4 shape;
     float smoothLift;
     // Where the hit point was last frame less where it is, for the motion vectors of moving geometry. DLSS_RR
@@ -205,7 +205,7 @@ void GenerateCameraRay(uint2 pixel, float2 u, out float3 origin, out float3 dir)
     dir = normalize(mul(float4(viewDir, 0.0), g_Frame.invView).xyz);
 }
 
-// needCurvature: the hit feeds the DLSS-RR guides, the only users of its shape. Returns the
+// needCurvature: the hit feeds the DLSS-RR guides or a photon's ray cone, the only users of its shape. Returns the
 // payload still packed (see HitDistance and UnpackHit), the smaller form to keep across other rays.
 HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvature, uint rayFlags)
 {
@@ -287,11 +287,10 @@ HitInfo UnpackHit(HitPayload payload, float3 origin, float3 dir)
     hit.materialId = PayloadMaterialIndex(payload.materialId);
     hit.smoothLift = f16tof32((payload.materialId >> PAYLOAD_LIFT_SHIFT) & 0x7FFFu);
     hit.emitter = payload.emitter;
-#ifdef DLSS_RR
     hit.shape = float4(UnpackHalf2(payload.shape.x), UnpackHalf2(payload.shape.y));
+#ifdef DLSS_RR
     hit.motion = float3(UnpackHalf2(payload.motion.x), UnpackHalf2(payload.motion.y).x);
 #else
-    hit.shape = float4(0.0, 0.0, 0.0, 0.0);
     hit.motion = float3(0.0, 0.0, 0.0);
 #endif
     hit.emission = float3(0.0, 0.0, 0.0);

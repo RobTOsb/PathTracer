@@ -22,27 +22,22 @@ static const float TWO_PI = kTwoPi;
 static const float FLT_MAX = kFltMax;
 static const uint INVALIDDESCRIPTORHANDLE = kInvalidDescriptorHandle;
 static const uint INVALID_LIGHT_INDEX = kInvalidLightIndex;
-static const uint kPhotonGridCapacity = PHOTON_GRID_CAPACITY;
-static const uint kPhotonGridProbes = PHOTON_GRID_PROBES;
-static const float kPhotonFixedPointScale = PHOTON_FIXED_POINT_SCALE;
-static const float kPhotonMaxDepositUnits = PHOTON_MAX_DEPOSIT_UNITS;
-static const int kPhotonLevelBias = PHOTON_LEVEL_BIAS;
-static const uint kPhotonLevelShift = PHOTON_LEVEL_SHIFT;
-static const int kPhotonDepositLevels = PHOTON_DEPOSIT_LEVELS;
-#undef PHOTON_GRID_CAPACITY
-#undef PHOTON_GRID_PROBES
-#undef PHOTON_FIXED_POINT_SCALE
-#undef PHOTON_MAX_DEPOSIT_UNITS
-#undef PHOTON_LEVEL_BIAS
-#undef PHOTON_LEVEL_SHIFT
-#undef PHOTON_DEPOSIT_LEVELS
-static const uint PHOTON_GRID_CAPACITY = kPhotonGridCapacity;
-static const uint PHOTON_GRID_PROBES = kPhotonGridProbes;
-static const float PHOTON_FIXED_POINT_SCALE = kPhotonFixedPointScale;
-static const float PHOTON_MAX_DEPOSIT_UNITS = kPhotonMaxDepositUnits;
-static const int PHOTON_LEVEL_BIAS = kPhotonLevelBias;
-static const uint PHOTON_LEVEL_SHIFT = kPhotonLevelShift;
-static const int PHOTON_DEPOSIT_LEVELS = kPhotonDepositLevels;
+static const uint kPhotonMapOrder = PHOTON_MAP_ORDER;
+static const uint kPhotonMapSize = PHOTON_MAP_SIZE;
+static const uint kPhotonMapBlock = PHOTON_MAP_BLOCK;
+static const uint kPhotonMapBlocks = PHOTON_MAP_BLOCKS;
+static const uint kPhotonRecordCapacity = PHOTON_RECORD_CAPACITY;
+#undef PHOTON_MAP_ORDER
+#undef PHOTON_MAP_SIZE
+#undef PHOTON_MAP_TEXELS
+#undef PHOTON_MAP_BLOCK
+#undef PHOTON_MAP_BLOCKS
+#undef PHOTON_RECORD_CAPACITY
+static const uint PHOTON_MAP_ORDER = kPhotonMapOrder;
+static const uint PHOTON_MAP_SIZE = kPhotonMapSize;
+static const uint PHOTON_MAP_BLOCK = kPhotonMapBlock;
+static const uint PHOTON_MAP_BLOCKS = kPhotonMapBlocks;
+static const uint PHOTON_RECORD_CAPACITY = kPhotonRecordCapacity;
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 RaytracingAccelerationStructure g_Scene : register(t0);

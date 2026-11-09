@@ -1,6 +1,7 @@
-// Caustic photons (PhotonInterop.h): the sun's light through smooth glass and mirrors, traced from the sun by
-// PhotonRayGen into a world-space hash grid of irradiance, which the path tracer reads at the first diffuse surface of
-// a camera path that has met only smooth surfaces (light -> smooth+ -> diffuse -> smooth* -> camera).
+// Caustic photons (PhotonInterop.h), after Yang and Ouyang's Adaptive Anisotropic Photon Scattering: sun photons
+// emitted from the photon map, traced through smooth glass and mirrors carrying photon differentials, and recorded
+// where they land on a surface with a diffuse part, which PhotonMap.slang splats onto the surfaces the camera sees
+// (WritePhotonReceiver).
 import OpenPBRBSDF;
 import PathTracer.Resources;
 import PathTracer.Math;
@@ -8,12 +9,7 @@ import PathTracer.Random;
 import PathTracer.RayTracing;
 import PathTracer.Materials;
 import PathTracer.Sky;
-
-// The camera position the cell levels are measured from.
-float3 PhotonCameraPosition()
-{
-    return g_Frame.invView[3].xyz;
-}
+import PathTracer.Psr;
 
 // A lobe the photons and the camera paths both pass as smooth: specular reflection, refraction or the coat, no rougher
 // than photons.maxAlpha.
@@ -25,180 +21,196 @@ bool PhotonSmoothLobe(OpenPBRContext ctx, uint lobe)
     return lobeAlpha <= g_Frame.photons.maxAlpha;
 }
 
-struct PhotonCell
+// Receivers: the surface with a diffuse part the camera ray of this pixel meets first (also through pass-through
+// panes, which leave it straight), on which PhotonMap.slang splats the photons and adds their light by reflectance,
+// its diffuse reflectance over pi times the path's throughput.
+uint PhotonReceiverIndex()
 {
-    uint key;  // never 0, which marks an empty row
-    uint slot; // the row probing starts at
+    return 2u * (DispatchRaysIndex().y * g_Frame.photons.width + DispatchRaysIndex().x);
+}
+
+void ClearPhotonReceiver()
+{
+    RWStructuredBuffer<float4> receivers = ResourceDescriptorHeap[g_Frame.photons.receivers];
+    receivers[PhotonReceiverIndex()] = float4(0.0, 0.0, 0.0, 0.0);
+}
+
+void WritePhotonReceiver(float3 position, float3 n, float3 reflectance)
+{
+    RWStructuredBuffer<float4> receivers = ResourceDescriptorHeap[g_Frame.photons.receivers];
+    uint i = PhotonReceiverIndex();
+    receivers[i] = float4(position, 1.0);
+    receivers[i + 1u] = float4(reflectance, asfloat(OctEncode(n)));
+}
+
+// The cell at distance d along a Hilbert curve over a 2^order square of cells.
+uint2 HilbertCell(uint d, uint order)
+{
+    uint2 c = uint2(0u, 0u);
+    for (uint s = 1u; s < (1u << order); s <<= 1u)
+    {
+        uint rx = 1u & (d >> 1u);
+        uint ry = 1u & (d ^ rx);
+        if (ry == 0u)
+        {
+            if (rx == 1u)
+                c = s - 1u - c;
+            c = c.yx;
+        }
+        c += s * uint2(rx, ry);
+        d >>= 2u;
+    }
+    return c;
+}
+
+// Owen scrambling of a 0.32 fixed point value (Burley 2020, "Practical Hash-based Owen Scrambling"): each bit flipped
+// by a hash of the bits above it and the seed.
+uint OwenScramble(uint x, uint seed)
+{
+    x = reversebits(x);
+    x += seed;
+    x ^= x * 0x6c50b47cu;
+    x ^= x * 0xb82f1e52u;
+    x ^= x * 0xc7afe638u;
+    x ^= x * 0x8d22f6e6u;
+    return reversebits(x);
+}
+
+float FixedToUnit(uint x)
+{
+    return float(x >> 8) * (1.0 / 16777216.0);
+}
+
+// Where a photon starts on the plane perpendicular to the sun, and what it stands for.
+struct PhotonStart
+{
+    float3 origin;
+    float3 power; // flux: the sunlight over its area
+    float3 dPu; // positional differentials: the sides of the area it stands for on the plane
+    float3 dPv;
+    uint texel; // the photon map texel it came from, in Hilbert order
+    float lobeU; // its first surface's lobe choice
 };
 
-// log2 of the cell size for a point: about cellPixels pixels across at its distance from the camera.
-float PhotonLevel(float3 position)
-{
-    float footprint = length(position - PhotonCameraPosition()) * g_Frame.rayConePixelSpread * g_Frame.photons.cellPixels;
-    return clamp(log2(max(footprint, 1.0e-30)), float(-PHOTON_LEVEL_BIAS + 1), float(PHOTON_LEVEL_BIAS - PHOTON_DEPOSIT_LEVELS - 1));
-}
-
-// The cell of the given level of a point on a surface of normal n (either side), the point first moved by up to half a
-// cell along the surface by u, a stochastic box filter that blurs the cell edges into noise.
-PhotonCell FindPhotonCell(float3 position, float3 n, float2 u, int level)
-{
-    float size = exp2(float(level));
-    float3 t, b;
-    BuildOrthonormalBasis(n, t, b);
-    float3 p = position + (t * (u.x - 0.5) + b * (u.y - 0.5)) * size;
-
-    float3 a = abs(n);
-    uint axis = a.x >= a.y && a.x >= a.z ? 0u : a.y >= a.z ? 1u : 2u;
-    uint face = axis * 2u + (n[axis] < 0.0 ? 1u : 0u);
-
-    uint3 c = asuint(int3(floor(p / size)));
-    uint3 h = Pcg3d(uint3(c.x ^ (uint(level + PHOTON_LEVEL_BIAS) << 24), c.y ^ (face << 29), c.z));
-    h = Pcg3d(h ^ c.zxy);
-    PhotonCell cell;
-    cell.slot = h.x & (PHOTON_GRID_CAPACITY - 1u);
-    cell.key = h.y | 1u;
-    return cell;
-}
-
-// Adds fixed point power to a cell of the given level.
-void DepositInCell(PhotonCell cell, int level, uint3 fixedPower)
-{
-    RWStructuredBuffer<uint> keys = ResourceDescriptorHeap[g_Frame.photons.gridKeys];
-    RWStructuredBuffer<uint4> accum = ResourceDescriptorHeap[g_Frame.photons.gridAccum];
-    for (uint i = 0; i < PHOTON_GRID_PROBES; ++i)
-    {
-        uint slot = (cell.slot + i) & (PHOTON_GRID_CAPACITY - 1u);
-        uint previous;
-        InterlockedCompareExchange(keys[slot], 0u, cell.key, previous);
-        if (previous == 0u || previous == cell.key)
-        {
-            // Every photon of the cell sets the same level bits, and counts itself below them.
-            InterlockedOr(accum[slot].w, uint(level + PHOTON_LEVEL_BIAS) << PHOTON_LEVEL_SHIFT);
-            InterlockedAdd(accum[slot].w, 1u);
-            InterlockedAdd(accum[slot].x, fixedPower.x);
-            InterlockedAdd(accum[slot].y, fixedPower.y);
-            InterlockedAdd(accum[slot].z, fixedPower.z);
-            return;
-        }
-    }
-    // The rows around a full part of the grid are taken: the photon is lost there.
-}
-
-// Adds a photon's power where it landed on a surface of normal n, to the cells of the PHOTON_DEPOSIT_LEVELS levels from
-// the one below the point's level up.
-void DepositPhoton(float3 position, float3 n, float3 power, float2 u)
-{
-    float3 units = min(power * (PHOTON_FIXED_POINT_SCALE / g_Frame.photons.unitPower), PHOTON_MAX_DEPOSIT_UNITS);
-    uint3 fixedPower = uint3(units + 0.5);
-    if (all(fixedPower == 0u))
-        return;
-    int level = int(floor(PhotonLevel(position)));
-    for (int k = 0; k < PHOTON_DEPOSIT_LEVELS; ++k)
-        DepositInCell(FindPhotonCell(position, n, u, level + k), level + k, fixedPower);
-}
-
-// A cell's running average irradiance (rgb) and photons per frame (w), zero for a cell not in the grid.
-float4 CellEstimate(PhotonCell cell, out bool found)
-{
-    RWStructuredBuffer<uint> keys = ResourceDescriptorHeap[g_Frame.photons.gridKeys];
-    RWStructuredBuffer<float4> cache = ResourceDescriptorHeap[g_Frame.photons.gridCache];
-    // Every probe is read, since an emptied row may sit between a key's hashed row and its own.
-    for (uint i = 0; i < PHOTON_GRID_PROBES; ++i)
-    {
-        uint slot = (cell.slot + i) & (PHOTON_GRID_CAPACITY - 1u);
-        if (keys[slot] == cell.key)
-        {
-            float4 c = cache[slot];
-            found = true;
-            return float4(c.rgb, f16tof32(asuint(c.w) & 0xFFFFu));
-        }
-    }
-    found = false;
-    return float4(0.0, 0.0, 0.0, 0.0);
-}
-
-// The caustic irradiance at a point on a surface of normal n facing the viewer: the two levels around the point's,
-// blended by where it falls between them, giving way to the two levels above as their photons get fewer than
-// photons.minPhotons.
-float3 LookUpPhotonIrradiance(float3 position, float3 n, float2 u)
-{
-    float level = PhotonLevel(position);
-    int lower = int(floor(level));
-    float upperWeight = level - float(lower);
-
-    // Every photon of the finer cells is in the widest, so without it there are none.
-    bool found;
-    float4 widest = CellEstimate(FindPhotonCell(position, n, u, lower + 3), found);
-    if (!found)
-        return float3(0.0, 0.0, 0.0);
-    float4 wide = CellEstimate(FindPhotonCell(position, n, u, lower + 2), found);
-    float4 coarse = CellEstimate(FindPhotonCell(position, n, u, lower + 1), found);
-    float4 fine = CellEstimate(FindPhotonCell(position, n, u, lower), found);
-
-    float4 own = lerp(fine, coarse, upperWeight);
-    float4 sparse = lerp(wide, widest, upperWeight);
-    float3 irradiance = lerp(sparse.rgb, own.rgb, saturate(own.w / g_Frame.photons.minPhotons));
-    // Where even the wide cells get too few photons (light spread thin far from its caster), the estimate sparkles
-    // however long it is averaged: it fades out instead.
-    float minWide = g_Frame.photons.minWidePhotons;
-    return minWide > 0.0 ? irradiance * saturate(sparse.w / minWide) : irradiance;
-}
-
-// A sun photon aimed at the casters: a point on one of the rectangles their bounds make on the plane perpendicular
-// to the sun, picked in proportion to the rectangles' areas, so that the plane is covered with a density of the
-// rectangles over it per total area. Its power is the sunlight over the area it stands for. False for none.
-bool EmitSunPhoton(inout uint rng, out float3 origin, out float3 dir, out float3 power)
+bool EmitSunPhoton(uint index, inout uint rng, out PhotonStart start)
 {
     PhotonParameters ph = g_Frame.photons;
-    StructuredBuffer<GpuPhotonRect> rects = ResourceDescriptorHeap[ph.rects];
-    float3 u = Rand3(rng);
+    RWStructuredBuffer<float> density = ResourceDescriptorHeap[ph.density];
+    RWStructuredBuffer<float> blockPrefix = ResourceDescriptorHeap[ph.blockPrefix];
+    RWStructuredBuffer<float> texelPrefix = ResourceDescriptorHeap[ph.texelPrefix];
+    start = (PhotonStart)0;
+    float total = blockPrefix[PHOTON_MAP_BLOCKS];
+    if (!(total > 0.0))
+        return false;
 
-    // The first rectangle whose CDF passes u.x.
-    uint lo = 0;
-    uint hi = ph.rectCount - 1u;
+    float3 u = Rand3(rng);
+    float target = (float(index) + u.x) / float(ph.photonCount) * total;
+    // The last block whose shares start at or before the target: blocks without any are passed over.
+    uint lo = 0u;
+    uint hi = PHOTON_MAP_BLOCKS - 1u;
+    while (lo < hi)
+    {
+        uint mid = (lo + hi + 1u) / 2u;
+        if (blockPrefix[mid] <= target)
+            lo = mid;
+        else
+            hi = mid - 1u;
+    }
+    uint first = lo * PHOTON_MAP_BLOCK;
+    float local = target - blockPrefix[lo];
+    // The first texel of the block whose shares up to it pass the target.
+    lo = 0u;
+    hi = PHOTON_MAP_BLOCK - 1u;
     while (lo < hi)
     {
         uint mid = (lo + hi) / 2u;
-        if (rects[mid].cdf <= u.x)
+        if (texelPrefix[first + mid] <= local)
             lo = mid + 1u;
         else
             hi = mid;
     }
-    GpuPhotonRect rect = rects[lo];
-    float2 ab = lerp(rect.lo, rect.hi, u.yz);
+    uint texel = first + lo;
+    float share = density[texel];
+    if (!(share > 0.0))
+        return false;
+    float before = lo > 0u ? texelPrefix[texel - 1u] : 0.0;
+    float t = saturate((local - before) / share);
 
-    // The other rectangles over the point raise its density.
-    uint covering = 0;
-    for (uint r = 0; r < ph.rectCount; ++r)
-    {
-        GpuPhotonRect other = rects[r];
-        if (all(ab >= other.lo) && all(ab <= other.hi))
-            ++covering;
-    }
-    covering = max(covering, 1u);
+    // A curve over at least as many cells as the texel gets photons, so that a photon's part of it is a cell or a few.
+    float expected = share / total * float(ph.photonCount);
+    uint order = expected <= 1.0 ? 0u : min((firstbithigh(uint(ceil(expected)) - 1u) + 2u) / 2u, 8u);
+    uint cells = 1u << (2u * order);
+    uint d = min(uint(t * float(cells)), cells - 1u);
+    float2 inTexel = (float2(HilbertCell(d, order)) + u.yz) * exp2(-float(order));
+    float texelSize = ph.mapScale / float(PHOTON_MAP_SIZE);
+    float2 ab = ph.mapOrigin + (float2(HilbertCell(texel, PHOTON_MAP_ORDER)) + inTexel) * texelSize;
 
-    origin = ph.basisU * ab.x + ph.basisV * ab.y + g_Frame.sunDirection * ph.planeHeight;
-    float3 toSun = SunIsDelta() ? g_Frame.sunDirection : SampleUniformCone(g_Frame.sunDirection, g_Frame.sunOneMinusCosMax, Rand3(rng).xy);
-    dir = -toSun;
-    power = SunIlluminance() * SunTransmittance() * (ph.totalArea / (float(covering) * float(ph.photonCount)));
-    return any(power > 0.0);
+    float area = texelSize * texelSize / expected;
+    float spacing = sqrt(area);
+    start.origin = ph.basisU * ab.x + ph.basisV * ab.y + g_Frame.sunDirection * ph.planeHeight;
+    start.power = SunIlluminance() * SunTransmittance() * area;
+    start.dPu = ph.basisU * spacing;
+    start.dPv = ph.basisV * spacing;
+    start.texel = texel;
+    uint seed = Pcg3d(uint3(g_Frame.frameIndex, 0x9E3779B9u, 0x7F4A7C15u)).x;
+    start.lobeU = FixedToUnit(OwenScramble(reversebits(index), seed));
+    return any(start.power > 0.0);
 }
 
-// Follows a photon through smooth surfaces, leaving its power at every surface with a diffuse part it reaches after
-// at least one of them. Pass-through panes let it by without counting: light through a window alone is direct light,
-// which the path tracer's own light sampling finds. Thin-walled surfaces are no smooth surface to it: what else they
-// scatter it to is lost, as camera paths count the sunlight they find past one (PHOTON_COVERED).
-void TracePhoton(float3 origin, float3 dir, float3 power, inout uint rng)
+// Records a photon's power where it landed on a surface of normal n facing the light it came from: its footprint's
+// covariance from its differentials, photons.footprintScale times the positional ones across (one standard deviation
+// is half of that) and the sun disc's one-sigma directional ones as they are. One atomic per wave claims the slots.
+void RecordPhoton(float3 position, float3 n, float3 power, uint texel, RayDifferential du, RayDifferential dv,
+                  RayDifferential da, RayDifferential db)
 {
-    float3 throughput = power;
-    float startPower = MaxComponent(power);
+    PhotonParameters ph = g_Frame.photons;
+    GpuPhotonRecord record;
+    record.position = position;
+    record.normal = OctEncode(n);
+    record.power = power;
+    record.texel = texel;
+    float3 t, b;
+    BuildOrthonormalBasis(OctDecode(record.normal), t, b);
+    float s = 0.5 * ph.footprintScale;
+    float2 pu = float2(dot(du.dP, t), dot(du.dP, b));
+    float2 pv = float2(dot(dv.dP, t), dot(dv.dP, b));
+    float2 pa = float2(dot(da.dP, t), dot(da.dP, b));
+    float2 pb = float2(dot(db.dP, t), dot(db.dP, b));
+    record.covariance = s * s * float3(pu.x * pu.x + pv.x * pv.x, pu.x * pu.y + pv.x * pv.y, pu.y * pu.y + pv.y * pv.y) +
+                        float3(pa.x * pa.x + pb.x * pb.x, pa.x * pa.y + pb.x * pb.y, pa.y * pa.y + pb.y * pb.y);
+    record.area = abs(pu.x * pv.y - pu.y * pv.x);
+
+    RWStructuredBuffer<uint> recordCount = ResourceDescriptorHeap[ph.recordCount];
+    uint laneOffset = WavePrefixCountBits(true);
+    uint waveCount = WaveActiveCountBits(true);
+    uint base = 0u;
+    if (WaveIsFirstLane())
+        InterlockedAdd(recordCount[0], waveCount, base);
+    uint slot = WaveReadLaneFirst(base) + laneOffset;
+    if (slot >= PHOTON_RECORD_CAPACITY)
+        return;
+    RWStructuredBuffer<GpuPhotonRecord> records = ResourceDescriptorHeap[ph.records];
+    records[slot] = record;
+}
+
+void TracePhoton(PhotonStart start, inout uint rng)
+{
+    PhotonParameters ph = g_Frame.photons;
+    float3 origin = start.origin;
+    float3 dir = -g_Frame.sunDirection;
+    float3 throughput = start.power;
+    float startPower = MaxComponent(start.power);
+    RayDifferential du = { start.dPu, float3(0.0, 0.0, 0.0) };
+    RayDifferential dv = { start.dPv, float3(0.0, 0.0, 0.0) };
+    RayDifferential da = { float3(0.0, 0.0, 0.0), ph.basisU * ph.sunSpread };
+    RayDifferential db = { float3(0.0, 0.0, 0.0), ph.basisV * ph.sunSpread };
     float3 extinction = float3(0.0, 0.0, 0.0);
     uint smoothBounces = 0;
     const uint rayFlags = OpacityMicromapRayFlags(1u);
     [loop]
-    for (uint segment = 0; segment <= g_Frame.photons.maxBounces + 4u; ++segment)
+    for (uint segment = 0; segment <= ph.maxBounces + 4u; ++segment)
     {
-        HitPayload payload = TraceClosest(origin, dir, false, false, rayFlags);
+        HitPayload payload = TraceClosest(origin, dir, false, true, rayFlags);
         HitInfo hit = HitDistance(payload);
         if (!hit.hit)
             return;
@@ -206,6 +218,12 @@ void TracePhoton(float3 origin, float3 dir, float3 power, inout uint rng)
         hit = UnpackHit(payload, origin, dir);
         if (segment == 0)
             throughput *= CloudShadow(hit.position);
+        if (abs(dot(dir, hit.Ng)) < 1.0e-4)
+            return;
+        TransferDifferential(du, dir, hit.t, hit.Ng);
+        TransferDifferential(dv, dir, hit.t, hit.Ng);
+        TransferDifferential(da, dir, hit.t, hit.Ng);
+        TransferDifferential(db, dir, hit.t, hit.Ng);
 
         float3 wo = -dir;
         OpenPBRBaseParams mat = LoadMaterial(hit, 0.0, false, IsSimpleMaterial(hit.materialId), float2(0.0, 0.0));
@@ -219,16 +237,21 @@ void TracePhoton(float3 origin, float3 dir, float3 power, inout uint rng)
             {
                 hit.N = -hit.N;
                 hit.Ns = -hit.Ns;
+                FlipShape(hit);
             }
         }
         SetShadingBasis(mat, hit.T, hit.B, hit.N, hit.Ns, hit.Ng, wo);
         OpenPBRContext ctx = OpenPBRSetup(mat, wo);
 
-        float3 u = Rand3(rng);
         if (smoothBounces > 0 && ctx.probDiffuse > 0.0)
-            DepositPhoton(hit.position, dot(hit.Ng, wo) >= 0.0 ? hit.Ng : -hit.Ng, throughput, u.yz);
+            RecordPhoton(hit.position, dot(hit.Ng, wo) >= 0.0 ? hit.Ng : -hit.Ng, throughput, start.texel, du, dv, da, db);
 
-        BSDFSample bs = OpenPBRSample(mat, ctx, Rand3(rng));
+        // The first surface's lobe choice is stratified across neighbouring photons (EmitSunPhoton).
+        float3 su = Rand3(rng);
+        if (segment == 0u)
+            su.x = start.lobeU;
+        BSDFSample bs = OpenPBRSample(mat, ctx, su);
+        float roulette = Rand3(rng).x;
         if (bs.lobe == LOBE_DELTA_TRANSMISSION)
         {
             throughput *= bs.weight;
@@ -237,16 +260,25 @@ void TracePhoton(float3 origin, float3 dir, float3 power, inout uint rng)
             continue;
         }
         // Thin-walled materials cast no caustics: past a smooth pane's pass-through, a photon they scatter is lost.
-        if (mat.geometryThinWalled || !PhotonSmoothLobe(ctx, bs.lobe) || smoothBounces >= g_Frame.photons.maxBounces)
+        if (mat.geometryThinWalled || !PhotonSmoothLobe(ctx, bs.lobe) || smoothBounces >= ph.maxBounces)
             return;
         throughput *= bs.weight;
+
+        bool reflection = bs.lobe != LOBE_SPECULAR_TRANSMISSION;
+        if (!reflection && abs(dot(bs.wi, hit.N)) < 1.0e-4)
+            return;
+        float eta = 1.0 / ctx.eta;
+        TurnDifferential(du, hit, hit.N, dir, bs.wi, reflection, eta);
+        TurnDifferential(dv, hit, hit.N, dir, bs.wi, reflection, eta);
+        TurnDifferential(da, hit, hit.N, dir, bs.wi, reflection, eta);
+        TurnDifferential(db, hit, hit.N, dir, bs.wi, reflection, eta);
         ++smoothBounces;
 
         // Russian roulette past the first few bounces, against the power the photon started with.
         if (smoothBounces >= 3u)
         {
             float q = saturate(MaxComponent(throughput) / startPower);
-            if (u.x >= q)
+            if (roulette >= q)
                 return;
             throughput /= q;
         }

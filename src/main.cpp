@@ -72,17 +72,17 @@ static float QueryDisplayPeakNits(void *hwnd)
 
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
 //constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
-//constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\teapot-full\\gltf\\teapot_full_extended.gltf";
-//constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\DragonAttenuation\\glTF-Binary\\DragonAttenuation.glb";
+//constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\cornell-caustic\\gltf\\cornell_caustic_extended.gltf";
+//constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\TransmissionThinwallTestGrid\\glTF-Binary\\TransmissionThinwallTestGrid.glb";
 //constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
 //constexpr const char *kDefaultScenePath = "h:\\suntemple.glb";
-//constexpr const char *kDefaultScenePath = "h:\\sanmiguel.glb";
+//constexpr const char *kDefaultScenePath = "h:\\SanMiguel.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\SubsurfaceScene\\scene.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\SphereRoom\\SphereRoom.glb";
 //constexpr const char *kDefaultScenePath = "h:\\ZeroDay_pbr.glb";
 //constexpr const char *kDefaultScenePath = "h:\\landscape\\view-0.glb";
 //constexpr const char *kDefaultScenePath = "h:\\modern_apartment.glb";
-
+constexpr const char *kDefaultScenePath = "h:\\LucyCheckerboard.glb";
 
 constexpr uint kFramesInFlight = 2;
 constexpr uint kSwapchainImageCount = 3;

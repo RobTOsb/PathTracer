@@ -623,7 +623,7 @@ struct AutoExposureConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
-static_assert(sizeof(FrameConstants) == 736,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 752,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
 static_assert(sizeof(GpuMaterial) == 152,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,

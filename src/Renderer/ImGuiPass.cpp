@@ -459,29 +459,34 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	{
 		PhotonSettings &photons = settings_.photons;
 		ImGui::Checkbox("Enabled##photons", &photons.enabled);
-		ImGui::SetItemTooltip("Sun photons through smooth glass and mirrors into a hash grid, read at the first diffuse "
-							  "surface the camera sees (also through glass and mirrors). The sun disc found through "
-							  "glass after that surface is left out, so it is not counted twice");
+		ImGui::SetItemTooltip("Sun photons through smooth glass and mirrors, splatted as anisotropic footprints onto the "
+							  "diffuse surfaces the camera sees directly (Adaptive Anisotropic Photon Scattering). The sun "
+							  "disc found through glass after such a surface is left out, so it is not counted twice; "
+							  "caustics seen through glass or in mirrors are the path tracer's own");
 		ImGui::BeginDisabled(!photons.enabled);
 		ImGui::SliderInt("Photons per frame", &photons.photonsPerFrame, 1024, 4194304, "%d", ImGuiSliderFlags_Logarithmic);
-		ImGui::SliderFloat("Cell size (pixels)", &photons.cellPixels, 0.1f, 32.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
-		ImGui::SetItemTooltip("Sharper caustics when smaller, noisier too");
-		ImGui::SliderFloat("Blend##photons", &photons.blend, 0.01f, 1.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
-		ImGui::SetItemTooltip("Weight of a new frame in each cell's running average: smaller is smoother and lags more");
-		ImGui::SliderFloat("Min photons per cell", &photons.minPhotons, 0.5f, 128.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
-		ImGui::SetItemTooltip("Cells averaging fewer photons a frame give way to cells 4 times wider: higher is smoother "
-							  "and blurrier where light is sparse");
-		ImGui::SliderFloat("Min blend##photons", &photons.minBlend, 0.001f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
-		ImGui::SetItemTooltip("Running average weight for the sparsest cells: cells averaging fewer than 'Min photons per "
-							  "cell' blend more slowly, down to this. Smaller is calmer where light is sparse, and lags more");
-		ImGui::SliderFloat("Min wide photons", &photons.minWidePhotons, 0.0f, 16.0f, "%.2f");
-		ImGui::SetItemTooltip("Photons a frame the 4 times wider cells must average for full brightness: sparser light, "
-							  "spread thin far from its caster, fades out instead of sparkling. 0 = no fade");
+		ImGui::SliderFloat("Footprint scale##photons", &photons.footprintScale, 0.25f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("A photon's footprint is this many times the area it stands for across, curved casters and "
+							  "the sun's size included: higher is smoother and blurrier");
 		ImGui::SliderFloat("Max roughness##photons", &photons.maxRoughness, 0.0f, 0.5f, "%.2f");
 		ImGui::SetItemTooltip("Lobes up to this perceptual roughness pass photons; materials up to it cast caustics");
 		ImGui::SliderInt("Max bounces##photons", &photons.maxBounces, 1, 16);
-		ImGui::SliderInt("Evict after (frames)", &photons.evictFrames, 8, 1000, "%d", ImGuiSliderFlags_Logarithmic);
-		if (ImGui::Button("Clear grid"))
+		ImGui::Checkbox("Adaptive photon map", &photons.adaptive);
+		ImGui::SetItemTooltip("Each part of the sun's view of the casters gets photons by feedback: more where they land "
+							  "wide on screen or the caustics flicker, fewer where they land small or out of view");
+		ImGui::BeginDisabled(!photons.adaptive);
+		ImGui::SliderFloat("Target area (pixels)", &photons.targetArea, 0.25f, 64.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Pixels a photon should cover on screen: the map moves photons towards where they cover more");
+		ImGui::SliderFloat("Variance gain", &photons.varianceGain, 0.0f, 64.0f, "%.1f");
+		ImGui::SetItemTooltip("Photons per map texel that flickering caustics add");
+		ImGui::SliderFloat("Temporal weight##photons", &photons.temporalWeight, 0.0f, 1.0f, "%.2f");
+		ImGui::SetItemTooltip("How fast the map follows its feedback, against its neighbourhood's last shares: lower is "
+							  "steadier");
+		ImGui::SliderFloat("Min density", &photons.minDensity, 0.01f, 16.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Photons per map texel over a caster at least, so that caustics coming into view are found");
+		ImGui::SliderFloat("Max density", &photons.maxDensity, 1.0f, 65536.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+		ImGui::EndDisabled();
+		if (ImGui::Button("Reset photon map"))
 		{
 			++photons.resetCount;
 		}

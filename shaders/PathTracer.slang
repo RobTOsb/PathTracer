@@ -44,7 +44,6 @@ static const uint PATH_SPLITS_MASK = 0x7F;
 static const uint PATH_PHOTON_LOW = 0x4000;
 static const uint PATH_PHOTON_HIGH = 0x800000;
 static const uint PHOTON_NONE = 0;
-// Only smooth surfaces since the camera: the next surface with a diffuse part reads the photons.
 static const uint PHOTON_CAMERA = 1;
 // The surface that read them scattered diffusely, and only pass-throughs since.
 static const uint PHOTON_ARMED = 2;
@@ -275,8 +274,8 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     ctx = OpenPBRSetup(mat, wo);
     float3 extinction = MediumExtinction(mat);
 
-    // Caustics: the first surface with a diffuse part on a camera path that met only smooth ones reflects the photons'
-    // irradiance by its diffuse albedo, under its specular reflection.
+    // Caustics: the surface with a diffuse part the camera ray meets is the pixel's photon receiver, on which
+    // PhotonMap.slang splats the photons and adds their irradiance by its diffuse albedo, under its specular reflection.
     const uint photonState = PhotonState(flags);
     if (photonState == PHOTON_CAMERA && ctx.probDiffuse > 0.0)
     {
@@ -284,7 +283,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         ReflectanceGuides(mat, ctx, wo, reflectance);
         float3 albedo = reflectance.diffuseAlbedo * saturate(1.0 - reflectance.specularAlbedo);
         float3 n = dot(hit.Ng, wo) >= 0.0 ? hit.Ng : -hit.Ng;
-        radiance += throughput * albedo * (1.0 / PI) * LookUpPhotonIrradiance(hit.position, n, Rand3(rng).xy);
+        WritePhotonReceiver(hit.position, n, throughput * albedo * (1.0 / PI));
     }
     bool deltaTransmission = HasDeltaTransmission(mat);
     float3 neeContribution = float3(0.0, 0.0, 0.0);
@@ -429,16 +428,15 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     // through a pass-through wall, if the vertex the segment continues from did.
     // From the camera, which sampled none, lights come at full weight too.
     flags = SetFlag(flags, DEFERRED_SMOOTH_SEGMENT, passThrough ? smoothSegment || fromCamera : !sampleLights);
-    // The photons' part of the path: a pass-through keeps it; a smooth lobe keeps the camera's chain going, or covers what
-    // a diffuse bounce from where the photons were read goes on to find; anything else ends it. Thin-walled surfaces
-    // cast no photons (TracePhoton), so they cover nothing: the sunlight found past one is the path tracer's to count.
-    // The camera may still see caustics in them.
+    // The photons' part of the path: a pass-through keeps it; a diffuse bounce from the receiver arms it, and a smooth
+    // lobe after that covers what it goes on to find; anything else ends it. Thin-walled surfaces cast no photons
+    // (TracePhoton), so they cover nothing: the sunlight found past one is the path tracer's to count.
     if (photonState != PHOTON_NONE && !passThrough)
     {
         bool smooth = continuePath && PhotonSmoothLobe(ctx, lobe);
         uint next = PHOTON_NONE;
         if (photonState == PHOTON_CAMERA)
-            next = smooth ? PHOTON_CAMERA : lobe == LOBE_DIFFUSE ? PHOTON_ARMED : PHOTON_NONE;
+            next = continuePath && lobe == LOBE_DIFFUSE && ctx.probDiffuse > 0.0 ? PHOTON_ARMED : PHOTON_NONE;
         else
             next = smooth && !mat.geometryThinWalled ? PHOTON_COVERED : PHOTON_NONE;
         flags = SetPhotonState(flags, next);
@@ -645,8 +643,13 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         for (; bounce <= g_Frame.maxDiffuseBounces + g_Frame.maxSpecularBounces; ++bounce)
         {
             const uint rayFlags = OpacityMicromapRayFlags(bounce);
-            HitPayload payload =
-                    TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, (flags & (PATH_FROM_CAMERA | PATH_CHAIN_ACTIVE)) != 0, rayFlags);
+            // Only the DLSS-RR guides read the shape of camera and chain hits.
+#ifdef DLSS_RR
+            const bool needCurvature = (flags & (PATH_FROM_CAMERA | PATH_CHAIN_ACTIVE)) != 0;
+#else
+            const bool needCurvature = false;
+#endif
+            HitPayload payload = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, needCurvature, rayFlags);
             // Unpacked after the in-scatter's shadow ray, so only the packed payload is held across it.
             HitInfo hit = HitDistance(payload);
 
@@ -777,8 +780,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         // Glass splits only where the camera sees, so every bounce before the branch is specular.
         flags &= ~(DEFERRED_MASK | PATH_HIT_DISTANCE_PENDING | PATH_END_HIT_PENDING |
                    (PATH_DIFFUSE_BOUNCES_MASK << PATH_DIFFUSE_BOUNCES_SHIFT));
-        // Both branches leave the glass the camera sees by a smooth lobe.
-        flags = SetPhotonState(flags, g_Frame.photons.enabled != 0 ? PHOTON_CAMERA : PHOTON_NONE);
+        // Both branches leave the glass the camera sees by a smooth lobe, so neither is the camera ray any more.
+        flags = SetPhotonState(flags, PHOTON_NONE);
         if ((deferredFlags & DEFERRED_REFLECTION) != 0)
         {
             // Solid glass's reflection leaves the surface the camera saw.
@@ -915,8 +918,8 @@ void ResolveBlendGuides(inout CameraState s, float3 origin)
 
 // Entry points
 
-// Caustic photons from the sun into the hash grid (PathTracer/Photons.slang), one per thread, rows of
-// PHOTON_DISPATCH_WIDTH.
+// Caustic photons from the sun's photon map into the photon records (PathTracer/Photons.slang), one per thread, rows of
+// PHOTON_DISPATCH_WIDTH. Neighbouring indices start next to each other (EmitSunPhoton), so a wave's rays are coherent.
 [shader("raygeneration")]
 void PhotonRayGen()
 {
@@ -927,9 +930,9 @@ void PhotonRayGen()
     if (index >= g_Frame.photons.photonCount)
         return;
     uint rng = RngInit(g_Frame.frameIndex);
-    float3 origin, dir, power;
-    if (EmitSunPhoton(rng, origin, dir, power))
-        TracePhoton(origin, dir, power, rng);
+    PhotonStart start;
+    if (EmitSunPhoton(index, rng, start))
+        TracePhoton(start, rng);
 }
 
 [shader("raygeneration")]
@@ -964,6 +967,9 @@ void RayGen()
     // Before the paths, any of which may mark it.
     g_ShadowChanges[pixel] = 0.0;
 #endif
+    // No photon receiver until a path's camera ray meets one.
+    if (g_Frame.photons.enabled != 0)
+        ClearPhotonReceiver();
     // The mean of the frame's paths, each with its own random sequence. Under DLSS-RR they all start along the
     // same camera ray, and the guides are the last one's.
     float3 origin, dir;
@@ -1122,9 +1128,9 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     uint emitterTable = g_Emitters[InstanceIndex()];
     payload.emitter = emitterTable != INVALID_LIGHT_INDEX ? emitterTable + PrimitiveIndex() : INVALID_LIGHT_INDEX;
 
-#ifdef DLSS_RR
     // How the shading normal turns over the triangle, telling flat mirrors from curved ones for PSR and
-    // carrying ray differentials through them. Only the guides use it, so other hits skip it.
+    // carrying ray differentials through them. Only the guides and the photons' ray cones use it, so other hits
+    // skip it.
     // N = n / |n| for n = cofactor (n0 + b1 (n1 - n0) + b2 (n2 - n0)) at P = p0 + b1 e1 + b2 e2, so
     // dN = (I - N N^T) / |n| (w1 db1 + w2 db2), w the cofactor's normal differences and db_i = g_i . dP.
     if (payload.shape.x == 0)
@@ -1148,6 +1154,8 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     float4 shape = clamp(float4(dot(T, dNdT), dot(T, dNdB), dot(B, dNdT), dot(B, dNdB)), -HALF_MAX, HALF_MAX);
     payload.shape = uint2(PackHalf2(shape.xy), PackHalf2(shape.zw));
 
+#ifdef DLSS_RR
+
     // The same point of the object under last frame's transform. Both transforms take the same steps, so a
     // static instance's motion is zero.
     float4 objectPosition = float4(p0 + (p1 - p0) * bary.y + (p2 - p0) * bary.z, 1.0);
@@ -1155,8 +1163,6 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
     float3x4 previousToWorld = float3x4(g_PreviousTransforms[row], g_PreviousTransforms[row + 1], g_PreviousTransforms[row + 2]);
     float3 motion = clamp(mul(previousToWorld, objectPosition) - mul(ObjectToWorld3x4(), objectPosition), -HALF_MAX, HALF_MAX);
     payload.motion = uint2(PackHalf2(motion.xy), PackHalf2(float2(motion.z, 0.0)));
-#else
-    payload.shape = uint2(0, 0);
 #endif
 }
 

@@ -44,8 +44,9 @@ struct PathTracerGuides
 // randomly jittered paths per pixel each frame into an accumulation target and outputs their mean, starting
 // over whenever the camera or anything else the image depends on changes, and stops tracing once it has
 // RenderSettings::reference.samples.
-// With RenderSettings::photons on and a sun, it first traces caustic photons from the sun (PhotonRayGen) into a hash
-// grid and resolves the grid (PhotonResolve.slang), which the paths then read (PathTracer/Photons.slang).
+// With RenderSettings::photons on and a sun (not in the reference), it first adapts the photon map and traces caustic
+// photons from it (PhotonRayGen, PathTracer/Photons.slang), then after the paths splats them onto the surfaces the
+// camera sees and adds them to the output (PhotonMap.slang): Adaptive Anisotropic Photon Scattering.
 // Leaves the output and the guides in the UnorderedAccess layout.
 class PathTracerPass final : public RenderPass
 {
@@ -131,9 +132,13 @@ private:
 	Pipeline CreatePipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps,
 							bool psr) const;
 	ResourceHandle CreateTarget(Format format, const char *debugName) const;
-	// Fills constants.photons for this frame (aiming the sun photons at the casters), enabled or not.
+	// Fills constants.photons for this frame (the photon map over the casters), enabled or not, and says whether the
+	// photon map starts over.
 	void PreparePhotons(FrameConstants &constants, bool sunActive, float sunAngularRadius);
-	void DispatchPhotonResolve(RenderContext *renderContext, bool reset);
+	// PhotonMap.slang's passes before the photons, and after the paths.
+	void DispatchPhotonMap(RenderContext *renderContext, ResourceHandle constantBuffer);
+	void DispatchPhotonSplat(RenderContext *renderContext, ResourceHandle constantBuffer);
+	PhotonPassConstants PhotonPassConstantsForFrame() const;
 
 	RenderContext *renderContext_ = nullptr;
 	const RenderGPUScene &scene_;
@@ -153,17 +158,40 @@ private:
 	ResourceHandle cameraState_ = InvalidResourceHandle; // GpuCameraState per pixel, DLSS-RR only
 	ResourceHandle deferredBranches_ = InvalidResourceHandle; // GpuDeferredBranch per pixel
 
-	// Caustic photons: the hash grid (created on first use), the caster rectangles per frame in flight.
-	PipelineHandle photonResolvePipeline_ = InvalidPipelineHandle;
-	ResourceHandle photonGridKeys_ = InvalidResourceHandle;
-	ResourceHandle photonGridAccum_ = InvalidResourceHandle;
-	ResourceHandle photonGridCache_ = InvalidResourceHandle;
+	// Caustic photons (created on first use): the photon map's shares (two, last frame's and this one's), running sums
+	// and feedback, the photon records, and per pixel the receivers, the splatted irradiance and the caustics' history
+	// (two). The caster rectangles per frame in flight.
+	enum PhotonPass
+	{
+		PhotonPassUpdate,
+		PhotonPassScanBlocks,
+		PhotonPassScanTotals,
+		PhotonPassSplat,
+		PhotonPassComposite,
+		PhotonPassCount
+	};
+	PipelineHandle photonPipelines_[PhotonPassCount] = {};
+	ResourceHandle photonDensity_[2] = { InvalidResourceHandle, InvalidResourceHandle };
+	ResourceHandle photonTexelPrefix_ = InvalidResourceHandle;
+	ResourceHandle photonBlockPrefix_ = InvalidResourceHandle;
+	ResourceHandle photonFeedback_ = InvalidResourceHandle;
+	ResourceHandle photonRecords_ = InvalidResourceHandle;
+	ResourceHandle photonRecordCount_ = InvalidResourceHandle;
+	ResourceHandle photonReceivers_ = InvalidResourceHandle;
+	ResourceHandle photonCaustics_ = InvalidResourceHandle;
+	ResourceHandle photonHistory_[2] = { InvalidResourceHandle, InvalidResourceHandle };
 	std::vector<ResourceHandle> photonRects_;
 	std::vector<std::pair<float3, float3>> photonCasters_;
 	std::vector<GpuPhotonRect> photonRectData_;
-	bool photonGridValid_ = false; // emptied since it was created, and photons have run every frame since
+	bool photonBuffersCleared_ = false; // the buffers that must start at zero have been
+	bool photonMapValid_ = false; // photons ran last frame with this map
+	bool photonReset_ = false; // this frame's photon map starts over
+	uint photonParity_ = 0; // which of the two shares and histories is this frame's
 	uint photonResetCount_ = 0;
-	float lastPhotonUnitPower_ = 1.0f; // this frame's PhotonParameters::unitPower, for the resolve
+	bool photonAdaptive_ = true; // the last frame's PhotonSettings::adaptive
+	float3 photonSunDirection_ = { 0.0f, 0.0f, 0.0f }; // the map's plane and square, a change of which starts it over
+	float2 photonMapOrigin_ = { 0.0f, 0.0f };
+	float photonMapScale_ = 0.0f;
 	std::vector<ResourceHandle> frameConstants_; // one per frame in flight, CPU-written each frame
 	uint width_ = 0;
 	uint height_ = 0;

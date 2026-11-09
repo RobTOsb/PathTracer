@@ -140,26 +140,23 @@ enum class RenderMode
 struct PhotonSettings
 {
 	bool enabled = true;
-	int photonsPerFrame = 1048576;
-	// Cell size in pixels of footprint at the cell's distance: smaller is sharper and noisier.
-	float cellPixels = 4.0f;
-	// A cell's running average weighs a new frame by at least this: smaller is smoother and lags more.
-	float blend = 0.15f;
-	// Photons a frame a cell must average for its own estimate: sparser light falls back to cells 4 times wider, so a
-	// few stray photons blur instead of speckling.
-	float minPhotons = 8.0f;
-	// Running average weight of a new frame for the sparsest cells: cells averaging fewer than minPhotons blend by
-	// blend scaled down by their photon count, down to this, so they average over more frames.
-	float minBlend = 0.015f;
-	// Photons a frame the cells 4 times wider must average for full brightness; sparser light (spread thin far from
-	// its caster) fades out rather than sparkling. 0 = no fade.
-	float minWidePhotons = 0.5f;
+	int photonsPerFrame = 262144;
+	// A photon's footprint is this many times the area it stands for across (two standard deviations of its Gaussian):
+	// higher is smoother and blurrier.
+	float footprintScale = 4.0f;
 	// Perceptual roughness up to which a lobe passes photons (and counts as smooth on camera paths), also the
 	// roughness factor up to which a material's primitives are aimed at as casters.
 	float maxRoughness = 0.20f;
 	int maxBounces = 8; // smooth bounces a photon may take
-	int evictFrames = 120; // frames without photons before a cell is emptied
-	// The UI bumps this to empty the grid.
+	// The photon map adapts each texel's share of the photons from feedback (Yang and Ouyang's AAPS): more where its
+	// photons land wide on screen or the caustics flicker, fewer where they land small or out of view. Off: even.
+	bool adaptive = true;
+	float targetArea = 4.0f; // pixels a photon's area should cover on screen
+	float varianceGain = 64.0f; // photons per texel a fully flickering caustic adds
+	float temporalWeight = 0.5f; // weight of a texel's new share against its neighbourhood's last ones
+	float minDensity = 0.25f; // photons per texel over a caster, at least, so that new caustics are found
+	float maxDensity = 4096.0f; // photons per texel, at most
+	// The UI bumps this to start the photon map over.
 	uint resetCount = 0;
 };
 
@@ -203,7 +200,7 @@ struct RenderSettings
 	// camera sees, PSR's mirrors and glass and pass-throughs not counting) is scaled down to at most
 	// indirectClampValue in its largest channel. Biased darker.
 	bool clampIndirect = true;
-	float indirectClampValue = 1.0f;
+	float indirectClampValue = 5.0f;
 	// The same for direct light: what the surface the camera sees scatters, by light sampling or a sample of a
 	// lobe that is not mirror-like. Light the camera sees, also as a mirror-like surface's image, is not clamped.
 	bool clampDirect = false;
