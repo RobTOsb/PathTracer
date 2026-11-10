@@ -540,6 +540,20 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SliderInt("Glossy importance bounces", &lights.glossyImportanceBounces, 0, 16);
 		ImGui::SetItemTooltip("Path vertices (0 = primary hit) that get the glossy light tree importance, "
 							  "later ones use the diffuse one only");
+		ImGui::Checkbox("SG importance", &lights.sgImportance);
+		ImGui::SetItemTooltip("Rank light tree nodes by their spherical Gaussian lighting (diffuse and anisotropic "
+							  "glossy integrals) instead of the cheap bound over the cone to each node, oriented by "
+							  "the normal. More accurate, much more expensive; compiles its own pipeline");
+		ImGui::BeginDisabled(!lights.sgImportance);
+		ImGui::Checkbox("Far-field importance", &lights.farFieldImportance);
+		ImGui::SetItemTooltip("SG importance: treat small, distant light clusters wholly above the horizon as point "
+							  "lights");
+		ImGui::SameLine();
+		ImGui::BeginDisabled(!lights.farFieldImportance);
+		ImGui::SliderFloat("Min sharpness", &lights.farFieldSharpness, 1.0f, 1000.0f, "%.0f",
+						   ImGuiSliderFlags_Logarithmic);
+		ImGui::EndDisabled();
+		ImGui::EndDisabled();
 		ImGui::SliderInt("Lights per leaf", &lights.maxLeafLights, 1, static_cast<int>(LIGHT_TREE_MAX_LEAF_LIGHTS));
 		ImGui::SetItemTooltip("Light tree leaf size; a leaf's lights are picked in proportion to their flux");
 		ImGui::SliderFloat("Power mix", &lights.treePowerMix, 0.0f, 1.0f, "%.2f");
@@ -648,6 +662,16 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::BeginDisabled(!settings_.clampDirect);
 		ImGui::SliderFloat("Direct clamp", &settings_.directClampValue, 0.1f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
 		ImGui::EndDisabled();
+		ImGui::EndDisabled();
+		ImGui::SliderFloat("Min reflection probability", &settings_.reflectionMinProbability, 0.0f, 0.95f, "%.2f");
+		ImGui::SetItemTooltip("Visible surfaces with a sharp reflection sample it at least this often, the other lobes "
+							  "less: small bright reflections (lights in a polished floor) show in more frames, and the "
+							  "diffuse lobe, which denoises better, gets the noise instead. Unbiased. 0 = off");
+		ImGui::BeginDisabled(settings_.reflectionMinProbability <= 0.0f);
+		ImGui::SliderFloat("Max roughness##ReflectionMinProbability",
+						   &settings_.reflectionMinProbabilityMaxRoughness, 0.0f, 1.0f, "%.2f");
+		ImGui::SetItemTooltip("Reflections at most this rough (perceptual) get the minimum probability; rougher ones "
+							  "are found by light sampling well enough");
 		ImGui::EndDisabled();
 
 		const ShaderExecutionReorderingSupport ser = renderContext->GetShaderExecutionReorderingSupport();

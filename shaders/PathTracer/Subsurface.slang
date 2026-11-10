@@ -171,6 +171,10 @@ LightSelectVertex ExitLightSelectVertex(float3 position, float3 normal, uint bou
     LightSelectVertex v;
     v.position = position;
     v.normal = normal;
+#ifdef SG_LIGHT_TREE
+    float3 bitangent;
+    BuildOrthonormalBasis(normal, v.tangent, bitangent);
+#endif
     v.wo = normal;
     v.diffuseWeight = 1.0;
     v.specularWeight = 0.0;

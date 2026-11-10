@@ -24,6 +24,9 @@ struct LightSelectVertex
     // mat.geometryNormal turned to the side of the glossy lobe, which for rough glass may be the transmitted side
     // (see MakeLightSelectVertex).
     float3 normal;
+#ifdef SG_LIGHT_TREE
+    float3 tangent; // of the anisotropic glossy lobe, perpendicular to normal; the bitangent is cross(normal, tangent)
+#endif
     float3 wo; // the view direction whose mirror image about normal is the glossy lobe's axis
     float diffuseWeight; // on normal's side
     float specularWeight;
@@ -139,6 +142,9 @@ LightSelectVertex MakeLightSelectVertex(float3 position, OpenPBRBaseParams mat, 
     // the viewer, and wo below its shading normal is the normal map's doing.
     bool transmissive = mat.transmissionWeight > 0.0 || HasDiffuseTransmission(mat);
     v.normal = transmissive && dot(wo, mat.geometryNormal) < 0.0 ? -mat.geometryNormal : mat.geometryNormal;
+#ifdef SG_LIGHT_TREE
+    v.tangent = mat.geometryTangent; // a flipped normal flips the bitangent, which GGX's symmetry does not see
+#endif
     v.wo = wo;
     // Fuzz is broad enough to count as diffuse. The coat joins the specular lobe, which takes the
     // roughness of whichever of the two reflects more.
@@ -178,6 +184,9 @@ struct PackedLightSelectVertex
 {
     float3 position;
     uint normal;
+#ifdef SG_LIGHT_TREE
+    uint tangent;
+#endif
     uint wo;
     uint weights; // half2: diffuseWeight, specularWeight
     uint alpha;   // half2
@@ -189,6 +198,9 @@ PackedLightSelectVertex PackLightSelectVertex(LightSelectVertex v)
     PackedLightSelectVertex p;
     p.position = v.position;
     p.normal = OctEncode(v.normal);
+#ifdef SG_LIGHT_TREE
+    p.tangent = OctEncode(v.tangent);
+#endif
     p.wo = OctEncode(v.wo);
     p.weights = PackHalf2(float2(v.diffuseWeight, v.specularWeight));
     p.alpha = PackHalf2(v.alpha);
@@ -201,6 +213,9 @@ LightSelectVertex UnpackLightSelectVertex(PackedLightSelectVertex p)
     LightSelectVertex v;
     v.position = p.position;
     v.normal = OctDecode(p.normal);
+#ifdef SG_LIGHT_TREE
+    v.tangent = OctDecode(p.tangent);
+#endif
     v.wo = OctDecode(p.wo);
     float2 weights = UnpackHalf2(p.weights);
     v.diffuseWeight = weights.x;
@@ -213,8 +228,14 @@ LightSelectVertex UnpackLightSelectVertex(PackedLightSelectVertex p)
 
 LightTreeShadingContext MakeLightTreeShadingContext(LightSelectVertex v)
 {
-    return MakeLightTreeShadingContext(v.position, v.normal, v.wo, v.diffuseWeight, v.specularWeight,
-                                       v.backDiffuseWeight, v.alpha.x, v.alpha.y, g_Frame.lightTreeDiffuseOnlyAlpha);
+#ifdef SG_LIGHT_TREE
+    float3 tangent = v.tangent;
+#else
+    float3 tangent = float3(0.0, 0.0, 0.0); // the cone-bound importance's glossy lobe is isotropic
+#endif
+    return MakeLightTreeShadingContext(v.position, tangent, v.normal, v.wo, v.diffuseWeight, v.specularWeight,
+                                       v.backDiffuseWeight, v.alpha.x, v.alpha.y, g_Frame.lightTreeDiffuseOnlyAlpha,
+                                       g_Frame.lightTreeFarFieldSharpness);
 }
 
 // Probability of SampleLight at v picking lightIndex from the light buffer, sun selection included.

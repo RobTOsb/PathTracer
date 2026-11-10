@@ -37,6 +37,13 @@ struct LightSettings
 	float diffuseOnlyRoughness = 0.7f;
 	// Light tree: vertices from this bounce on (0 = primary hit) skip the glossy importance.
 	int glossyImportanceBounces = 1;
+	// Light tree: rank nodes by the SG lighting integrals of Tokuyoshi et al. (the SG_LIGHT_TREE permutation) rather
+	// than the cheap bound over the cone to each node, oriented by the normal. More accurate, far more code.
+	bool sgImportance = false;
+	// Light tree, SG importance: nodes wholly above the horizon whose SG light is at least this sharp (squared
+	// distance over spatial variance) use the cheap point light form of the importance.
+	bool farFieldImportance = true;
+	float farFieldSharpness = 16.0f;
 	// Light tree: lights per leaf, picked by flux within it, 1 to LIGHT_TREE_MAX_LEAF_LIGHTS. More
 	// makes the tree shallower at the cost of ignoring where the leaf's lights are relative to each other.
 	int maxLeafLights = 4;
@@ -205,6 +212,11 @@ struct RenderSettings
 	// lobe that is not mirror-like. Light the camera sees, also as a mirror-like surface's image, is not clamped.
 	bool clampDirect = false;
 	float directClampValue = 1.0f;
+	// Camera-visible opaque surfaces whose reflection is at most reflectionMinProbabilityMaxRoughness (perceptual)
+	// rough pick that lobe with at least this probability, the other lobes' shares scaled down: unbiased, it moves
+	// noise from small bright reflections (emitters in polished floors) to the diffuse lobe. 0 = off, at most 0.95.
+	float reflectionMinProbability = 0.5f;
+	float reflectionMinProbabilityMaxRoughness = 0.3f;
 	// DXR 1.2 shader execution reordering: switches to the path tracing pipeline that reorders
 	// threads by material before shading each hit. Ignored where the device has no SER.
 	bool shaderExecutionReordering = true;

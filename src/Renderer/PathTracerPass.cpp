@@ -156,12 +156,13 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 	const bool inlineShadows = settings_.inlineShadowRays;
 	// The guides are only traced for ray reconstruction.
 	const bool psr = rayReconstruction_ && settings_.primarySurfaceReplacement;
+	const bool sgLightTree = settings_.lights.sgImportance;
 
 	// A failed opacity micromap or SER compile is logged once, and the pipeline without them takes over.
 	if (settings_.opacityMicromaps && scene_.HasOpacityMicromaps() && !ommFailed_)
 	{
 		const bool ser = settings_.shaderExecutionReordering && serSupported_ && !serFailed_;
-		if (const Pipeline *pipeline = GetPipeline(ser, atmosphere, inlineShadows, true, psr))
+		if (const Pipeline *pipeline = GetPipeline(ser, atmosphere, inlineShadows, true, psr, sgLightTree))
 		{
 			return pipeline;
 		}
@@ -171,7 +172,7 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 
 	if (settings_.shaderExecutionReordering && serSupported_ && !serFailed_)
 	{
-		if (const Pipeline *pipeline = GetPipeline(true, atmosphere, inlineShadows, false, psr))
+		if (const Pipeline *pipeline = GetPipeline(true, atmosphere, inlineShadows, false, psr, sgLightTree))
 		{
 			return pipeline;
 		}
@@ -179,7 +180,7 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 		serFailed_ = true;
 	}
 
-	const Pipeline *pipeline = GetPipeline(false, atmosphere, inlineShadows, false, psr);
+	const Pipeline *pipeline = GetPipeline(false, atmosphere, inlineShadows, false, psr, sgLightTree);
 	if (pipeline == nullptr)
 	{
 		throw std::runtime_error("Failed to create the path tracing pipeline (see the shader log above).");
@@ -188,19 +189,21 @@ const PathTracerPass::Pipeline *PathTracerPass::SelectPipeline()
 }
 
 const PathTracerPass::Pipeline *PathTracerPass::GetPipeline(bool shaderExecutionReordering, bool atmosphere,
-															bool inlineShadows, bool opacityMicromaps, bool psr)
+															bool inlineShadows, bool opacityMicromaps, bool psr,
+															bool sgLightTree)
 {
 	Pipeline &pipeline = pipelines_[shaderExecutionReordering ? 1 : 0][atmosphere ? 1 : 0][inlineShadows ? 1 : 0]
-								   [opacityMicromaps ? 1 : 0][psr ? 1 : 0];
+								   [opacityMicromaps ? 1 : 0][psr ? 1 : 0][sgLightTree ? 1 : 0];
 	if (pipeline.pipeline == InvalidPipelineHandle)
 	{
-		pipeline = CreatePipeline(shaderExecutionReordering, atmosphere, inlineShadows, opacityMicromaps, psr);
+		pipeline = CreatePipeline(shaderExecutionReordering, atmosphere, inlineShadows, opacityMicromaps, psr, sgLightTree);
 	}
 	return pipeline.pipeline != InvalidPipelineHandle ? &pipeline : nullptr;
 }
 
 PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReordering, bool atmosphere,
-														 bool inlineShadows, bool opacityMicromaps, bool psr) const
+														 bool inlineShadows, bool opacityMicromaps, bool psr,
+														 bool sgLightTree) const
 {
 	RaytracingPipelineDesc desc = {};
 	desc.exports = { "RayGen", "PhotonRayGen", "Miss", "ClosestHit", "AnyHit" };
@@ -233,6 +236,10 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 	if (inlineShadows)
 	{
 		desc.defines.push_back("INLINE_SHADOWS");
+	}
+	if (sgLightTree)
+	{
+		desc.defines.push_back("SG_LIGHT_TREE");
 	}
 	if (shaderExecutionReordering)
 	{
@@ -390,28 +397,36 @@ void PathTracerPass::PreparePhotons(FrameConstants &constants, bool sunActive, f
 	// The buffers, on first use.
 	if (photonRecords_ == InvalidResourceHandle)
 	{
-		auto create = [&](uint64_t count, uint32_t stride, const char *debugName)
+		// The sums the passes add to start at zero, and the shares and running sums read as empty: those buffers are
+		// created from zeros, copied in on the copy queue now. (ClearUnorderedAccessViewUint, which they used to be cleared
+		// with on their first frame, read a stale shader-visible descriptor: debug layer #646, then a GPU hang in release.)
+		const uint64_t pixels = static_cast<uint64_t>(width_) * height_;
+		std::vector<uint8_t> zeros(std::max<uint64_t>(static_cast<uint64_t>(PHOTON_MAP_TEXELS) * 4 * sizeof(uint32_t),
+													  pixels * 4 * sizeof(uint32_t)),
+								   0);
+		const UploadBatchHandle batch = renderContext_->BeginUpload();
+		auto create = [&](uint64_t count, uint32_t stride, const char *debugName, bool zeroed)
 		{
 			BufferDesc desc = {};
 			desc.sizeInBytes = count * stride;
 			desc.structureByteStride = stride;
 			desc.usageFlags = ResourceUsageFlags::UnorderedAccess;
 			desc.debugName = debugName;
-			return renderContext_->CreateBuffer(desc, ResourceViewType::UnorderedAccess);
+			return zeroed ? renderContext_->CreateBuffer(desc, ResourceViewType::UnorderedAccess, zeros.data(), batch)
+						  : renderContext_->CreateBuffer(desc, ResourceViewType::UnorderedAccess);
 		};
-		const uint64_t pixels = static_cast<uint64_t>(width_) * height_;
-		photonDensity_[0] = create(PHOTON_MAP_TEXELS, sizeof(float), "PathTracer_PhotonDensity0");
-		photonDensity_[1] = create(PHOTON_MAP_TEXELS, sizeof(float), "PathTracer_PhotonDensity1");
-		photonTexelPrefix_ = create(PHOTON_MAP_TEXELS, sizeof(float), "PathTracer_PhotonTexelPrefix");
-		photonBlockPrefix_ = create(PHOTON_MAP_BLOCKS + 1, sizeof(float), "PathTracer_PhotonBlockPrefix");
-		photonFeedback_ = create(PHOTON_MAP_TEXELS, 4 * sizeof(uint32_t), "PathTracer_PhotonFeedback");
-		photonRecords_ = create(PHOTON_RECORD_CAPACITY, sizeof(GpuPhotonRecord), "PathTracer_PhotonRecords");
-		photonRecordCount_ = create(4, sizeof(uint32_t), "PathTracer_PhotonRecordCount");
-		photonReceivers_ = create(2 * pixels, 4 * sizeof(float), "PathTracer_PhotonReceivers");
-		photonCaustics_ = create(pixels, 4 * sizeof(uint32_t), "PathTracer_PhotonCaustics");
-		photonHistory_[0] = create(pixels, 2 * sizeof(float), "PathTracer_PhotonHistory0");
-		photonHistory_[1] = create(pixels, 2 * sizeof(float), "PathTracer_PhotonHistory1");
-		photonBuffersCleared_ = false;
+		photonDensity_[0] = create(PHOTON_MAP_TEXELS, sizeof(float), "PathTracer_PhotonDensity0", true);
+		photonDensity_[1] = create(PHOTON_MAP_TEXELS, sizeof(float), "PathTracer_PhotonDensity1", true);
+		photonTexelPrefix_ = create(PHOTON_MAP_TEXELS, sizeof(float), "PathTracer_PhotonTexelPrefix", false);
+		photonBlockPrefix_ = create(PHOTON_MAP_BLOCKS + 1, sizeof(float), "PathTracer_PhotonBlockPrefix", true);
+		photonFeedback_ = create(PHOTON_MAP_TEXELS, 4 * sizeof(uint32_t), "PathTracer_PhotonFeedback", true);
+		photonRecords_ = create(PHOTON_RECORD_CAPACITY, sizeof(GpuPhotonRecord), "PathTracer_PhotonRecords", false);
+		photonRecordCount_ = create(4, sizeof(uint32_t), "PathTracer_PhotonRecordCount", true);
+		photonReceivers_ = create(2 * pixels, 4 * sizeof(float), "PathTracer_PhotonReceivers", false);
+		photonCaustics_ = create(pixels, 4 * sizeof(uint32_t), "PathTracer_PhotonCaustics", true);
+		photonHistory_[0] = create(pixels, 2 * sizeof(float), "PathTracer_PhotonHistory0", true);
+		photonHistory_[1] = create(pixels, 2 * sizeof(float), "PathTracer_PhotonHistory1", true);
+		renderContext_->EndUpload(batch);
 		photonMapValid_ = false;
 	}
 
@@ -498,24 +513,6 @@ void PathTracerPass::DispatchPhotonMap(RenderContext *renderContext, ResourceHan
 									 ResourceSync::ComputeShading,
 									 ResourceAccess::UnorderedAccess);
 	};
-
-	// The sums the passes add to start at zero, and the shares and running sums read as empty.
-	if (!photonBuffersCleared_)
-	{
-		for (ResourceHandle buffer: { photonDensity_[0],
-									  photonDensity_[1],
-									  photonBlockPrefix_,
-									  photonFeedback_,
-									  photonRecordCount_,
-									  photonCaustics_,
-									  photonHistory_[0],
-									  photonHistory_[1] })
-		{
-			renderContext->ClearUAVBufferUint(buffer, 0);
-		}
-		renderContext->GlobalBarrier(ResourceSync::All, ResourceAccess::UnorderedAccess, ResourceSync::All, ResourceAccess::UnorderedAccess);
-		photonBuffersCleared_ = true;
-	}
 
 	bind(PhotonPassUpdate);
 	renderContext->Dispatch(PHOTON_MAP_TEXELS / PHOTON_GROUP_SIZE, 1, 1);
@@ -617,6 +614,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.lightTreePowerMix = std::clamp(lights.treePowerMix, 0.0f, 1.0f);
 	constants.sunSelectProbability = sunActive ? (lightsActive ? 0.5f : 1.0f) : 0.0f;
 	constants.lightTreeGlossyBounces = static_cast<uint>(std::max(lights.glossyImportanceBounces, 0));
+	constants.lightTreeFarFieldSharpness = lights.farFieldImportance ? lights.farFieldSharpness : FLT_MAX;
 	constants.lightTreeDiffuseOnlyAlpha = lights.diffuseOnlyRoughLobes
 											  ? lights.diffuseOnlyRoughness * lights.diffuseOnlyRoughness
 											  : FLT_MAX;
@@ -654,6 +652,9 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.glassReflectionSplits = static_cast<uint>(std::clamp(settings_.glassReflectionSplits, 0, 127));
 	constants.indirectClamp = settings_.clampIndirect && approximations ? std::max(settings_.indirectClampValue, 0.0f) : FLT_MAX;
 	constants.directClamp = settings_.clampDirect && approximations ? std::max(settings_.directClampValue, 0.0f) : FLT_MAX;
+	constants.reflectionMinProbability = std::clamp(settings_.reflectionMinProbability, 0.0f, 0.95f);
+	const float reflectionMaxRoughness = std::clamp(settings_.reflectionMinProbabilityMaxRoughness, 0.0f, 1.0f);
+	constants.reflectionMinProbabilityMaxAlpha = reflectionMaxRoughness * reflectionMaxRoughness;
 	constants.subsurfaceComponents = (settings_.subsurfaceZeroScattering ? SUBSURFACE_ZERO_SCATTERING : 0u) |
 									 (settings_.subsurfaceSingleScattering ? SUBSURFACE_SINGLE_SCATTERING : 0u) |
 									 (settings_.subsurfaceMultipleScattering ? SUBSURFACE_MULTIPLE_SCATTERING : 0u);

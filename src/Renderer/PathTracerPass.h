@@ -39,7 +39,8 @@ struct PathTracerGuides
 // which takes its sky and sunlight from the atmosphere's LUTs and scatters sunlight in the scene's air.
 // With RenderSettings::opacityMicromaps on a scene that has them, it traces the micromap TLAS with the
 // OPACITY_MICROMAPS permutation. With rayReconstruction and RenderSettings::primarySurfaceReplacement, the
-// guides follow mirrors and glass in the PSR permutation.
+// guides follow mirrors and glass in the PSR permutation. With LightSettings::sgImportance, the light tree ranks its
+// nodes by their SG lighting in the SG_LIGHT_TREE permutation.
 // With reference set instead (the REFERENCE permutation) it sums RenderSettings::reference.samplesPerFrame
 // randomly jittered paths per pixel each frame into an accumulation target and outputs their mean, starting
 // over whenever the camera or anything else the image depends on changes, and stops tracing once it has
@@ -128,9 +129,9 @@ private:
 
 	const Pipeline *SelectPipeline();
 	const Pipeline *GetPipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps,
-								bool psr);
+								bool psr, bool sgLightTree);
 	Pipeline CreatePipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps,
-							bool psr) const;
+							bool psr, bool sgLightTree) const;
 	ResourceHandle CreateTarget(Format format, const char *debugName) const;
 	// Fills constants.photons for this frame (the photon map over the casters), enabled or not, and says whether the
 	// photon map starts over.
@@ -149,7 +150,7 @@ private:
 	const bool reference_;
 
 	// Indexed by shaderExecutionReordering, atmosphere, inline shadows, opacity micromaps, then primary surface replacement.
-	Pipeline pipelines_[2][2][2][2][2];
+	Pipeline pipelines_[2][2][2][2][2][2];
 	bool serSupported_ = false;
 	bool serFailed_ = false; // the SER pipeline did not compile, so stay on the plain one
 	bool ommFailed_ = false; // the opacity micromap pipeline did not compile, so trace without them
@@ -183,7 +184,6 @@ private:
 	std::vector<ResourceHandle> photonRects_;
 	std::vector<std::pair<float3, float3>> photonCasters_;
 	std::vector<GpuPhotonRect> photonRectData_;
-	bool photonBuffersCleared_ = false; // the buffers that must start at zero have been
 	bool photonMapValid_ = false; // photons ran last frame with this map
 	bool photonReset_ = false; // this frame's photon map starts over
 	uint photonParity_ = 0; // which of the two shares and histories is this frame's

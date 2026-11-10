@@ -149,6 +149,15 @@ struct FrameConstants
 	uint blendGuides;
 	// Caustic photons from the sun (PathTracer/Photons.slang), see PathTracerPass.
 	PhotonParameters photons;
+
+	// SG_LIGHT_TREE: light tree nodes wholly above the horizon whose SG light is at least this sharp (squared distance
+	// over spatial variance) take the point light form of the importance. FLT_MAX = off.
+	float lightTreeFarFieldSharpness;
+	// Camera-visible opaque surfaces whose reflection lobe's GGX alpha is at most reflectionMinProbabilityMaxAlpha
+	// pick it with at least reflectionMinProbability (FloorReflectionProbability). 0 = off.
+	float reflectionMinProbability;
+	float reflectionMinProbabilityMaxAlpha;
+	float padReflection;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -623,7 +632,7 @@ struct AutoExposureConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
-static_assert(sizeof(FrameConstants) == 752,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 768,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
 static_assert(sizeof(GpuMaterial) == 152,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,

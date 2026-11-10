@@ -108,6 +108,25 @@ bool LeavesLightsToBsdf(OpenPBRContext ctx)
            (ctx.probCoat <= 0.0 || ctx.coatAlpha <= 1.0e-4);
 }
 
+// A sharp reflection lobe (GGX alpha at most reflectionMinProbabilityMaxAlpha) is picked with at least
+// reflectionMinProbability, the other lobes scaled down to make room. The weights and the MIS PDFs take the whole
+// mixture, so this only moves noise: off the reflection, whose small bright images (an emitter in a polished floor)
+// would otherwise show in just the share of frames its albedo earns, onto the diffuse lobe, which denoises better.
+// A surface whose coat leads its guides keeps its choice, so the guides follow the same lobe.
+void FloorReflectionProbability(inout OpenPBRContext ctx)
+{
+    float minProbability = g_Frame.reflectionMinProbability;
+    if (!(ctx.probSpecR > 0.0 && ctx.probSpecR < minProbability) ||
+        max(ctx.alpha.x, ctx.alpha.y) > g_Frame.reflectionMinProbabilityMaxAlpha || CoatLeadsGuides(ctx))
+        return;
+    float scale = (1.0 - minProbability) / (1.0 - ctx.probSpecR);
+    ctx.probSpecR = minProbability;
+    ctx.probSpecT *= scale;
+    ctx.probDiffuse *= scale;
+    ctx.probCoat *= scale;
+    ctx.probFuzz *= scale;
+}
+
 // The extinction of the medium the next segment crosses and the Russian roulette scale, as halves
 // for fewer registers across TraceRay.
 uint2 PackSegmentMedium(float3 extinction, float rrInvScale)
@@ -272,6 +291,10 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         ls = SampleLight(UnpackLightSelectVertex(vertex), lightU.xy, rng);
     mat = UnpackMaterial(packedMat, SIMPLE);
     ctx = OpenPBRSetup(mat, wo);
+    // Before NEE, so that its MIS sees the mixture the BSDF sample is drawn from. The light select vertex above keeps
+    // the material's own shares, at both ends of an emitter's MIS.
+    if (visible && opaque && !lastSegment)
+        FloorReflectionProbability(ctx);
     float3 extinction = MediumExtinction(mat);
 
     // Caustics: the surface with a diffuse part the camera ray meets is the pixel's photon receiver, on which

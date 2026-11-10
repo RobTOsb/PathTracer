@@ -1,11 +1,19 @@
 // Light tree traversal: a stochastic walk down a 4-wide tree with one light sample per query, and the PMF walk back
 // up for MIS. Each node holds the cluster of "Hierarchical Light Sampling with Accurate Spherical Gaussian Lighting"
 // (Tokuyoshi, Ikeda, Kulkarni and Harada 2024, Section 3.1): flux, mean, a vMF fit of the emission and the spatial
-// deviation. A node's importance is not their SG lighting integral but a cheap bound over the cone to its bounding
-// sphere, except for the glossy lobe, which weighs the node as their SG light, widened by its spatial deviation.
+// deviation. A node's importance takes one of two forms:
+// - by default, not their SG lighting integral but a cheap bound over the cone to its bounding sphere, oriented by
+//   the normal, except for the glossy lobe, which weighs the node as their SG light, widened by its spatial deviation;
+// - under SG_LIGHT_TREE, their SG lighting (Sections 3 to 6, SGLighting.slang): the cluster as an SG light, the
+//   diffuse importance by interpolation (Eq. 7) and the glossy one by filtered anisotropic GGX (Eq. 12), with their
+//   point light forms for small, distant clusters wholly above the horizon. More accurate, far more code.
 // LightTreeBuild.slang builds the tree on the GPU every frame, Morton sorted after Lin and Yuksel 2020.
 
 #include "LightTreeInterop.h"
+
+#ifdef SG_LIGHT_TREE
+import SGLighting;
+#endif
 
 static const float LIGHT_TREE_INV_PI = 0.318309886183791;
 static const float LIGHT_TREE_TWO_PI = 6.28318530717959;
@@ -55,15 +63,27 @@ struct LightTreeShadingContext
     // A transmissive surface's diffuse-like lobes on the far side of normal, as a diffuse lobe facing -normal.
     // 0 for a surface that only reflects, which leaves out every node wholly below the tangent plane.
     float backDiffuseWeight;
+#ifdef SG_LIGHT_TREE
+    GlossyContext glossy;
+    // SG light sharpness from which a node wholly above the horizon takes the far-field (point light)
+    // form of the diffuse and of the glossy importance.
+    float diffuseFarFieldSharpness;
+    float glossyFarFieldSharpness;
+#else
     float3 reflectDir;     // the glossy lobe's axis, the view direction mirrored about normal
     float glossySharpness; // the glossy lobe as a vMF around reflectDir
+#endif
 };
 
+// T: the tangent along which alphaX lies, perpendicular to N, the bitangent being cross(N, T); only SG_LIGHT_TREE's
+// anisotropic glossy importance reads it.
 // diffuseOnlyAlpha: GGX alpha (roughness squared) on both axes at or above which the glossy lobe counts as
 // diffuse, wide enough that the diffuse term ranks clusters about as well.
-LightTreeShadingContext MakeLightTreeShadingContext(float3 position, float3 N, float3 V, float diffuseWeight,
+// farFieldSharpness (SG_LIGHT_TREE only): SG light sharpness (squared distance over spatial variance) from which a
+// cluster is small enough, seen from here, to be treated as a point light. FLT_MAX turns the far field off.
+LightTreeShadingContext MakeLightTreeShadingContext(float3 position, float3 T, float3 N, float3 V, float diffuseWeight,
                                                     float specularWeight, float backDiffuseWeight, float alphaX,
-                                                    float alphaY, float diffuseOnlyAlpha)
+                                                    float alphaY, float diffuseOnlyAlpha, float farFieldSharpness)
 {
     LightTreeShadingContext ctx;
     ctx.position = position;
@@ -75,14 +95,95 @@ LightTreeShadingContext MakeLightTreeShadingContext(float3 position, float3 N, f
     ctx.diffuseWeight = roughLobe ? diffuseWeight + specular : diffuseWeight;
     ctx.specularWeight = roughLobe ? 0.0 : specular;
 
+#ifdef SG_LIGHT_TREE
+    ctx.glossy = MakeGlossyContext(T, cross(N, T), N, V, alphaX, alphaY);
+    float jjtMax = max(ctx.glossy.jjt.x, ctx.glossy.jjt.z);
+    float alpha2Min = min(ctx.glossy.alpha2.x, ctx.glossy.alpha2.y);
+    ctx.diffuseFarFieldSharpness = farFieldSharpness;
+    ctx.glossyFarFieldSharpness = max(farFieldSharpness, 20.0 * jjtMax / alpha2Min);
+#else
     // GGX's reflected directions as a vMF, of the rougher axis so that it bounds the lobe: the NDF's sharpness
     // 2 / alpha^2 over half vectors halves for the reflected directions.
     ctx.reflectDir = 2.0 * dot(V, N) * N - V;
     float alpha = clamp(max(alphaX, alphaY), 1e-3, 1.0);
     float alpha2 = alpha * alpha;
     ctx.glossySharpness = (1.0 - alpha2) / (2.0 * alpha2);
+#endif
     return ctx;
 }
+
+#ifdef SG_LIGHT_TREE
+
+// Section 3.2: incoming radiance from the cluster as an SG light,
+// L(x, o) ~ Phi g(o; -nu, lambda) g(o; dir, d^2 / sigma^2) / (2 pi sigma^2 int g(w; -nu, lambda) dw).
+// toLight is the vector from the shading point to the cluster mean.
+SGLight MakeSGLight(GpuLightTreeNode node, float3 toLight, float3 n)
+{
+    float d2 = dot(toLight, toLight);
+    // One rsqrt rather than a sqrt and three divisions.
+    float3 dir = d2 > 0.0 ? toLight * rsqrt(d2) : n;
+
+    // Hybrid variance: blend towards the conservative bound when the cluster centre is behind the surface.
+    float radius = LightTreeRadius(node);
+    float stdDev = LightTreeStdDev(node);
+    float c = max(dot(n, -dir), 0.0);
+    float sigma2 = lerp(stdDev * stdDev, 0.5 * radius * radius, c);
+    // A single point light has no spatial deviation: the floor makes it a very sharp SG, whose amplitude times
+    // integral still comes to the flux over d^2.
+    sigma2 = max(sigma2, 1e-8 * d2 + 1e-12);
+
+    float invSigma2 = 1.0 / sigma2;
+    float s = d2 * invSigma2;
+
+    // The node amplitude already holds Phi / (2 pi int g(w; -nu, lambda) dw).
+    SGLight sg;
+    float logScale;
+    SGProduct(-LightTreeAxis(node), LightTreeSharpness(node), dir, s, sg.axis, sg.sharpness, logScale);
+    sg.amplitude = node.meanAmplitude.w * exp(logScale) * invSigma2;
+    return sg;
+}
+
+// Eq. 6 with the diffuse (Eq. 7) and glossy (Eq. 12) approximations, weighted by lobe reflectance.
+float LightTreeNodeImportance(GpuLightTreeNode node, LightTreeShadingContext ctx)
+{
+    // A bounding sphere entirely below the tangent plane has a true integral of zero, unless the surface
+    // transmits. Either test rejects the empty nodes that pad a group, whose radius is -FLT_MAX.
+    float3 toMean = node.meanAmplitude.xyz - ctx.position;
+    float height = dot(toMean, ctx.normal);
+    float radius = LightTreeRadius(node);
+    bool front = height >= -radius;
+    bool back = ctx.backDiffuseWeight > 0.0 && height <= radius;
+    if (!front && !back)
+        return 0.0;
+
+    // A node behind a transmissive surface takes the conservative variance as seen from that side.
+    SGLight sg = MakeSGLight(node, toMean, back && height < 0.0 ? -ctx.normal : ctx.normal);
+
+    bool aboveHorizon = height > radius;
+
+    float importance = 0.0;
+    if (front && ctx.diffuseWeight > 0.0)
+    {
+        if (aboveHorizon && sg.sharpness >= ctx.diffuseFarFieldSharpness)
+            importance += ctx.diffuseWeight * SGDiffuseImportanceFarField(sg, ctx.normal);
+        else
+            importance += ctx.diffuseWeight * SGDiffuseImportance(sg, ctx.normal);
+    }
+    if (front && ctx.specularWeight > 0.0)
+    {
+        if (aboveHorizon && sg.sharpness >= ctx.glossyFarFieldSharpness)
+            importance += ctx.specularWeight * SGGlossyImportanceFarField(sg, ctx.glossy);
+        else
+            importance += ctx.specularWeight * SGGlossyImportance(sg, ctx.glossy);
+    }
+    if (back)
+        importance += ctx.backDiffuseWeight * SGDiffuseImportance(sg, -ctx.normal);
+
+    // Guard against float underflow so that Eq. 1 (I > 0 whenever the integral is > 0) still holds.
+    return max(importance, 1e-30);
+}
+
+#else
 
 // The largest cosine between an axis and the directions of a cone, given the cosine to the cone's centre and the
 // cone's half angle as sine and cosine: 1 if the axis is inside the cone.
@@ -145,6 +246,8 @@ float LightTreeNodeImportance(GpuLightTreeNode node, LightTreeShadingContext ctx
     // Guard against float underflow so that a node that may contribute keeps a non-zero probability.
     return max(intensity * lobes, 1e-30);
 }
+
+#endif // SG_LIGHT_TREE
 
 float4 LightTreeGroupImportance(StructuredBuffer<GpuLightTreeNode> nodes, uint first, LightTreeShadingContext ctx,
                                 out uint4 childOrLight)
