@@ -191,7 +191,10 @@ float NormalMapVariance(float3 averaged, float scale)
 // simple: the row is GPU_MATERIAL_SIMPLE, so only the base's textures are read.
 // specularAA: geometric specular antialiasing of opaque surfaces, (variance of the vertex normals across
 // the pixel, scale of the normal maps' variance), zero for none.
-OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotropic, bool simple, float2 specularAA)
+// reduced: a hit deep in a diffuse path (FrameConstants::reducedMaterialDiffuseBounces), which skips the normal maps
+// and takes solid subsurface as the Lambertian stand-in.
+OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotropic, bool simple, float2 specularAA,
+                               bool reduced = false)
 {
     MaterialData material = LoadGpuMaterial(hit.materialId);
     float2 uv = hit.uv;
@@ -200,7 +203,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
 
     // Tangent-space normal map: +X along the tangent, +Y along the bitangent, +Z along N.
     float normalVariance = specularAA.x;
-    if (material.normalTexture != INVALIDDESCRIPTORHANDLE)
+    if (!reduced && material.normalTexture != INVALIDDESCRIPTORHANDLE)
     {
         float3 tn = SampleTextureGrad(material.normalTexture, uv, ddx, ddy, anisotropic).xyz * 2.0 - 1.0;
         if (specularAA.y > 0.0)
@@ -222,7 +225,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
             coatWeight *= SampleTextureGrad(material.coatWeightTexture, uv, ddx, ddy, anisotropic).r;
         if (material.coatRoughnessTexture != INVALIDDESCRIPTORHANDLE)
             coatRoughness *= SampleTextureGrad(material.coatRoughnessTexture, uv, ddx, ddy, anisotropic).g;
-        if (material.coatNormalTexture != INVALIDDESCRIPTORHANDLE)
+        if (!reduced && material.coatNormalTexture != INVALIDDESCRIPTORHANDLE)
         {
             float3 tn = SampleTextureGrad(material.coatNormalTexture, uv, ddx, ddy, anisotropic).xyz * 2.0 - 1.0;
             if (specularAA.y > 0.0)
@@ -331,7 +334,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
         p.subsurfaceWeight = saturate(weight);
         p.subsurfaceColour = colour;
         p.subsurfaceScatterAnisotropy = material.subsurfaceScatterAnisotropy;
-        if (!thinWalled && g_Frame.subsurfaceComponents != 0)
+        if (!thinWalled && g_Frame.subsurfaceComponents != 0 && !reduced)
         {
             float3 radius = material.subsurfaceRadius;
             if (material.subsurfaceRadiusTexture != INVALIDDESCRIPTORHANDLE)

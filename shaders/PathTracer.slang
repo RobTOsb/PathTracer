@@ -248,7 +248,7 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         specularAA = float2(g_Frame.specularAAVariance * turn * turn * stretch, g_Frame.specularAANormalMapScale);
     }
     OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments,
-                                         SIMPLE, specularAA);
+                                         SIMPLE, specularAA, diffuseBounces >= g_Frame.reducedMaterialDiffuseBounces);
     if (frontFace && any(hit.emission > 0.0))
         radiance += ClampFirefly(throughput * hit.emission * emissionWeight, seenArrival, directArrival);
 
@@ -665,14 +665,21 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         // so the primary segment comes on top.
         for (; bounce <= g_Frame.maxDiffuseBounces + g_Frame.maxSpecularBounces; ++bounce)
         {
-            const uint rayFlags = OpacityMicromapRayFlags(bounce);
+            uint rayFlags = OpacityMicromapRayFlags(bounce);
+            // Deep indirect rays skip the alpha work: blended instances are left out, alpha-tested ones are opaque.
+            uint instanceMask = 0xFF;
+            if (((flags >> PATH_DIFFUSE_BOUNCES_SHIFT) & PATH_DIFFUSE_BOUNCES_MASK) >= g_Frame.opaqueAlphaDiffuseBounces)
+            {
+                rayFlags |= RAY_FLAG_FORCE_OPAQUE;
+                instanceMask = uint(INSTANCE_MASK_SOLID);
+            }
             // Only the DLSS-RR guides read the shape of camera and chain hits.
 #ifdef DLSS_RR
             const bool needCurvature = (flags & (PATH_FROM_CAMERA | PATH_CHAIN_ACTIVE)) != 0;
 #else
             const bool needCurvature = false;
 #endif
-            HitPayload payload = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, needCurvature, rayFlags);
+            HitPayload payload = TraceClosest(origin, dir, bounce >= SER_START_BOUNCE, needCurvature, rayFlags, instanceMask);
             // Unpacked after the in-scatter's shadow ray, so only the packed payload is held across it.
             HitInfo hit = HitDistance(payload);
 

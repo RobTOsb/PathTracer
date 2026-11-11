@@ -210,17 +210,17 @@ void ImGuiPass::Execute(RenderContext *renderContext)
 	renderContext->EndEvent();
 }
 
-void ImGuiPass::BuildUI(RenderContext *renderContext)
+void ImGuiPass::BuildStatsWindow(RenderContext *renderContext)
 {
-	ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_FirstUseEver);
-	ImGui::SetNextWindowSize(ImVec2(380.0f, 0.0f), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Path Tracer"))
+	// Its own window, top right, out of the way of the settings.
+	const ImGuiIO &io = ImGui::GetIO();
+	ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 16.0f, 16.0f), ImGuiCond_FirstUseEver, ImVec2(1.0f, 0.0f));
+	if (!ImGui::Begin("Stats", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing))
 	{
 		ImGui::End();
 		return;
 	}
 
-	const ImGuiIO &io = ImGui::GetIO();
 	ImGui::Text("%.1f fps (%.2f ms)  %ux%u -> %ux%u, %u spp",
 				io.Framerate,
 				1000.0f / io.Framerate,
@@ -235,6 +235,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 				FormatBytes(memoryStats.local.usageBytes).text,
 				FormatBytes(memoryStats.local.budgetBytes).text,
 				FormatBytes(memoryStats.local.allocator.blockBytes).text);
+	ImGui::Separator();
 	if (settings_.atmosphere.enabled)
 	{
 		ProfileRow(renderContext, "SkyAtmosphere");
@@ -250,13 +251,27 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	{
 		ProfileRow(renderContext, "DLSS-RR");
 	}
-	
+
 	ProfileRow(renderContext, "AutoExposure");
 	ProfileRow(renderContext, "Bloom");
 	ProfileRow(renderContext, "Tonemap");
 	if (settings_.dlssMode != DLSSMode::Off && settings_.guideView != GUIDE_VIEW_OFF)
 	{
 		ProfileRow(renderContext, "GuideView");
+	}
+	ImGui::End();
+}
+
+void ImGuiPass::BuildUI(RenderContext *renderContext)
+{
+	BuildStatsWindow(renderContext);
+
+	ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(380.0f, 0.0f), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Path Tracer"))
+	{
+		ImGui::End();
+		return;
 	}
 
 	// Without the approximations the reference ignores the firefly clamp and specular antialiasing settings.
@@ -721,6 +736,15 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 																		  : "Needs shader model 6.9 and raytracing tier 1.2");
 		}
 
+		ImGui::SliderInt("Opaque alpha after diffuse bounces", &settings_.opaqueAlphaDiffuseBounces, 0, 8,
+						 settings_.opaqueAlphaDiffuseBounces <= 0 ? "off" : "%d");
+		ImGui::SetItemTooltip("Rays leaving a path after this many diffuse bounces skip blended surfaces and treat "
+							  "alpha-tested ones as opaque, with no alpha test. Biased: cutouts may block light there");
+		ImGui::SliderInt("Reduced materials after diffuse bounces", &settings_.reducedMaterialDiffuseBounces, 0, 8,
+						 settings_.reducedMaterialDiffuseBounces <= 0 ? "off" : "%d");
+		ImGui::SetItemTooltip("Surfaces reached after this many diffuse bounces skip their normal maps and shade solid "
+							  "subsurface as plain diffuse instead of scattering light through the object");
+
 		ImGui::Checkbox("Specular", &settings_.specularMaterials);
 		ImGui::SetItemTooltip("Off: no specular reflection, metals turn diffuse and glass only refracts");
 		ImGui::SameLine();
@@ -849,7 +873,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 
 	if (ImGui::CollapsingHeader("Memory", ImGuiTreeNodeFlags_DefaultOpen))
 	{
-		MemoryUI(memoryStats);
+		MemoryUI(renderContext->GetMemoryStats());
 	}
 
 	ImGui::End();

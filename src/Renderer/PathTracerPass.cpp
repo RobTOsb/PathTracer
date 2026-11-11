@@ -652,6 +652,12 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.glassReflectionSplits = static_cast<uint>(std::clamp(settings_.glassReflectionSplits, 0, 127));
 	constants.indirectClamp = settings_.clampIndirect && approximations ? std::max(settings_.indirectClampValue, 0.0f) : FLT_MAX;
 	constants.directClamp = settings_.clampDirect && approximations ? std::max(settings_.directClampValue, 0.0f) : FLT_MAX;
+	constants.opaqueAlphaDiffuseBounces = settings_.opaqueAlphaDiffuseBounces > 0 && approximations
+												  ? static_cast<uint>(settings_.opaqueAlphaDiffuseBounces)
+												  : UINT32_MAX;
+	constants.reducedMaterialDiffuseBounces = settings_.reducedMaterialDiffuseBounces > 0 && approximations
+													  ? static_cast<uint>(settings_.reducedMaterialDiffuseBounces)
+													  : UINT32_MAX;
 	constants.reflectionMinProbability = std::clamp(settings_.reflectionMinProbability, 0.0f, 0.95f);
 	const float reflectionMaxRoughness = std::clamp(settings_.reflectionMinProbabilityMaxRoughness, 0.0f, 1.0f);
 	constants.reflectionMinProbabilityMaxAlpha = reflectionMaxRoughness * reflectionMaxRoughness;

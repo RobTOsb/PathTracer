@@ -153,7 +153,7 @@ struct PhotonSettings
 	float footprintScale = 4.0f;
 	// Perceptual roughness up to which a lobe passes photons (and counts as smooth on camera paths), also the
 	// roughness factor up to which a material's primitives are aimed at as casters.
-	float maxRoughness = 0.20f;
+	float maxRoughness = 0.10f;
 	int maxBounces = 8; // smooth bounces a photon may take
 	// The photon map adapts each texel's share of the photons from feedback (Yang and Ouyang's AAPS): more where its
 	// photons land wide on screen or the caustics flicker, fewer where they land small or out of view. Off: even.
@@ -224,6 +224,10 @@ struct RenderSettings
 	bool inlineShadowRays = true;
 	bool opacityMicromaps = true;
 	int opacityMicromap2StateBounce = 1;
+	// Performance approximations past this many diffuse bounces, 0 = off (FrameConstants): rays skip blended
+	// instances and alpha tests; hits load materials without normal maps, solid subsurface as Lambertian.
+	int opaqueAlphaDiffuseBounces = 1;
+	int reducedMaterialDiffuseBounces = 1;
 	// Static primitives placed together (the same world matrix, the parts of one plant) as one TLAS instance
 	// of a multi-geometry BLAS (RenderGPUScene::SetMergeInstances). Changing it rebuilds every BLAS and TLAS.
 	bool mergeInstances = true;

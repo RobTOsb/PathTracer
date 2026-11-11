@@ -207,7 +207,7 @@ void GenerateCameraRay(uint2 pixel, float2 u, out float3 origin, out float3 dir)
 
 // needCurvature: the hit feeds the DLSS-RR guides or a photon's ray cone, the only users of its shape. Returns the
 // payload still packed (see HitDistance and UnpackHit), the smaller form to keep across other rays.
-HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvature, uint rayFlags)
+HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvature, uint rayFlags, uint instanceMask = 0xFF)
 {
     RayDesc ray;
     ray.Origin = origin;
@@ -222,7 +222,7 @@ HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvat
 #ifdef SER
     // DXR 1.2 SER: traverse, regroup threads by hit/miss and material, then shade. The threads stay in
     // the new order for the shading in TracePath, which is where the material divergence is.
-    HitObject hitObject = HitObject::TraceRay(SceneFor(rayFlags), RayFlags(rayFlags), 0xFF, STANDARD_RAY_INDEX, 0,
+    HitObject hitObject = HitObject::TraceRay(SceneFor(rayFlags), RayFlags(rayFlags), instanceMask, STANDARD_RAY_INDEX, 0,
                                               STANDARD_RAY_INDEX, ray, payload);
     if (reorder)
     {
@@ -235,7 +235,7 @@ HitPayload TraceClosest(float3 origin, float3 dir, bool reorder, bool needCurvat
     payload.shape = uint2(needCurvature ? 1u : 0u, 0u);
     HitObject::Invoke(hitObject, payload);
 #else
-    TraceRay(SceneFor(rayFlags), RayFlags(rayFlags), 0xFF, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
+    TraceRay(SceneFor(rayFlags), RayFlags(rayFlags), instanceMask, STANDARD_RAY_INDEX, 0, STANDARD_RAY_INDEX, ray, payload);
 #endif
     return payload;
 }

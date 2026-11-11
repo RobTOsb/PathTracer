@@ -157,7 +157,16 @@ struct FrameConstants
 	// pick it with at least reflectionMinProbability (FloorReflectionProbability). 0 = off.
 	float reflectionMinProbability;
 	float reflectionMinProbabilityMaxAlpha;
-	float padReflection;
+	// Rays leaving a path after this many diffuse bounces skip the blended instances and treat everything else as
+	// opaque (no any-hit alpha test). UINT_MAX = off.
+	uint opaqueAlphaDiffuseBounces;
+
+	// Hits reached after this many diffuse bounces load a reduced material: no normal maps, and solid subsurface as
+	// OpenPBR's Lambertian stand-in instead of a random walk. UINT_MAX = off.
+	uint reducedMaterialDiffuseBounces;
+	uint padMaterialLod0;
+	uint padMaterialLod1;
+	uint padMaterialLod2;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -632,7 +641,7 @@ struct AutoExposureConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
-static_assert(sizeof(FrameConstants) == 768,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 784,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
 static_assert(sizeof(GpuMaterial) == 152,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,

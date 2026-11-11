@@ -24,6 +24,8 @@ public:
 
 private:
 	void BuildUI(RenderContext *renderContext);
+	// The frame rate, memory and pass timings, in a window of their own.
+	void BuildStatsWindow(RenderContext *renderContext);
 
 	RenderSettings &settings_;
 	const Camera &camera_;
