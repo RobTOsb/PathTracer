@@ -677,6 +677,15 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::BeginDisabled(!settings_.clampDirect);
 		ImGui::SliderFloat("Direct clamp", &settings_.directClampValue, 0.1f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
 		ImGui::EndDisabled();
+		ImGui::Checkbox("Firefly filter", &settings_.fireflyFilter);
+		ImGui::SetItemTooltip("RTXPT's firefly filter: the light a path finds is scaled down to at most the threshold "
+							  "times the exposure's middle grey, times a path probability heuristic that shrinks with "
+							  "every bounce, the more the wider and less likely the sample. Lights seen directly or in "
+							  "mirror-like surfaces are left alone. Biased darker");
+		ImGui::BeginDisabled(!settings_.fireflyFilter);
+		ImGui::SliderFloat("Firefly threshold", &settings_.fireflyFilterThreshold, 0.001f, 10.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Higher clamps less. Better light sampling allows a higher threshold");
+		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 		ImGui::SliderFloat("Min reflection probability", &settings_.reflectionMinProbability, 0.0f, 0.95f, "%.2f");
 		ImGui::SetItemTooltip("Visible surfaces with a sharp reflection sample it at least this often, the other lobes "

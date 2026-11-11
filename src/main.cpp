@@ -216,7 +216,7 @@ void BuildPasses(RenderContext *renderContext,
 	auto atmosphere = std::make_unique<SkyAtmospherePass>(renderContext, gpuScene, camera, settings);
 	auto pathTracer = std::make_unique<PathTracerPass>(
 			renderContext, gpuScene, camera, settings, *atmosphere, rayReconstruction, reference);
-	const PathTracerPass &pathTracerPass = *pathTracer;
+	PathTracerPass &pathTracerPass = *pathTracer;
 	ResourceHandle radiance = pathTracer->GetOutput();
 	passes.push_back(std::move(atmosphere));
 	if (rayReconstruction)
@@ -232,6 +232,8 @@ void BuildPasses(RenderContext *renderContext,
 	}
 	auto autoExposure = std::make_unique<AutoExposurePass>(renderContext, radiance, settings);
 	const ResourceHandle exposure = autoExposure->GetExposure();
+	// The firefly filter's threshold follows last frame's exposure.
+	pathTracerPass.SetExposureBuffer(exposure);
 	passes.push_back(std::move(autoExposure));
 	auto bloom = std::make_unique<BloomPass>(renderContext, radiance, exposure, camera, settings);
 	radiance = bloom->GetOutput();

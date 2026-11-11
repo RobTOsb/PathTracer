@@ -160,13 +160,12 @@ struct FrameConstants
 	// Rays leaving a path after this many diffuse bounces skip the blended instances and treat everything else as
 	// opaque (no any-hit alpha test). UINT_MAX = off.
 	uint opaqueAlphaDiffuseBounces;
-
 	// Hits reached after this many diffuse bounces load a reduced material: no normal maps, and solid subsurface as
 	// OpenPBR's Lambertian stand-in instead of a random walk. UINT_MAX = off.
 	uint reducedMaterialDiffuseBounces;
-	uint padMaterialLod0;
-	uint padMaterialLod1;
-	uint padMaterialLod2;
+	float fireflyFilterThreshold;
+	uint exposureBuffer;
+	uint padFireflyFilter;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of

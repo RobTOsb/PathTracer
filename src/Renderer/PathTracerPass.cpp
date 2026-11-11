@@ -706,6 +706,14 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.maxSpecularBounces = static_cast<uint>(std::clamp(settings_.maxSpecularBounces, 0, kMaxBounces));
 	constants.samplesPerFrame = static_cast<uint>(std::clamp(settings_.samplesPerPixel, 1, kMaxSamplesPerPixel));
 
+	// RTXPT's threshold scale, with its middle grey's radiance from the exposure in the shader. The reference keeps it
+	// only with its approximations, where auto exposure makes it follow the image (RTXPT has the same caveat).
+	constants.fireflyFilterThreshold = settings_.fireflyFilter && approximations
+											   ? std::max(settings_.fireflyFilterThreshold, 0.0f) * (1000.0f / sqrtf(0.18f))
+											   : 0.0f;
+	constants.exposureBuffer = exposure_ != InvalidResourceHandle ? renderContext->GetResourceViewInfo(exposure_).descriptorIndex
+																   : INVALIDDESCRIPTORHANDLE;
+
 	if (reference_)
 	{
 		// Anything the image depends on starts the sum over: the constants, but for those that change every frame

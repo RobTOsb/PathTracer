@@ -212,6 +212,9 @@ struct RenderSettings
 	// lobe that is not mirror-like. Light the camera sees, also as a mirror-like surface's image, is not clamped.
 	bool clampDirect = false;
 	float directClampValue = 1.0f;
+	// RTXPT's firefly filter
+	bool fireflyFilter = true;
+	float fireflyFilterThreshold = 0.050f;
 	// Camera-visible opaque surfaces whose reflection is at most reflectionMinProbabilityMaxRoughness (perceptual)
 	// rough pick that lobe with at least this probability, the other lobes' shares scaled down: unbiased, it moves
 	// noise from small bright reflections (emitters in polished floors) to the diffuse lobe. 0 = off, at most 0.95.

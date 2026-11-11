@@ -90,6 +90,58 @@ float3 ClampFirefly(float3 contribution, bool seen, bool direct)
     return seen || m <= limit ? contribution : contribution * (limit / m);
 }
 
+// RTXPT's firefly filter (PathTracerHelpers.hlsli). Each path carries k, 1 from the camera, which every scatter
+// shrinks by a probability heuristic of the sample (ScatterFireflyK). Light a vertex finds (its emission or the sky with
+// their MIS weights, a light sample's f cos L / pdf, the air's in-scattering) is scaled down to at most k times the
+// threshold in the average of its channels (the brightest channel would shift hues), before the path's throughput.
+// The threshold follows last frame's exposure: fireflyFilterThreshold times the radiance it maps to middle grey.
+static const float FIREFLY_MIDDLE_GREY = 0.18;
+static const float FIREFLY_MIN_K = 1.0e-5;
+
+float FireflyFilterBase()
+{
+    if (!(g_Frame.fireflyFilterThreshold > 0.0) || g_Frame.exposureBuffer == INVALIDDESCRIPTORHANDLE)
+        return FLT_MAX;
+    RWStructuredBuffer<float> exposure = ResourceDescriptorHeap[g_Frame.exposureBuffer];
+    float e = exposure[0];
+    return e > 0.0 ? g_Frame.fireflyFilterThreshold * (FIREFLY_MIDDLE_GREY / e) : FLT_MAX;
+}
+
+// scale multiplies the limit, for light that already carries part of the throughput.
+float3 FireflyFilter(float3 light, bool seen, float k, float scale = 1.0)
+{
+    if (seen || !(g_Frame.fireflyFilterThreshold > 0.0))
+        return light;
+    float limit = FireflyFilterBase() * k * scale;
+    float average = (light.x + light.y + light.z) * (1.0 / 3.0);
+    return average > limit ? light * (limit / average) : light;
+}
+
+// RTXPT's ComputeNewScatterFireflyFilterK, an ad hoc heuristic found by experiment: the wider the cone of directions
+// the sample stands for (pdf, 0 for a delta event, which has none) and the less likely its lobe was picked, the
+// smaller k gets.
+float ScatterFireflyK(float k, float pdf, float lobeProbability)
+{
+    // The cone's apex angle from its solid angle, 1 / pdf (RTXPT's ComputeRayConeSpreadAngleExpansionByScatterPDF).
+    float angle = pdf > 0.0 ? 2.0 * acos(max(-1.0, 1.0 - (1.0 / pdf) / TWO_PI)) : 0.0;
+    float p = 32.0 / (32.0 + angle * angle) * sqrt(saturate(lobeProbability));
+    return max(FIREFLY_MIN_K, k * p);
+}
+
+// The share of the mixture a BSDF sample's lobe was picked with.
+float SampledLobeProbability(OpenPBRContext ctx, uint lobe)
+{
+    if (lobe == LOBE_SPECULAR_REFLECTION)
+        return ctx.probSpecR;
+    if (lobe == LOBE_SPECULAR_TRANSMISSION || lobe == LOBE_DELTA_TRANSMISSION)
+        return ctx.probSpecT;
+    if (lobe == LOBE_COAT)
+        return ctx.probCoat;
+    if (lobe == LOBE_FUZZ)
+        return ctx.probFuzz;
+    return ctx.probDiffuse; // diffuse, diffuse transmission and subsurface share it
+}
+
 // Whether light along the segment just traced reaches the surface the camera sees or a surface it left.
 bool DirectSegment(uint flags, bool fromCamera, bool chainActive)
 {
@@ -195,7 +247,8 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
                                                float3 arrivedExtinction, inout uint flags, inout uint rng, inout float3 radiance,
                                                inout float3 throughput, inout float prevBsdfPdf,
                                                inout PackedLightSelectVertex prevVertex, inout RayCone cone,
-                                               inout float3 segmentExtinction, inout float rrInvScale)
+                                               inout float3 segmentExtinction, inout float rrInvScale,
+                                               inout float fireflyK)
 {
     // Front-face emission found by BSDF sampling is MIS weighted against NEE at the previous vertex
     // unless the triangle has no light (degenerate or black) or light buffer NEE is off. The weight's
@@ -250,7 +303,8 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments,
                                          SIMPLE, specularAA, diffuseBounces >= g_Frame.reducedMaterialDiffuseBounces);
     if (frontFace && any(hit.emission > 0.0))
-        radiance += ClampFirefly(throughput * hit.emission * emissionWeight, seenArrival, directArrival);
+        radiance += ClampFirefly(throughput * FireflyFilter(hit.emission * emissionWeight, seenArrival, fireflyK), seenArrival,
+                                 directArrival);
 
     // Opaque and thin-walled surfaces are treated as two-sided: face the frame towards the viewer
     // so a back face is not mistaken for the inside of a transmissive object. The vertex normal follows
@@ -332,7 +386,9 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
                                              ? exp(-shadowExtinction * min(ls.distance, MAX_MEDIUM_DISTANCE))
                                              : AtmosphereTransmittance(ls.distance);
             // Clamped unshadowed, which the shadow ray's visibility (at most 1) only scales down.
-            neeContribution = ClampFirefly(throughput * fCos * ls.radiance * shadowTransmittance * (w / ls.pdf), false, visible);
+            float3 light = FireflyFilter(fCos * ls.radiance * shadowTransmittance * (w / ls.pdf), false,
+                                         ScatterFireflyK(fireflyK, ls.pdf, 1.0));
+            neeContribution = ClampFirefly(throughput * light, false, visible);
             traceShadowRay = true;
         }
     }
@@ -418,6 +474,8 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         prevBsdfPdf *= bs.pdf;
         passTransmittance = bs.weight * bs.pdf;
         segmentExtinction = float3(0.0, 0.0, 0.0);
+        // A delta event, picked with bs.pdf.
+        fireflyK = ScatterFireflyK(fireflyK, 0.0, bs.pdf);
     }
     else if (continuePath)
     {
@@ -437,6 +495,8 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         prevVertex = vertex;
         // Surface curvature is ignored. The cap stops a tiny pdf from making the width infinite.
         cone.spread = min(cone.spread + g_Frame.rayConeBsdfSpread * SampledConeSpread(bs.pdf / lobeProbability), PI);
+        // A lobe a split or the chain took was not left to chance.
+        fireflyK = ScatterFireflyK(fireflyK, bs.pdf / lobeProbability, lobeProbability < 1.0 ? 1.0 : SampledLobeProbability(ctx, bs.lobe));
 
         // Heading into the object means travelling through its medium until the next hit, and leaving it
         // through the medium outside, air unless the surface is an interface inside one (the tea against a
@@ -606,9 +666,11 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
         if (!SIMPLE && lobe == LOBE_SUBSURFACE)
         {
             SubsurfaceExit exit = (SubsurfaceExit)0;
+            // Its light carries the throughput already, so the firefly filter's limit takes on the throughput's average.
             if (dot(dir, hit.Ng) < 0.0)
-                radiance += ClampFirefly(SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput,
-                                                           bounce + 1, rng, exit),
+                radiance += ClampFirefly(FireflyFilter(SubsurfaceScatter(mat, hit.position, hit.Ng, hit.N, hit.materialId, dir, throughput,
+                                                                         bounce + 1, rng, exit),
+                                                       false, fireflyK, (throughput.x + throughput.y + throughput.z) * (1.0 / 3.0)),
                                          false, visible);
             continuePath = exit.valid;
             origin = exit.origin;
@@ -657,6 +719,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
     float prevBsdfPdf = 0.0;
     PackedLightSelectVertex prevVertex = (PackedLightSelectVertex)0; // where the current segment started, once a surface scattered
     RayCone cone = { 0.0, g_Frame.rayConePixelSpread };
+    float fireflyK = 1.0; // the firefly filter's probability heuristic, see FireflyFilter
 
     uint bounce = 0;
     for (;;)
@@ -713,8 +776,11 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 // whatever lies beyond. Rays that leave the scene cross atmosphereMissDistance of it.
                 float segmentLength = hit.hit ? hit.t : g_Frame.atmosphereMissDistance;
                 if (bounce < g_Frame.atmosphereInScatterSegments)
-                    radiance += ClampFirefly(throughput * AtmosphereInScattering(origin, dir, segmentLength, rng),
-                                             SeenSegment(flags, fromCamera, chainActive), DirectSegment(flags, fromCamera, chainActive));
+                {
+                    bool seen = SeenSegment(flags, fromCamera, chainActive);
+                    radiance += ClampFirefly(throughput * FireflyFilter(AtmosphereInScattering(origin, dir, segmentLength, rng), seen, fireflyK),
+                                             seen, DirectSegment(flags, fromCamera, chainActive));
+                }
                 throughput *= AtmosphereTransmittance(segmentLength);
             }
     #endif
@@ -747,7 +813,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                     if (any(Lsun > 0.0))
                         Lsun *= fromCamera || smoothSegment ? 1.0 : PowerHeuristic(prevBsdfPdf, LightPdf(origin, dir, hit));
                     float3 sky = SkyRadiance(origin, dir, Lsun, fromCamera || chainActive, rng);
-                    radiance += ClampFirefly(throughput * sky, SeenSegment(flags, fromCamera, chainActive),
+                    bool seen = SeenSegment(flags, fromCamera, chainActive);
+                    radiance += ClampFirefly(throughput * FireflyFilter(sky, seen, fireflyK), seen,
                                              DirectSegment(flags, fromCamera, chainActive));
                 }
                 break;
@@ -759,11 +826,13 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
             if (IsSimpleMaterial(PayloadMaterialIndex(payload.materialId)))
                 outcome = ShadeSurface<true>(payload, origin, dir, bounce, fromCamera, chainActive, hitDistanceArrived,
                                              paneHitArrived, endHitArrived, smoothSegment, firstSegment, cameraSegment, medium.xyz, flags, rng,
-                                             radiance, throughput, prevBsdfPdf, prevVertex, cone, segmentExtinction, rrInvScale);
+                                             radiance, throughput, prevBsdfPdf, prevVertex, cone, segmentExtinction, rrInvScale,
+                                             fireflyK);
             else
                 outcome = ShadeSurface<false>(payload, origin, dir, bounce, fromCamera, chainActive, hitDistanceArrived,
                                               paneHitArrived, endHitArrived, smoothSegment, firstSegment, cameraSegment, medium.xyz, flags, rng,
-                                              radiance, throughput, prevBsdfPdf, prevVertex, cone, segmentExtinction, rrInvScale);
+                                              radiance, throughput, prevBsdfPdf, prevVertex, cone, segmentExtinction, rrInvScale,
+                                             fireflyK);
 
             if (!outcome.continuePath)
                 break;
@@ -805,6 +874,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         cone.width = deferred.coneWidth;
         cone.spread = deferred.coneSpread;
         segmentMedium = SEGMENT_MEDIUM_AIR;
+        // Both branches leave the surface the camera sees.
+        fireflyK = 1.0;
         bounce = flags >> DEFERRED_BOUNCE_SHIFT;
         uint deferredFlags = flags & DEFERRED_MASK;
         // Glass splits only where the camera sees, so every bounce before the branch is specular.

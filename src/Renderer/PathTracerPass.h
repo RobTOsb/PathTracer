@@ -68,6 +68,11 @@ public:
 		return output_;
 	}
 
+	void SetExposureBuffer(ResourceHandle exposure)
+	{
+		exposure_ = exposure;
+	}
+
 	const PathTracerGuides &GetGuides() const
 	{
 		return guides_;
@@ -158,6 +163,7 @@ private:
 	PathTracerGuides guides_;
 	ResourceHandle cameraState_ = InvalidResourceHandle; // GpuCameraState per pixel, DLSS-RR only
 	ResourceHandle deferredBranches_ = InvalidResourceHandle; // GpuDeferredBranch per pixel
+	ResourceHandle exposure_ = InvalidResourceHandle;
 
 	// Caustic photons (created on first use): the photon map's shares (two, last frame's and this one's), running sums
 	// and feedback, the photon records, and per pixel the receivers, the splatted irradiance and the caustics' history
