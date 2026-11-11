@@ -94,8 +94,40 @@ struct LightTreeBuildConstants
 	uint lightCount;
 	uint leafSize; // lights per leaf, 1 to LIGHT_TREE_MAX_LEAF_LIGHTS
 	uint pass; // per kernel: the radix sort pass, the tree level, or the first of the levels built together
-	uint lightsHandle; // StructuredBuffer<GpuLight>
+	uint lightsHandle; // RWStructuredBuffer<GpuLight>, only read: the light buffer has a UAV descriptor alone
 	uint emissionScalesHandle; // StructuredBuffer<float>, per emissive instance
+};
+
+// One dynamic instance's world transform for TransformDynamicLights (DynamicLights.slang), in the CPU's float3x4
+// layout: p' = p.x rows[0].xyz + p.y rows[1].xyz + p.z rows[2].xyz + (rows[0].w, rows[1].w, rows[2].w).
+struct DynamicLightTransform
+{
+#ifdef __cplusplus
+	float m[12];
+	uint32_t swapCorners; // the transform mirrors where the rest one did not, or the other way round
+	uint32_t pad[3];
+#else
+	float4 rows[3];
+	uint swapCorners;
+	uint3 pad;
+#endif
+};
+
+#define DYNAMIC_LIGHTS_GROUP_SIZE 256u
+
+// Root constants of TransformDynamicLights. Thread i writes light staticLightCount + firstThread + i: the dynamic
+// triangle lights moved by their instance's transform, then the point lights copied from this frame's upload.
+struct DynamicLightConstants
+{
+	uint firstThread; // 0 to move the dynamic lights too, dynamicLightCount to write only the point lights
+	uint dynamicLightCount;
+	uint pointLightCount;
+	uint staticLightCount; // where the dynamic lights start in the light buffer
+	uint objectLightsHandle; // StructuredBuffer<GpuLight>, per dynamic light, its triangle in object space
+	uint lightInstancesHandle; // StructuredBuffer<uint>, per dynamic light, its dynamic instance
+	uint transformsHandle; // StructuredBuffer<DynamicLightTransform>, per dynamic instance
+	uint pointLightsHandle; // StructuredBuffer<GpuLight>
+	uint lightsHandle; // RWStructuredBuffer<GpuLight>, the light buffer
 };
 
 // Descriptor heap indices of the build's buffers, which only change when the light count does; a constant
@@ -125,6 +157,8 @@ static_assert(sizeof(GpuLightTreeLeafEntry) == 8, "GpuLightTreeLeafEntry must ma
 static_assert(sizeof(GpuLightPowerEntry) == 16, "GpuLightPowerEntry must match the structured buffer stride");
 static_assert(sizeof(GpuLightTreeCluster) == 36, "GpuLightTreeCluster must match the structured buffer stride");
 static_assert(sizeof(LightTreeBuildConstants) <= 16 * 4, "LightTreeBuildConstants must fit the root constants");
+static_assert(sizeof(DynamicLightTransform) == 64, "DynamicLightTransform must match the structured buffer stride");
+static_assert(sizeof(DynamicLightConstants) <= 16 * 4, "DynamicLightConstants must fit the root constants");
 #endif
 
 #endif // LIGHT_TREE_INTEROP_H

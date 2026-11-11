@@ -273,11 +273,8 @@ namespace
 	// Makes room for count elements (at least one, so the shader's bindings stay valid). Returns true
 	// when the buffer was made again, which loses what it held.
 	template<typename T>
-	bool ReserveLightBuffer(RenderContext *renderContext,
-							ResourceHandle &buffer,
-							size_t &capacity,
-							size_t count,
-							const char *debugName)
+	bool ReserveLightBuffer(
+			RenderContext *renderContext, ResourceHandle &buffer, size_t &capacity, size_t count, const char *debugName)
 	{
 		if (buffer != InvalidResourceHandle && count <= capacity)
 		{
@@ -383,6 +380,12 @@ RenderGPUScene::RenderGPUScene(RenderContext *renderContext) :
 {
 	std::fill(std::begin(streamBuffers_), std::end(streamBuffers_), InvalidResourceHandle);
 	std::fill(std::begin(streamBufferIndices), std::end(streamBufferIndices), InvalidResourceDescriptorIndex);
+	dynamicLightsPipeline_ =
+			renderContext->CreateComputePipeline(PATHTRACER_SHADER_DIR "DynamicLights.slang", "TransformDynamicLights");
+	if (dynamicLightsPipeline_ == InvalidPipelineHandle)
+	{
+		throw std::runtime_error("Failed to create the dynamic lights pipeline (see the shader log above).");
+	}
 }
 
 RenderGPUScene::~RenderGPUScene()
@@ -404,8 +407,13 @@ RenderGPUScene::~RenderGPUScene()
 			renderContext_->DestroyResource(buffer);
 		}
 	}
-	for (ResourceHandle buffer:
-		 { vertexBuffer_, primitiveBuffer_, materialBuffer_, instanceBuffer_, emitterBuffer_, lightEmitterBuffer_, ommIndexBuffer_ })
+	for (ResourceHandle buffer: { vertexBuffer_,
+								  primitiveBuffer_,
+								  materialBuffer_,
+								  instanceBuffer_,
+								  emitterBuffer_,
+								  lightEmitterBuffer_,
+								  ommIndexBuffer_ })
 	{
 		if (buffer != InvalidResourceHandle)
 		{
@@ -419,7 +427,7 @@ void RenderGPUScene::DestroyLights()
 {
 	for (LightFrameBuffers &frame: lightFrames_)
 	{
-		for (ResourceHandle buffer: { frame.lights, frame.emissionScales })
+		for (ResourceHandle buffer: { frame.transforms, frame.pointLights, frame.emissionScales })
 		{
 			if (buffer != InvalidResourceHandle)
 			{
@@ -428,8 +436,59 @@ void RenderGPUScene::DestroyLights()
 		}
 	}
 	lightFrames_.clear();
+	DestroyLightBuffers();
 	lightCount_ = 0;
 	lightTreeBuilt_ = false;
+}
+
+void RenderGPUScene::DestroyLightBuffers()
+{
+	for (ResourceHandle *buffer: { &lights_, &dynamicObjectLightBuffer_, &dynamicLightInstanceBuffer_ })
+	{
+		if (*buffer != InvalidResourceHandle)
+		{
+			renderContext_->DestroyResource(*buffer);
+			*buffer = InvalidResourceHandle;
+		}
+	}
+	lightsPose_ = UINT32_MAX;
+}
+
+void RenderGPUScene::CreateLightBuffers(std::span<const GpuLight> pointLights)
+{
+	DestroyLightBuffers();
+	// At least one element each, so the bindings stay valid without lights. The dynamic lights start at rest,
+	// and the first BuildLightTree moves them.
+	std::vector<GpuLight> lights(emissiveLights_.begin(), emissiveLights_.end());
+	lights.insert(lights.end(), pointLights.begin(), pointLights.end());
+	lights.resize(std::max<size_t>(lights.size(), 1), GpuLight{});
+	std::vector<GpuLight> objectLights = dynamicObjectLights_;
+	objectLights.resize(std::max<size_t>(objectLights.size(), 1), GpuLight{});
+	std::vector<uint32_t> lightInstances = dynamicLightInstance_;
+	lightInstances.resize(std::max<size_t>(lightInstances.size(), 1), 0);
+
+	auto create = [&](const auto &elements, bool unorderedAccess, const char *debugName, UploadBatchHandle batch)
+	{
+		using T = typename std::decay_t<decltype(elements)>::value_type;
+		BufferDesc desc = {};
+		desc.sizeInBytes = elements.size() * sizeof(T);
+		desc.structureByteStride = sizeof(T);
+		if (unorderedAccess)
+		{
+			desc.usageFlags = ResourceUsageFlags::UnorderedAccess;
+		}
+		desc.debugName = debugName;
+		return renderContext_->CreateBuffer(desc,
+											unorderedAccess ? ResourceViewType::UnorderedAccess
+															: ResourceViewType::ShaderResource,
+											elements.data(),
+											batch);
+	};
+	const UploadBatchHandle batch = renderContext_->BeginUpload();
+	lights_ = create(lights, true, "Scene_Lights", batch);
+	dynamicObjectLightBuffer_ = create(objectLights, false, "Scene_DynamicObjectLights", batch);
+	dynamicLightInstanceBuffer_ = create(lightInstances, false, "Scene_DynamicLightInstances", batch);
+	renderContext_->EndUpload(batch);
 }
 
 void RenderGPUScene::UpdateLights()
@@ -441,40 +500,55 @@ void RenderGPUScene::UpdateLights()
 		// The point lights have no texture to average, so their flux scale is 1.
 		std::vector<float> fluxScales = emissiveFluxScales_;
 		fluxScales.resize(lights.size() + pointLights.size(), 1.0f);
+		// Waits for the GPU, so the old light buffers can go.
 		lightTreeBuilder_->Reset(fluxScales, lightEmitterBuffer_);
 		lightTreeBuilt_ = true;
-		++lightsGeneration_;
+		CreateLightBuffers(pointLights);
 		CentroidBounds(lights.first(staticLightCount_), staticLightBoundsMin_, staticLightBoundsMax_);
 		// The dynamic lights where the scene loaded them, until they first move.
 		CentroidBounds(lights.subspan(staticLightCount_), dynamicLightBoundsMin_, dynamicLightBoundsMax_);
 	}
 	if (dynamicLightsMoved_)
 	{
-		TransformDynamicLights();
+		UpdateDynamicLightBounds();
+		++dynamicLightPose_;
 		dynamicLightsMoved_ = false;
 	}
 	CentroidBounds(pointLights, pointLightBoundsMin_, pointLightBoundsMax_);
 	lightCount_ = static_cast<uint32_t>(lights.size() + pointLights.size());
 
-	// BeginFrame has waited for the frame that last read this slot, so it can be overwritten. The static
-	// lights only need writing once per reset, unless the buffer had to grow, the dynamic ones whenever
-	// they have moved since this slot last held them, and the point lights, which are few, every frame.
+	// BeginFrame has waited for the frame that last read this slot, so it can be overwritten. The dynamic
+	// instances' transforms are only needed while the light buffer does not hold their pose yet; the point
+	// lights, which are few, go every frame.
 	lightFrames_.resize(renderContext_->GetFramesInFlight());
 	lightFrame_ = renderContext_->GetCurrentFrameIndex();
 	LightFrameBuffers &frame = lightFrames_[lightFrame_];
-	const bool recreated = ReserveLightBuffer<GpuLight>(renderContext_, frame.lights, frame.lightCapacity, lightCount_, "Scene_Lights");
-	if (recreated || frame.lightsGeneration != lightsGeneration_)
+	transformsWritten_ = false;
+	if (!dynamicObjectLights_.empty() && lightsPose_ != dynamicLightPose_)
 	{
-		frame.lightsGeneration = lightsGeneration_;
-		frame.dynamicLightPose = UINT32_MAX;
-		WriteLightRange(renderContext_, frame.lights, 0, lights.first(staticLightCount_));
+		std::vector<DynamicLightTransform> transforms(dynamicInstances_.size());
+		for (size_t i = 0; i < dynamicInstances_.size(); ++i)
+		{
+			const float *m = instances[dynamicInstances_[i]].worldMatrix;
+			std::copy(m, m + 12, transforms[i].m);
+			// The object-space corners are in the order CollectEmitters gave them at rest, which already
+			// accounts for a rest transform that mirrors.
+			transforms[i].swapCorners = (Determinant3x3(m) < 0.0f) != (dynamicRestMirrored_[i] != 0) ? 1u : 0u;
+		}
+		ReserveLightBuffer<DynamicLightTransform>(renderContext_,
+												  frame.transforms,
+												  frame.transformCapacity,
+												  transforms.size(),
+												  "Scene_DynamicLightTransforms");
+		WriteLightRange<DynamicLightTransform>(renderContext_, frame.transforms, 0, transforms);
+		transformsWritten_ = true;
 	}
-	if (frame.dynamicLightPose != dynamicLightPose_)
-	{
-		frame.dynamicLightPose = dynamicLightPose_;
-		WriteLightRange(renderContext_, frame.lights, staticLightCount_, lights.subspan(staticLightCount_));
-	}
-	WriteLightRange<GpuLight>(renderContext_, frame.lights, lights.size(), pointLights);
+	ReserveLightBuffer<GpuLight>(renderContext_,
+								 frame.pointLights,
+								 frame.pointLightCapacity,
+								 pointLights.size(),
+								 "Scene_PointLights");
+	WriteLightRange<GpuLight>(renderContext_, frame.pointLights, 0, pointLights);
 	ReserveLightBuffer<float>(renderContext_,
 							  frame.emissionScales,
 							  frame.emissionScaleCapacity,
@@ -490,8 +564,52 @@ void RenderGPUScene::BuildLightTree(uint32_t maxLeafLights)
 		return;
 	}
 	const LightFrameBuffers &frame = lightFrames_[lightFrame_];
+
+	// The tree build reads the light buffer through its UAV, so it stays in that state until the build is done.
+	renderContext_->TransitionResource(lights_,
+									   ResourceLayout::UnorderedAccess,
+									   ResourceSync::ComputeShading,
+									   ResourceAccess::UnorderedAccess);
+	const uint32_t dynamicLightCount = static_cast<uint32_t>(dynamicObjectLights_.size());
+	const uint32_t pointLightCount = static_cast<uint32_t>(pointLights_.size());
+	const uint32_t firstThread = transformsWritten_ ? 0u : dynamicLightCount;
+	if (dynamicLightCount + pointLightCount > firstThread)
+	{
+		auto index = [&](ResourceHandle buffer)
+		{ return static_cast<uint>(renderContext_->GetResourceViewInfo(buffer).descriptorIndex); };
+		DynamicLightConstants constants = {};
+		constants.firstThread = firstThread;
+		constants.dynamicLightCount = dynamicLightCount;
+		constants.pointLightCount = pointLightCount;
+		constants.staticLightCount = staticLightCount_;
+		constants.objectLightsHandle = index(dynamicObjectLightBuffer_);
+		constants.lightInstancesHandle = index(dynamicLightInstanceBuffer_);
+		// Not read when only the point lights are written, so any valid buffer then.
+		constants.transformsHandle = index(transformsWritten_ ? frame.transforms : dynamicObjectLightBuffer_);
+		constants.pointLightsHandle = index(frame.pointLights);
+		constants.lightsHandle = index(lights_);
+
+		renderContext_->BeginEvent("DynamicLights");
+		renderContext_->BeginProfileScope("DynamicLights");
+		renderContext_->SetComputePipeline(dynamicLightsPipeline_);
+		renderContext_->SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
+		const uint32_t threads = dynamicLightCount + pointLightCount - firstThread;
+		renderContext_->Dispatch((threads + DYNAMIC_LIGHTS_GROUP_SIZE - 1) / DYNAMIC_LIGHTS_GROUP_SIZE, 1, 1);
+		renderContext_->GlobalBarrier(ResourceSync::ComputeShading,
+									  ResourceAccess::UnorderedAccess,
+									  ResourceSync::ComputeShading,
+									  ResourceAccess::UnorderedAccess);
+		renderContext_->EndProfileScope();
+		renderContext_->EndEvent();
+		if (transformsWritten_)
+		{
+			lightsPose_ = dynamicLightPose_;
+			transformsWritten_ = false;
+		}
+	}
+
 	LightTreeBuilder::Inputs inputs;
-	inputs.lights = frame.lights;
+	inputs.lights = lights_;
 	inputs.emissionScales = frame.emissionScales;
 	// Over the parts that have lights, as an empty part's bounds are inverted.
 	struct Part
@@ -516,6 +634,11 @@ void RenderGPUScene::BuildLightTree(uint32_t maxLeafLights)
 	}
 	inputs.maxLeafLights = maxLeafLights;
 	lightTreeBuilder_->Build(inputs);
+
+	renderContext_->TransitionResource(lights_,
+									   ResourceLayout::ShaderResource,
+									   ResourceSync::Raytracing,
+									   ResourceAccess::ShaderResource);
 }
 
 void RenderGPUScene::Animate(float seconds)
@@ -524,7 +647,8 @@ void RenderGPUScene::Animate(float seconds)
 	{
 		return;
 	}
-	const float time = animationDuration_ > 0.0f ? seconds - floorf(seconds / animationDuration_) * animationDuration_ : 0.0f;
+	const float time =
+			animationDuration_ > 0.0f ? seconds - floorf(seconds / animationDuration_) * animationDuration_ : 0.0f;
 
 	// The rest pose, with what the channels animate replaced.
 	struct Pose
@@ -683,38 +807,36 @@ void RenderGPUScene::SetEmissionScale(uint32_t emissiveInstance, float scale)
 	emissionScales_[emissiveInstance] = scale;
 }
 
-void RenderGPUScene::TransformDynamicLights()
+void RenderGPUScene::UpdateDynamicLightBounds()
 {
-	std::vector<std::array<float, 12>> transforms(dynamicInstances_.size());
-	std::vector<uint8_t> swap(dynamicInstances_.size());
-	for (size_t i = 0; i < dynamicInstances_.size(); ++i)
+	// Looser than the moved centroids' own bounds, which only costs the Morton codes some precision.
+	dynamicLightBoundsMin_ = float3(FLT_MAX, FLT_MAX, FLT_MAX);
+	dynamicLightBoundsMax_ = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+	for (size_t i = 0; i < dynamicObjectLightBounds_.size(); ++i)
 	{
-		const float *m = instances[dynamicInstances_[i]].worldMatrix;
-		std::copy(m, m + 12, transforms[i].begin());
-		// The object-space corners are in the order CollectEmitters gave them at rest, which already
-		// accounts for a rest transform that mirrors.
-		swap[i] = (Determinant3x3(m) < 0.0f) != (dynamicRestMirrored_[i] != 0);
-	}
-	for (size_t j = 0; j < dynamicObjectLights_.size(); ++j)
-	{
-		const uint32_t instance = dynamicLightInstance_[j];
-		GpuLight light = TransformLight(dynamicObjectLights_[j], transforms[instance].data());
-		if (swap[instance])
+		const float3 lo = dynamicObjectLightBounds_[i][0];
+		const float3 hi = dynamicObjectLightBounds_[i][1];
+		if (lo.x > hi.x)
 		{
-			std::swap(light.v2, light.v3);
+			continue;
 		}
-		emissiveLights_[staticLightCount_ + j] = light;
+		const float *m = instances[dynamicInstances_[i]].worldMatrix;
+		for (uint32_t corner = 0; corner < 8; ++corner)
+		{
+			const float3 p =
+					TransformPoint(m, corner & 1 ? hi.x : lo.x, corner & 2 ? hi.y : lo.y, corner & 4 ? hi.z : lo.z);
+			dynamicLightBoundsMin_ = MinFloat3(dynamicLightBoundsMin_, p);
+			dynamicLightBoundsMax_ = MaxFloat3(dynamicLightBoundsMax_, p);
+		}
 	}
-	CentroidBounds(std::span<const GpuLight>(emissiveLights_).subspan(staticLightCount_),
-				   dynamicLightBoundsMin_,
-				   dynamicLightBoundsMax_);
-	++dynamicLightPose_;
 }
 
 void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 {
 	dynamicObjectLights_.clear();
 	dynamicLightInstance_.clear();
+	dynamicObjectLightBounds_.assign(dynamicInstances_.size(),
+									 { float3(FLT_MAX, FLT_MAX, FLT_MAX), float3(-FLT_MAX, -FLT_MAX, -FLT_MAX) });
 	dynamicLightsMoved_ = false;
 	emissiveInstances_.clear();
 
@@ -816,7 +938,12 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 		{
 			newIndex[light] = next++;
 			dynamicLightInstance_.push_back(dynamicInstance);
-			dynamicObjectLights_.push_back(TransformLight(emissiveLights_[light], objectFromWorld[dynamicInstance].data()));
+			dynamicObjectLights_.push_back(
+					TransformLight(emissiveLights_[light], objectFromWorld[dynamicInstance].data()));
+			const float3 centroid = LightCentroid(dynamicObjectLights_.back());
+			std::array<float3, 2> &bounds = dynamicObjectLightBounds_[dynamicInstance];
+			bounds[0] = MinFloat3(bounds[0], centroid);
+			bounds[1] = MaxFloat3(bounds[1], centroid);
 		}
 	}
 
@@ -1207,8 +1334,8 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 			channel.interpolation > Scene::AnimationInterpolation::CubicSpline || channel.keyCount == 0 ||
 			static_cast<uint64_t>(channel.firstTime) + channel.keyCount > animationTimes_.size() ||
 			static_cast<uint64_t>(channel.firstValue) + static_cast<uint64_t>(channel.keyCount) *
-																 Scene::AnimationValuesPerKey(channel.interpolation) *
-																 Scene::AnimationPathComponents(channel.path) >
+																Scene::AnimationValuesPerKey(channel.interpolation) *
+																Scene::AnimationPathComponents(channel.path) >
 					animationValues_.size())
 		{
 			return false;
@@ -1505,7 +1632,10 @@ void RenderGPUScene::BuildAnimation(const Scene::GLTFScene &scene, const std::ve
 			animationValues_.insert(animationValues_.end(), channel.values.begin(), channel.values.end());
 			++channels;
 		}
-		logi("GPUScene: animation '{}': {} channel(s), {:.2f} s", animation.GetName(), channels, animation.GetDuration());
+		logi("GPUScene: animation '{}': {} channel(s), {:.2f} s",
+			 animation.GetName(),
+			 channels,
+			 animation.GetDuration());
 	}
 }
 
@@ -1892,10 +2022,8 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 														"Material_SubsurfaceWeight",
 														batch);
 			// sRGB, so it shares the albedo texture.
-			gpu.subsurfaceColourTexture = UploadTexture(material.GetAlbedoTexture(),
-														Format::R8G8B8A8_UNORM_SRGB,
-														"Material_Albedo",
-														batch);
+			gpu.subsurfaceColourTexture =
+					UploadTexture(material.GetAlbedoTexture(), Format::R8G8B8A8_UNORM_SRGB, "Material_Albedo", batch);
 		}
 		if (material.IsThinWalled())
 		{
@@ -2016,8 +2144,9 @@ void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMater
 		// Clamped here rather than baked, so cached scenes get it too.
 		if (UnpackGpuMaterial(packed).ior < kMinIor)
 		{
-			packed.transmissionIor = (packed.transmissionIor & 0xFFFFu) |
-									 (static_cast<uint32_t>(DirectX::PackedVector::XMConvertFloatToHalf(kMinIor)) << 16);
+			packed.transmissionIor =
+					(packed.transmissionIor & 0xFFFFu) |
+					(static_cast<uint32_t>(DirectX::PackedVector::XMConvertFloatToHalf(kMinIor)) << 16);
 		}
 		const MaterialData material = UnpackGpuMaterial(packed);
 		// Derived here rather than baked, so cached scenes get it too.
@@ -2132,8 +2261,9 @@ std::vector<uint32_t> RenderGPUScene::CollectEmitters(const Scene::GLTFScene &sc
 		const MaterialData material = UnpackGpuMaterial(materials[materialIndex]);
 		// A blended emitter is only there by its alpha, which the light has its factor of; a texture's alpha
 		// would need the albedo texture in the light, so NEE leaves that out.
-		const float3 emissive = material.alphaMode == ALPHA_MODE_BLEND ? material.emissive * std::clamp(material.baseColour.w, 0.0f, 1.0f)
-																	   : material.emissive;
+		const float3 emissive = material.alphaMode == ALPHA_MODE_BLEND
+										? material.emissive * std::clamp(material.baseColour.w, 0.0f, 1.0f)
+										: material.emissive;
 		if (!(emissive.x > 0.0f || emissive.y > 0.0f || emissive.z > 0.0f))
 		{
 			continue;
@@ -2272,8 +2402,9 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 		for (int v = 0; v < 256; ++v)
 		{
 			const float a = static_cast<float>(v) / 255.0f;
-			const float mapped = a < threshold ? 0.5f * a / threshold
-											   : (threshold < 1.0f ? 0.5f + 0.5f * (a - threshold) / (1.0f - threshold) : 1.0f);
+			const float mapped =
+					a < threshold ? 0.5f * a / threshold
+								  : (threshold < 1.0f ? 0.5f + 0.5f * (a - threshold) / (1.0f - threshold) : 1.0f);
 			remap[v] = static_cast<uint8_t>(std::clamp(mapped * 255.0f + 0.5f, 0.0f, 255.0f));
 		}
 		std::vector<uint8_t> &alpha = remappedAlpha[{ materialIndex, threshold }];
@@ -2317,16 +2448,18 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 		const MaterialData material = UnpackGpuMaterial(materials[desc.materialIndex]);
 		// Pass-through surfaces always need the shadow any-hit shader for what they let through.
 		const bool blended = material.alphaMode == ALPHA_MODE_BLEND;
-		if ((material.alphaMode != ALPHA_MODE_MASK && !blended) || (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
+		if ((material.alphaMode != ALPHA_MODE_MASK && !blended) ||
+			(material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
 		{
 			continue;
 		}
 
 		// The any-hit shaders cut where baseColour.w * texture alpha < the cutoff.
-		const Scene::Texture *texture = desc.materialIndex < scene.GetMaterialCount() &&
-												scene.GetMaterial(desc.materialIndex).GetAlbedoTexture().IsValid()
-										? &scene.GetMaterial(desc.materialIndex).GetAlbedoTexture()
-										: nullptr;
+		const Scene::Texture *texture =
+				desc.materialIndex < scene.GetMaterialCount() &&
+								scene.GetMaterial(desc.materialIndex).GetAlbedoTexture().IsValid()
+						? &scene.GetMaterial(desc.materialIndex).GetAlbedoTexture()
+						: nullptr;
 		const float factor = material.baseColour.w;
 		const float cutoff = blended ? kBlendMinOpacity : material.alphaCutoff;
 		const uint32_t triangleCount = desc.indexCount / 3;
@@ -2472,7 +2605,9 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 												   reinterpret_cast<int *>(ommIndices_.data()),
 												   ommIndices_.size(),
 												   kOpacityMicromapStates);
-	data.resize(count == 0 ? 0 : offsets[count - 1] + meshopt_opacityMapEntrySize(levels[count - 1], kOpacityMicromapStates));
+	data.resize(count == 0
+						? 0
+						: offsets[count - 1] + meshopt_opacityMapEntrySize(levels[count - 1], kOpacityMicromapStates));
 	ommData_ = std::move(data);
 	ommMicromaps_.resize(count);
 	for (size_t i = 0; i < count; ++i)
@@ -2559,7 +2694,8 @@ void RenderGPUScene::DestroyInstanceStructures()
 		}
 	}
 	frameTlases_.clear();
-	for (std::vector<AccelerationStructureHandle> *list: { &blases_, &ommBlases_, &prototypeBlases_, &prototypeOmmBlases_ })
+	for (std::vector<AccelerationStructureHandle> *list:
+		 { &blases_, &ommBlases_, &prototypeBlases_, &prototypeOmmBlases_ })
 	{
 		for (AccelerationStructureHandle blas: *list)
 		{
@@ -2598,11 +2734,10 @@ void RenderGPUScene::BuildInstanceStructures()
 	hasBlendedInstances_ = false;
 	const ResourceHandle indexBuffer = streamBuffers_[(uint32_t) GPUStream::Index];
 	const bool micromaps = renderContext_->SupportsOpacityMicromaps() && ommIndexBuffer_ != InvalidResourceHandle;
-	auto hasMicromaps = [&](uint32_t primitive) { return micromaps && ommIndexOffsets_[primitive] != kNoOpacityMicromaps; };
+	auto hasMicromaps = [&](uint32_t primitive)
+	{ return micromaps && ommIndexOffsets_[primitive] != kNoOpacityMicromaps; };
 	auto geometryFlags = [&](uint32_t primitive) -> const MaterialGeometryFlags &
-	{
-		return materialGeometry_[primitiveDescs[primitive].materialIndex];
-	};
+	{ return materialGeometry_[primitiveDescs[primitive].materialIndex]; };
 	auto geometryOf = [&](uint32_t primitive, bool linkMicromaps)
 	{
 		const PrimitiveGPUDesc &desc = primitiveDescs[primitive];
@@ -2622,7 +2757,8 @@ void RenderGPUScene::BuildInstanceStructures()
 		{
 			geometry.opacityMicromapArray = ommArray_;
 			geometry.opacityMicromapIndexBuffer = ommIndexBuffer_;
-			geometry.opacityMicromapIndexBufferOffset = static_cast<uint64_t>(ommIndexOffsets_[primitive]) * sizeof(int32_t);
+			geometry.opacityMicromapIndexBufferOffset =
+					static_cast<uint64_t>(ommIndexOffsets_[primitive]) * sizeof(int32_t);
 		}
 		return geometry;
 	};
@@ -2683,7 +2819,8 @@ void RenderGPUScene::BuildInstanceStructures()
 					parts.push_back(refs[candidates[k]].primitive);
 				}
 				std::sort(parts.begin(), parts.end());
-				const auto [it, added] = prototypeOfParts.try_emplace(std::move(parts), static_cast<uint32_t>(prototypes.size()));
+				const auto [it, added] =
+						prototypeOfParts.try_emplace(std::move(parts), static_cast<uint32_t>(prototypes.size()));
 				if (added)
 				{
 					prototypes.push_back(it->first);
@@ -2767,7 +2904,8 @@ void RenderGPUScene::BuildInstanceStructures()
 
 	// Built and compacted in submissions of their own, which leaves them none of the build's memory.
 	std::vector<AccelerationStructureHandle> builtBlases;
-	for (const std::vector<AccelerationStructureHandle> *list: { &blases_, &ommBlases_, &prototypeBlases_, &prototypeOmmBlases_ })
+	for (const std::vector<AccelerationStructureHandle> *list:
+		 { &blases_, &ommBlases_, &prototypeBlases_, &prototypeOmmBlases_ })
 	{
 		std::copy_if(list->begin(),
 					 list->end(),
@@ -2827,7 +2965,8 @@ void RenderGPUScene::BuildInstanceStructures()
 			tlasInstance.blas = blases_[ref.primitive];
 			tlasInstance.instanceID = ref.primitive;
 			ommBlas = ommBlases_[ref.primitive];
-			mask2State = ommBlas != InvalidAccelerationStructureHandle && geometryFlags(ref.primitive).opacityMicromap2State;
+			mask2State =
+					ommBlas != InvalidAccelerationStructureHandle && geometryFlags(ref.primitive).opacityMicromap2State;
 		}
 		else
 		{
@@ -2885,7 +3024,8 @@ void RenderGPUScene::BuildInstanceStructures()
 		desc.sizeInBytes = emitters.size() * sizeof(uint32_t);
 		desc.structureByteStride = sizeof(uint32_t);
 		desc.debugName = "Scene_TLASEmitters";
-		tlasEmitterBuffer_ = renderContext_->CreateBuffer(desc, ResourceViewType::ShaderResource, emitters.data(), batch);
+		tlasEmitterBuffer_ =
+				renderContext_->CreateBuffer(desc, ResourceViewType::ShaderResource, emitters.data(), batch);
 		renderContext_->EndUpload(batch);
 
 		logi("GPUScene: merged {} of {} primitive instance(s) into {} instance(s) of {} prototype(s)",
@@ -2959,7 +3099,8 @@ void RenderGPUScene::BuildInstanceStructures()
 		}
 	}
 
-	logi("GPUScene: built {} BLAS(es) ({} with opacity micromaps) and {} TLAS(es) per frame in flight with {} instance(s)",
+	logi("GPUScene: built {} BLAS(es) ({} with opacity micromaps) and {} TLAS(es) per frame in flight with {} "
+		 "instance(s)",
 		 builtBlases.size(),
 		 std::count_if(ommBlases_.begin(),
 					   ommBlases_.end(),
@@ -2985,7 +3126,8 @@ void RenderGPUScene::UpdateAccelerationStructures()
 	for (uint32_t i: dynamicTlasInstances_)
 	{
 		float transform[12];
-		Scene::RowMajorToBLASTransform(dynamicLastFrameTransforms_[dynamicOfInstance_[tlasRefs_[i].instance]].data(), transform);
+		Scene::RowMajorToBLASTransform(dynamicLastFrameTransforms_[dynamicOfInstance_[tlasRefs_[i].instance]].data(),
+									   transform);
 		renderContext_->UpdateUploadBuffer(previousTransforms, transform, i * sizeof(transform), sizeof(transform));
 	}
 	for (size_t d = 0; d < dynamicInstances_.size(); ++d)
@@ -3018,10 +3160,12 @@ void RenderGPUScene::UpdateAccelerationStructures()
 			{
 				std::memcpy(ommTlasInstances_[i].transform, transform, sizeof(ommTlasInstances_[i].transform));
 			}
-			
+
 			if (!omm2StateTlasInstances_.empty())
 			{
-				std::memcpy(omm2StateTlasInstances_[i].transform, transform, sizeof(omm2StateTlasInstances_[i].transform));
+				std::memcpy(omm2StateTlasInstances_[i].transform,
+							transform,
+							sizeof(omm2StateTlasInstances_[i].transform));
 			}
 		}
 	}

@@ -153,13 +153,15 @@ public:
 		return previousTransforms_.empty() ? InvalidResourceHandle : previousTransforms_[previousTransformFrame_];
 	}
 
-	// Writes the lights to the current frame's light buffers, the dynamic emitters moved to where they are now,
-	// and the emission scales. After a scene load it also makes the light tree builder's buffers, which waits for
-	// the GPU. Call after BeginFrame, which frees the current frame's buffers, and before BeginGraphicsCommandList.
+	// Writes the current frame's uploads: the dynamic instances' transforms if they moved, the point lights and the
+	// emission scales. After a scene load it also makes the light buffer and the light tree builder's buffers, which
+	// waits for the GPU. Call after BeginFrame, which frees the current frame's buffers, and before
+	// BeginGraphicsCommandList.
 	void UpdateLights();
 
-	// Records the build of the light tree over every light, static and dynamic alike, from the buffers
-	// UpdateLights wrote. Call every frame after UpdateLights and SetDescriptorHeaps, before any tracing.
+	// Records the move of the dynamic lights and the point lights into the light buffer (TransformDynamicLights in
+	// DynamicLights.slang), then the build of the light tree over every light, static and dynamic alike. Call every
+	// frame after UpdateLights and SetDescriptorHeaps, before any tracing.
 	void BuildLightTree(uint32_t maxLeafLights);
 
 	bool HasGeometry() const
@@ -209,7 +211,8 @@ public:
 	uint32_t GetOpacityMicromap2StateTLASIndex() const
 	{
 		const FrameTLASes &frame = frameTlases_[tlasFrame_];
-		const ResourceHandle srv = frame.omm2StateTlasSRV != InvalidResourceHandle ? frame.omm2StateTlasSRV : frame.ommTlasSRV;
+		const ResourceHandle srv =
+				frame.omm2StateTlasSRV != InvalidResourceHandle ? frame.omm2StateTlasSRV : frame.ommTlasSRV;
 		return srv != InvalidResourceHandle ? renderContext_->GetResourceViewInfo(srv).descriptorIndex : 0;
 	}
 
@@ -257,7 +260,7 @@ public:
 
 	ResourceHandle GetLightBuffer() const
 	{
-		return lightFrames_.empty() ? InvalidResourceHandle : lightFrames_[lightFrame_].lights;
+		return lights_;
 	}
 
 	ResourceHandle GetLightTreeNodeBuffer() const
@@ -413,8 +416,9 @@ private:
 	// keeping the order within each part, and renumbers them in the emitter buffer's contents. Also numbers
 	// the emissive instances and resets their emission scales.
 	void PartitionDynamicLights(std::vector<uint32_t> &emitters);
-	// The dynamic lights in world space, from the current transforms of their instances.
-	void TransformDynamicLights();
+	// The dynamic lights' centroid bounds from their instances' current transforms, conservatively: each
+	// instance's object-space bounds moved as a box.
+	void UpdateDynamicLightBounds();
 	void UploadEmitters(const std::vector<uint32_t> &emitters, UploadBatchHandle batch);
 	// Fills the opacity micromap tables from the base colour alpha of the alpha-tested primitives.
 	void BakeOpacityMicromaps(const Scene::GLTFScene &scene, const std::vector<GpuMaterial> &materials);
@@ -450,6 +454,9 @@ private:
 	// From the animation tables, their duration and the dynamic instances. Call before PartitionDynamicLights.
 	void PrepareAnimation();
 	void DestroyLights();
+	// The light buffer and the dynamic lights' object-space tables. Only while the GPU is idle.
+	void CreateLightBuffers(std::span<const GpuLight> pointLights);
+	void DestroyLightBuffers();
 
 	RenderContext *renderContext_ = nullptr;
 
@@ -485,23 +492,34 @@ private:
 	// from video memory.
 	struct LightFrameBuffers
 	{
-		ResourceHandle lights = InvalidResourceHandle;
+		ResourceHandle transforms =
+				InvalidResourceHandle; // DynamicLightTransform per dynamic instance, when they moved
+		ResourceHandle pointLights = InvalidResourceHandle; // GpuLight, written whole every frame
 		ResourceHandle emissionScales = InvalidResourceHandle; // written whole every frame
-		size_t lightCapacity = 0;
+		size_t transformCapacity = 0;
+		size_t pointLightCapacity = 0;
 		size_t emissionScaleCapacity = 0;
-		uint32_t lightsGeneration = 0; // lightsGeneration_ of the static lights these hold, 0 for none
-		uint32_t dynamicLightPose = UINT32_MAX; // dynamicLightPose_ of the dynamic lights these hold
 	};
+
+	// Every light, in video memory: the static triangle lights, uploaded once per builder reset, then the dynamic
+	// ones and the point lights, which TransformDynamicLights writes on the GPU. One buffer for all frames in flight,
+	// as the GPU writes it in queue order. Only a UAV descriptor, which the tree build reads through; tracing binds
+	// it as a root SRV.
+	ResourceHandle lights_ = InvalidResourceHandle;
+	ResourceHandle dynamicObjectLightBuffer_ = InvalidResourceHandle; // dynamicObjectLights_
+	ResourceHandle dynamicLightInstanceBuffer_ = InvalidResourceHandle; // dynamicLightInstance_
+	PipelineHandle dynamicLightsPipeline_ = InvalidPipelineHandle;
+	uint32_t lightsPose_ = UINT32_MAX; // dynamicLightPose_ of the dynamic lights in lights_, UINT32_MAX for none
+	bool transformsWritten_ = false; // this frame's upload holds the dynamic instances' transforms
 
 	// The light tree input: the emissive triangles (one-sided area lights, with the average of their
 	// emissive texture as the flux scale), the static emitters' first, then from staticLightCount_ on
-	// the dynamic ones', which the CPU moves. The tree treats them all alike.
+	// the dynamic ones' at rest (the GPU moves them, see lights_). The tree treats them all alike.
 	std::vector<GpuLight> emissiveLights_;
 	std::vector<float> emissiveFluxScales_;
 	uint32_t staticLightCount_ = 0;
 	// False after a scene load, until UpdateLights has reset the builder for the new lights.
 	bool lightTreeBuilt_ = false;
-	uint32_t lightsGeneration_ = 0; // counts the builder resets, so each frame's buffers take the new lights
 	std::unique_ptr<LightTreeBuilder> lightTreeBuilder_;
 	// Of the light centroids, for the Morton codes: the static ones' from the last reset, the dynamic ones'
 	// from their last move.
@@ -550,6 +568,8 @@ private:
 	std::vector<std::array<float, 12>> dynamicLastFrameTransforms_;
 	std::vector<GpuLight> dynamicObjectLights_; // per dynamic light, its triangle in object space
 	std::vector<uint32_t> dynamicLightInstance_; // per dynamic light, into dynamicInstances_
+	// Per dynamic instance, the bounds of its lights' object-space centroids, empty (min above max) without lights.
+	std::vector<std::array<float3, 2>> dynamicObjectLightBounds_;
 	bool dynamicLightsMoved_ = false;
 	uint32_t dynamicLightPose_ = 0; // counts the moves of the dynamic lights
 	uint32_t dynamicPoseGeneration_ = 0; // counts the poses Animate has moved the dynamic instances to
@@ -591,7 +611,7 @@ private:
 	// GetPreviousTransformBuffer's, one per frame in flight. Only the dynamic instances' rows change.
 	std::vector<ResourceHandle> previousTransforms_;
 	uint32_t previousTransformFrame_ = 0;
-	
+
 	struct FrameTLASes
 	{
 		AccelerationStructureHandle tlas = InvalidAccelerationStructureHandle;

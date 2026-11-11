@@ -306,7 +306,7 @@ void LightKeys(uint3 dispatchThread : SV_DispatchThreadID)
     if (light >= g_PushConstants.lightCount)
         return;
 
-    StructuredBuffer<GpuLight> lights = ResourceDescriptorHeap[g_PushConstants.lightsHandle];
+    RWStructuredBuffer<GpuLight> lights = ResourceDescriptorHeap[g_PushConstants.lightsHandle];
     StructuredBuffer<float> emissionScales = ResourceDescriptorHeap[g_PushConstants.emissionScalesHandle];
     StructuredBuffer<float> fluxScales = ResourceDescriptorHeap[g_Resources.fluxScales];
     StructuredBuffer<uint> lightEmitters = ResourceDescriptorHeap[g_Resources.lightEmitters];
