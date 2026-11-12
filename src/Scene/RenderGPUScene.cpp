@@ -874,6 +874,7 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 	}
 	forEachLight([&](uint32_t instance, uint32_t &) { ++instanceLights[instance]; });
 
+	constexpr uint32_t kLoggedEmissiveInstances = 32;
 	uint32_t ordinal = 0;
 	uint32_t dynamicEmitters = 0;
 	std::vector<uint32_t> emissiveOfInstance(instances.size(), UINT32_MAX);
@@ -887,16 +888,27 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 		emissiveInstances_.push_back(instance);
 		const bool dynamic = dynamicOfInstance_[instance] != UINT32_MAX;
 		dynamicEmitters += dynamic ? 1 : 0;
-		const float *m = instances[instance].worldMatrix;
-		logi("GPUScene: emissive instance {} (scene instance {} at {:.2f}, {:.2f}, {:.2f}): {} triangle light(s), {}",
-			 ordinal,
-			 instance,
-			 m[3],
-			 m[7],
-			 m[11],
-			 instanceLights[instance],
-			 dynamic ? "dynamic" : "static");
+		// Only the first few: a scene with a million emitters would spend minutes logging them.
+		if (ordinal < kLoggedEmissiveInstances)
+		{
+			const float *m = instances[instance].worldMatrix;
+			logi("GPUScene: emissive instance {} (scene instance {} at {:.2f}, {:.2f}, {:.2f}): {} triangle light(s), {}",
+				 ordinal,
+				 instance,
+				 m[3],
+				 m[7],
+				 m[11],
+				 instanceLights[instance],
+				 dynamic ? "dynamic" : "static");
+		}
 		++ordinal;
+	}
+	if (ordinal > kLoggedEmissiveInstances)
+	{
+		logi("GPUScene: ... and {} more emissive instance(s); {} of all {} are dynamic",
+			 ordinal - kLoggedEmissiveInstances,
+			 dynamicEmitters,
+			 ordinal);
 	}
 	// Every emissive instance at its loaded emission, and each light's instance in the final order.
 	emissionScales_.assign(emissiveInstances_.size(), 1.0f);
