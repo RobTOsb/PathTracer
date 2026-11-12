@@ -68,6 +68,12 @@ public:
 		return depth_;
 	}
 
+	// The leaf level's first node in the last build: a light's leaf less this is its position along the level.
+	uint32_t GetLeafOffset() const
+	{
+		return leafOffset_;
+	}
+
 private:
 	void DestroyBuffers();
 
@@ -100,4 +106,5 @@ private:
 	ResourceHandle leafOfLight_ = InvalidResourceHandle;
 	ResourceHandle power_ = InvalidResourceHandle;
 	uint32_t depth_ = 0;
+	uint32_t leafOffset_ = 0;
 };

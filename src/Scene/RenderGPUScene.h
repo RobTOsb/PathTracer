@@ -274,12 +274,6 @@ public:
 		return lightTreeBuilder_->GetLeafOfLight();
 	}
 
-	// Parent node of each light tree group (uint), for the shader's PMF walk.
-	ResourceHandle GetLightTreeParentBuffer() const
-	{
-		return lightTreeBuilder_->GetParents();
-	}
-
 	ResourceHandle GetLightTreeLeafLightBuffer() const
 	{
 		return lightTreeBuilder_->GetLeafLights();
@@ -339,6 +333,12 @@ public:
 	uint32_t GetLightTreeDepth() const
 	{
 		return lightTreeBuilder_->GetDepth();
+	}
+
+	// The last tree's leaf level's first node (LightTreeBuilder::GetLeafOffset).
+	uint32_t GetLightTreeLeafOffset() const
+	{
+		return lightTreeBuilder_->GetLeafOffset();
 	}
 
 	// World-space bounds over every instanced primitive, for framing the camera.

@@ -245,7 +245,8 @@ float LightSelectPmf(LightSelectVertex v, uint lightIndex)
     if (v.selection == LIGHT_SELECT_TREE)
     {
         float mix = g_Frame.lightTreePowerMix;
-        pmf = (1.0 - mix) * LightTreePmf(g_LightTreeNodes, g_LightTreeParents, g_LightLeaves, MakeLightTreeShadingContext(v), lightIndex) +
+        pmf = (1.0 - mix) * LightTreePmf(g_LightTreeNodes, g_LightLeaves, MakeLightTreeShadingContext(v), lightIndex,
+                                         g_Frame.lightTreeLeafLevel, g_Frame.lightTreeLeafOffset) +
               mix * g_LightPower[lightIndex].pmf;
     }
     else if (v.selection == LIGHT_SELECT_POWER)
@@ -320,22 +321,36 @@ LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
     {
         // Defensive sampling: a share of the picks by power, and every pick weighed by the mix of both PMFs (the
         // balance heuristic over the two strategies), which costs the other strategy's PMF: one load after a tree
-        // walk, a PMF walk after a power pick.
+        // walk, a walk following the light's path after a power pick. Both walks are the one WalkLightTree, so the
+        // lanes of a wave walk together whichever they picked, rather than the wave running one walk after the other.
         float mix = g_Frame.lightTreePowerMix;
         LightTreeShadingContext treeCtx = MakeLightTreeShadingContext(v);
-        float treePmf;
-        float powerPmf;
-        if (uSelect < mix)
+        bool byPower = uSelect < mix;
+        float powerPmf = 0.0;
+        LightTreePath path = { 0, 1.0 };
+        lightIndex = 0;
+        if (byPower)
         {
             if (!SamplePowerLight(min(uSelect / mix, 0.99999994), u.y, lightIndex, powerPmf))
                 return ls;
-            treePmf = LightTreePmf(g_LightTreeNodes, g_LightTreeParents, g_LightLeaves, treeCtx, lightIndex);
+            path = LightTreeFindLight(g_LightLeaves, lightIndex, g_Frame.lightTreeLeafOffset);
+        }
+        float uTree = byPower ? 0.0 : min((uSelect - mix) / (1.0 - mix), 0.99999994);
+        uint leaf;
+        float treePmf;
+        bool found = WalkLightTree(g_LightTreeNodes, treeCtx, byPower, path.leafPosition, 2 * g_Frame.lightTreeLeafLevel,
+                                   uTree, leaf, treePmf);
+        if (byPower)
+        {
+            treePmf *= path.leafPmf;
         }
         else
         {
-            float uTree = min((uSelect - mix) / (1.0 - mix), 0.99999994);
-            if (!SampleLightTree(g_LightTreeNodes, g_LightTreeLeafLights, treeCtx, uTree, lightIndex, treePmf))
+            if (!found)
                 return ls;
+            float leafPmf;
+            PickLeafLight(g_LightTreeLeafLights, leaf, uTree, lightIndex, leafPmf);
+            treePmf *= leafPmf;
             powerPmf = mix > 0.0 ? g_LightPower[lightIndex].pmf : 0.0;
         }
         pmf = (1.0 - mix) * treePmf + mix * powerPmf;

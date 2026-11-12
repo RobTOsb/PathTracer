@@ -612,6 +612,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.lightSampling = static_cast<uint>(lights.sampling);
 	constants.lightTreeBounces = static_cast<uint>(std::max(lights.treeBounces, 0));
 	constants.lightTreePowerMix = std::clamp(lights.treePowerMix, 0.0f, 1.0f);
+	constants.lightTreeLeafLevel = std::max(scene_.GetLightTreeDepth(), 1u) - 1;
+	constants.lightTreeLeafOffset = scene_.GetLightTreeLeafOffset();
 	constants.sunSelectProbability = sunActive ? (lightsActive ? 0.5f : 1.0f) : 0.0f;
 	constants.lightTreeGlossyBounces = static_cast<uint>(std::max(lights.glossyImportanceBounces, 0));
 	constants.lightTreeFarFieldSharpness = lights.farFieldImportance ? lights.farFieldSharpness : FLT_MAX;
@@ -822,7 +824,6 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		renderContext->SetRaytracingSRV(6, scene_.GetLightTreeNodeBuffer());
 		renderContext->SetRaytracingSRV(7, scene_.GetLightLeafBuffer());
 		renderContext->SetRaytracingSRV(8, scene_.GetEmitterBuffer());
-		renderContext->SetRaytracingSRV(9, scene_.GetLightTreeParentBuffer());
 		renderContext->SetRaytracingSRV(10, scene_.GetLightTreeLeafLightBuffer());
 		renderContext->SetRaytracingSRV(13, scene_.GetLightPowerBuffer());
 		renderContext->SetRaytracingSRV(14, scene_.GetLightEmitterBuffer());

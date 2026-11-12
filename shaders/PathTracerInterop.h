@@ -165,7 +165,13 @@ struct FrameConstants
 	uint reducedMaterialDiffuseBounces;
 	float fireflyFilterThreshold;
 	uint exposureBuffer;
-	uint padFireflyFilter;
+	// The light tree's leaf level (its depth less one) and that level's first node, so a walk can follow a known
+	// light's leaf down from the root (LightTreePath in LightTree.slang).
+	uint lightTreeLeafLevel;
+	uint lightTreeLeafOffset;
+	uint padLightTree0;
+	uint padLightTree1;
+	uint padLightTree2;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -640,7 +646,7 @@ struct AutoExposureConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
-static_assert(sizeof(FrameConstants) == 784,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 800,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
 static_assert(sizeof(GpuMaterial) == 152,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,

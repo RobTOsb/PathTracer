@@ -126,6 +126,7 @@ void LightTreeBuilder::DestroyBuffers()
 	}
 	lightCount_ = 0;
 	depth_ = 0;
+	leafOffset_ = 0;
 }
 
 void LightTreeBuilder::Reset(std::span<const float> fluxScales, ResourceHandle lightEmitters)
@@ -209,6 +210,7 @@ void LightTreeBuilder::Build(const Inputs &inputs)
 	const uint32_t leafSize = std::clamp(inputs.maxLeafLights, 1u, LIGHT_TREE_MAX_LEAF_LIGHTS);
 	const TreeLayout layout(lightCount_, leafSize);
 	depth_ = layout.leafLevel + 1;
+	leafOffset_ = layout.NodeCount() - layout.Nodes(layout.leafLevel);
 	const uint32_t blockCount = GroupCount(lightCount_, LIGHT_TREE_BUILD_BLOCK_SIZE);
 
 	LightTreeBuildConstants constants = {};

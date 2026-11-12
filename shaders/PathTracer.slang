@@ -237,31 +237,15 @@ struct SurfaceOutcome
     float rrU;
 };
 
-// The hit's shading: emission, NEE, the BSDF sample (and the glass splits), the DLSS-RR camera state and
-// subsurface scattering, for the segment that ended at the payload's hit. SIMPLE: a GPU_MATERIAL_SIMPLE
-// material, whose specialisation drops every lobe but the base's and so holds far fewer registers.
-// arrivedExtinction is the medium the segment crossed, segmentExtinction comes back as the next one's.
-SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 origin, inout float3 dir, uint bounce,
-                                               bool fromCamera, bool chainActive, bool hitDistanceArrived,
-                                               bool paneHitArrived, bool endHitArrived, bool smoothSegment, bool firstSegment, bool cameraSegment,
-                                               float3 arrivedExtinction, inout uint flags, inout uint rng, inout float3 radiance,
-                                               inout float3 throughput, inout float prevBsdfPdf,
-                                               inout PackedLightSelectVertex prevVertex, inout RayCone cone,
-                                               inout float3 segmentExtinction, inout float rrInvScale,
-                                               inout float fireflyK)
+// The weight of the light a BSDF sample found on an emitter's front face, MIS weighted against NEE at the previous
+// vertex unless the triangle has no light (degenerate or black) or light buffer NEE is off, with the light's emission
+// scale as NEE's radiance has. Its light tree walk needs only the packed hit, so it comes before either shading
+// specialisation, outside of which the walk is compiled once.
+float EmissionWeight(HitPayload payload, float3 origin, float3 dir, bool fromCamera, bool smoothSegment, float prevBsdfPdf,
+                     PackedLightSelectVertex prevVertex)
 {
-    // Front-face emission found by BSDF sampling is MIS weighted against NEE at the previous vertex
-    // unless the triangle has no light (degenerate or black) or light buffer NEE is off. The weight's
-    // light tree walk needs only the packed hit, so it comes before the material, which is then not
-    // held across it. The weight also carries the light's emission scale, as NEE's radiance does.
-    float3 wo = -dir;
-    bool frontFace = dot(OctDecode(payload.Ng), wo) > 0.0;
-    // Light found here is direct for a surface the camera sees, or for the one the segment left.
-    bool visible = fromCamera || chainActive;
-    bool directArrival = DirectSegment(flags, fromCamera, chainActive);
-    bool seenArrival = SeenSegment(flags, fromCamera, chainActive);
     float emissionWeight = 1.0;
-    if (frontFace && payload.emitter != INVALID_LIGHT_INDEX)
+    if (dot(OctDecode(payload.Ng), dir) < 0.0 && payload.emitter != INVALID_LIGHT_INDEX)
     {
         uint lightIndex = g_Emitters[payload.emitter];
         if (lightIndex != INVALID_LIGHT_INDEX)
@@ -272,6 +256,38 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
                                                                               dir, origin + dir * payload.hitT));
         }
     }
+    return emissionWeight;
+}
+
+// What ShadeSurfaceBegin hands ShadeSurfaceEnd across the light sample, which TracePath takes between them so that
+// SampleLight, whose light tree walk is the largest code of all, is compiled once rather than in both specialisations.
+// The walk needs registers of its own, so across it the material is held packed and the BSDF context not at all;
+// ShadeSurfaceEnd rebuilds both, and everything from there on, sampling and evaluation alike, uses that pair.
+struct SurfaceShading
+{
+    HitInfo hit;
+    PackedMaterial packedMat;
+    PackedLightSelectVertex vertex; // for SampleLight, and the next segment's MIS
+    float3 lightU; // the light sample (xy) and the Russian roulette decision (z), one hash
+    bool sampleLights;
+    bool lastSegment;
+    bool opaque;
+};
+
+// The hit's shading up to the light sample: the material, emission (by emissionWeight, see EmissionWeight) and the
+// light select vertex, for the segment that ended at the payload's hit. SIMPLE: a GPU_MATERIAL_SIMPLE material, whose
+// specialisation drops every lobe but the base's and so holds far fewer registers.
+SurfaceShading ShadeSurfaceBegin<let SIMPLE : bool>(HitPayload payload, float3 origin, float3 dir, uint bounce,
+                                                    bool fromCamera, bool chainActive, float emissionWeight, uint flags,
+                                                    inout uint rng, inout float3 radiance, float3 throughput,
+                                                    inout RayCone cone, float fireflyK)
+{
+    float3 wo = -dir;
+    bool frontFace = dot(OctDecode(payload.Ng), wo) > 0.0;
+    // Light found here is direct for a surface the camera sees, or for the one the segment left.
+    bool visible = fromCamera || chainActive;
+    bool directArrival = DirectSegment(flags, fromCamera, chainActive);
+    bool seenArrival = SeenSegment(flags, fromCamera, chainActive);
 
     HitInfo hit = UnpackHit(payload, origin, dir);
 
@@ -326,25 +342,45 @@ SurfaceOutcome ShadeSurface<let SIMPLE : bool>(HitPayload payload, inout float3 
     SetShadingBasis(mat, hit.T, hit.B, hit.N, hit.Ns, hit.Ng, wo);
     OpenPBRContext ctx = OpenPBRSetup(mat, wo);
 
-    // One hash covers the light sample (xy) and the Russian roulette decision (z).
-    float3 lightU = Rand3(rng);
-
-    bool sampleLights = !emissionOnly && (lastSegment || !LeavesLightsToBsdf(ctx));
+    SurfaceShading s;
+    s.lightU = Rand3(rng);
+    s.sampleLights = !emissionOnly && (lastSegment || !LeavesLightsToBsdf(ctx));
     // Sampled with the rounding prevVertex keeps, so both ends of an emitter's MIS see the same pmf. A
     // vertex that samples no lights needs none, since the segment it starts takes no MIS. A surface the camera
     // sees, also past PSR's mirrors and glass, selects lights as the primary hit does.
-    PackedLightSelectVertex vertex = (PackedLightSelectVertex)0;
-    if (sampleLights)
-        vertex = PackLightSelectVertex(MakeLightSelectVertex(hit.position, mat, ctx, wo, visible ? 0u : bounce));
-    // The light tree walk needs registers of its own, so across it the material is held packed and
-    // the BSDF context not at all. Both are rebuilt after it, and everything from here on, sampling
-    // and evaluation alike, uses the rebuilt pair.
-    PackedMaterial packedMat = PackMaterial(mat);
-    LightSample ls = (LightSample)0;
-    if (sampleLights)
-        ls = SampleLight(UnpackLightSelectVertex(vertex), lightU.xy, rng);
-    mat = UnpackMaterial(packedMat, SIMPLE);
-    ctx = OpenPBRSetup(mat, wo);
+    s.vertex = (PackedLightSelectVertex)0;
+    if (s.sampleLights)
+        s.vertex = PackLightSelectVertex(MakeLightSelectVertex(hit.position, mat, ctx, wo, visible ? 0u : bounce));
+    s.hit = hit;
+    s.packedMat = PackMaterial(mat);
+    s.lastSegment = lastSegment;
+    s.opaque = opaque;
+    return s;
+}
+
+// The rest of the hit's shading, after the light sample ls (zero where shading.sampleLights is false): NEE, the BSDF
+// sample (and the glass splits), the DLSS-RR camera state and subsurface scattering. arrivedExtinction is the medium
+// the segment crossed, segmentExtinction comes back as the next one's.
+SurfaceOutcome ShadeSurfaceEnd<let SIMPLE : bool>(SurfaceShading shading, LightSample ls, inout float3 origin,
+                                                  inout float3 dir, uint bounce, bool fromCamera, bool chainActive,
+                                                  bool hitDistanceArrived, bool paneHitArrived, bool endHitArrived,
+                                                  bool smoothSegment, bool firstSegment, bool cameraSegment,
+                                                  float3 arrivedExtinction, inout uint flags, inout uint rng,
+                                                  inout float3 radiance, inout float3 throughput, inout float prevBsdfPdf,
+                                                  inout PackedLightSelectVertex prevVertex, inout RayCone cone,
+                                                  inout float3 segmentExtinction, inout float rrInvScale,
+                                                  inout float fireflyK)
+{
+    float3 wo = -dir;
+    bool visible = fromCamera || chainActive;
+    HitInfo hit = shading.hit;
+    PackedLightSelectVertex vertex = shading.vertex;
+    float3 lightU = shading.lightU;
+    bool sampleLights = shading.sampleLights;
+    bool lastSegment = shading.lastSegment;
+    bool opaque = shading.opaque;
+    OpenPBRBaseParams mat = UnpackMaterial(shading.packedMat, SIMPLE);
+    OpenPBRContext ctx = OpenPBRSetup(mat, wo);
     // Before NEE, so that its MIS sees the mixture the BSDF sample is drawn from. The light select vertex above keeps
     // the material's own shares, at both ends of an emitter's MIS.
     if (visible && opaque && !lastSegment)
@@ -812,8 +848,8 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                     float3 Lsun = PhotonState(flags) == PHOTON_COVERED ? float3(0.0, 0.0, 0.0) : SunRadiance(dir);
                     if (any(Lsun > 0.0))
                         Lsun *= fromCamera || smoothSegment ? 1.0 : PowerHeuristic(prevBsdfPdf, LightPdf(origin, dir, hit));
-                    float3 sky = SkyRadiance(origin, dir, Lsun, fromCamera || chainActive, rng);
                     bool seen = SeenSegment(flags, fromCamera, chainActive);
+                    float3 sky = SkyRadiance(origin, dir, Lsun, fromCamera || chainActive, seen, rng);
                     radiance += ClampFirefly(throughput * FireflyFilter(sky, seen, fireflyK), seen,
                                              DirectSegment(flags, fromCamera, chainActive));
                 }
@@ -822,17 +858,31 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
 
             // Most surfaces have only the base's lobes and shade in a specialisation without the others, in far
             // fewer registers. SER orders the hits by material, so a wave mostly takes just one of the two.
-            SurfaceOutcome outcome;
-            if (IsSimpleMaterial(PayloadMaterialIndex(payload.materialId)))
-                outcome = ShadeSurface<true>(payload, origin, dir, bounce, fromCamera, chainActive, hitDistanceArrived,
-                                             paneHitArrived, endHitArrived, smoothSegment, firstSegment, cameraSegment, medium.xyz, flags, rng,
-                                             radiance, throughput, prevBsdfPdf, prevVertex, cone, segmentExtinction, rrInvScale,
-                                             fireflyK);
+            // The emitter's MIS weight and the light sample come between the halves of the shading, outside the
+            // specialisations, so their light tree walks are compiled once and a wave of both kinds walks together.
+            const float emissionWeight = EmissionWeight(payload, origin, dir, fromCamera, smoothSegment, prevBsdfPdf, prevVertex);
+            const bool simple = IsSimpleMaterial(PayloadMaterialIndex(payload.materialId));
+            SurfaceShading shading;
+            if (simple)
+                shading = ShadeSurfaceBegin<true>(payload, origin, dir, bounce, fromCamera, chainActive, emissionWeight, flags, rng,
+                                                  radiance, throughput, cone, fireflyK);
             else
-                outcome = ShadeSurface<false>(payload, origin, dir, bounce, fromCamera, chainActive, hitDistanceArrived,
-                                              paneHitArrived, endHitArrived, smoothSegment, firstSegment, cameraSegment, medium.xyz, flags, rng,
-                                              radiance, throughput, prevBsdfPdf, prevVertex, cone, segmentExtinction, rrInvScale,
-                                             fireflyK);
+                shading = ShadeSurfaceBegin<false>(payload, origin, dir, bounce, fromCamera, chainActive, emissionWeight, flags,
+                                                   rng, radiance, throughput, cone, fireflyK);
+            LightSample ls = (LightSample)0;
+            if (shading.sampleLights)
+                ls = SampleLight(UnpackLightSelectVertex(shading.vertex), shading.lightU.xy, rng);
+            SurfaceOutcome outcome;
+            if (simple)
+                outcome = ShadeSurfaceEnd<true>(shading, ls, origin, dir, bounce, fromCamera, chainActive, hitDistanceArrived,
+                                                paneHitArrived, endHitArrived, smoothSegment, firstSegment, cameraSegment,
+                                                medium.xyz, flags, rng, radiance, throughput, prevBsdfPdf, prevVertex, cone,
+                                                segmentExtinction, rrInvScale, fireflyK);
+            else
+                outcome = ShadeSurfaceEnd<false>(shading, ls, origin, dir, bounce, fromCamera, chainActive, hitDistanceArrived,
+                                                 paneHitArrived, endHitArrived, smoothSegment, firstSegment, cameraSegment,
+                                                 medium.xyz, flags, rng, radiance, throughput, prevBsdfPdf, prevVertex, cone,
+                                                 segmentExtinction, rrInvScale, fireflyK);
 
             if (!outcome.continuePath)
                 break;

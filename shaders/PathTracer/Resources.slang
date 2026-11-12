@@ -100,7 +100,7 @@ StructuredBuffer<GpuLight> g_Lights : register(t5);
 StructuredBuffer<GpuLightTreeNode> g_LightTreeNodes : register(t6);
 StructuredBuffer<GpuLightTreeLeafEntry> g_LightLeaves : register(t7);
 StructuredBuffer<uint> g_Emitters : register(t8);
-StructuredBuffer<uint> g_LightTreeParents : register(t9);
+// t9 is free: it held the light tree's parent links, which no walk reads since WalkLightTree follows a light down.
 StructuredBuffer<GpuLightTreeLeafEntry> g_LightTreeLeafLights : register(t10);
 StructuredBuffer<GpuLightPowerEntry> g_LightPower : register(t13);
 StructuredBuffer<uint> g_LightEmitters : register(t14);    // per light, its emissive instance

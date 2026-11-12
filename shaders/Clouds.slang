@@ -187,8 +187,8 @@ float CloudTransmittance(CloudLayer layer, float3 pos, float3 dir, uint steps)
 // and of sun illuminance at the top of the atmosphere. The air dims it as the transmittance LUT says (and the
 // planet may hide the sun), the cloud by a march of kSunSteps towards the sun, jittered by u. The cloud's
 // multiple scattering is three octaves of Wrenninge et al. 2013, each scattering half as much, seeing half the
-// optical depth with half the anisotropy.
-float3 CloudSunlight(CloudLayer layer, float3 pos, float cosTheta, float u)
+// optical depth with half the anisotropy. detail: as CloudDensity's.
+float3 CloudSunlight(CloudLayer layer, float3 pos, float cosTheta, float u, bool detail)
 {
     CloudParameters c = layer.c;
     float r = length(pos);
@@ -210,7 +210,7 @@ float3 CloudSunlight(CloudLayer layer, float3 pos, float cosTheta, float u)
         float3 p = pos + c.sunDirection * (t + u * dt);
         if (length(p) > c.topRadius)
             break;
-        opticalDepth += CloudDensity(layer, p, CloudHeightFraction(c, p), true) * dt;
+        opticalDepth += CloudDensity(layer, p, CloudHeightFraction(c, p), detail) * dt;
         t += dt;
         dt *= kSunStepGrowth;
     }
@@ -238,9 +238,11 @@ struct CloudSegment
 // Marches the cloud layer along a ray from pos in at most maxSteps steps, jittered by u.x. Each step scatters the
 // sky's light (skyAmbient: its radiance from straight above) and the sun's (sunIlluminance at the top of the
 // atmosphere). The sunlight takes a march of its own, so it is estimated at one step only, picked in proportion
-// to what each step passes on to the origin with u.y, and u.z jitters its march.
+// to what each step passes on to the origin with u.y, and u.z jitters its march. detail: the density erodes its edges
+// with the detail noise (CloudDensity), two of the four dependent texture reads a step takes; without it the clouds
+// are their base shape, which only light the camera does not see the clouds by should take.
 CloudSegment MarchClouds(CloudLayer layer, float3 pos, float3 dir, uint maxSteps, float3 sunIlluminance,
-                         float3 skyAmbient, float3 u)
+                         float3 skyAmbient, float3 u, bool detail)
 {
     CloudSegment segment = { float3(0.0, 0.0, 0.0), 1.0, 0.0 };
     float t0, t1;
@@ -260,7 +262,7 @@ CloudSegment MarchClouds(CloudLayer layer, float3 pos, float3 dir, uint maxSteps
         float t = t0 + (i + u.x) * dt;
         float3 p = pos + dir * t;
         float h = CloudHeightFraction(layer.c, p);
-        float density = CloudDensity(layer, p, h, true);
+        float density = CloudDensity(layer, p, h, detail);
         if (density <= 0.0)
             continue;
 
@@ -290,7 +292,7 @@ CloudSegment MarchClouds(CloudLayer layer, float3 pos, float3 dir, uint maxSteps
 
     if (weightSum > 0.0)
     {
-        segment.inScattered += weightSum * sunIlluminance * CloudSunlight(layer, picked, dot(dir, layer.c.sunDirection), u.z);
+        segment.inScattered += weightSum * sunIlluminance * CloudSunlight(layer, picked, dot(dir, layer.c.sunDirection), u.z, detail);
         segment.distance = distanceSum / weightSum;
     }
     return segment;

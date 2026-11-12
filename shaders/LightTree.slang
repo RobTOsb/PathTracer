@@ -1,5 +1,5 @@
-// Light tree traversal: a stochastic walk down a 4-wide tree with one light sample per query, and the PMF walk back
-// up for MIS. Each node holds the cluster of "Hierarchical Light Sampling with Accurate Spherical Gaussian Lighting"
+// Light tree traversal: a stochastic walk down a 4-wide tree with one light sample per query, and for MIS the PMF of a
+// known light, by the same walk down following its path (WalkLightTree). Each node holds the cluster of "Hierarchical Light Sampling with Accurate Spherical Gaussian Lighting"
 // (Tokuyoshi, Ikeda, Kulkarni and Harada 2024, Section 3.1): flux, mean, a vMF fit of the emission and the spatial
 // deviation. A node's importance takes one of two forms:
 // - by default, not their SG lighting integral but a cheap bound over the cone to its bounding sphere, oriented by
@@ -252,20 +252,16 @@ float LightTreeNodeImportance(GpuLightTreeNode node, LightTreeShadingContext ctx
 float4 LightTreeGroupImportance(StructuredBuffer<GpuLightTreeNode> nodes, uint first, LightTreeShadingContext ctx,
                                 out uint4 childOrLight)
 {
-    GpuLightTreeNode group[LIGHT_TREE_WIDTH];
-    [unroll]
-    for (uint i = 0; i < LIGHT_TREE_WIDTH; ++i)
-        group[i] = nodes[first + i];
-
-    [unroll]
-    for (uint i = 0; i < LIGHT_TREE_WIDTH; ++i)
-        childOrLight[i] = LightTreeChildOrLight(group[i]);
+    childOrLight = uint4(0, 0, 0, 0);
     float4 importance = float4(0.0, 0.0, 0.0, 0.0);
-    [unroll]
+    [loop]
     for (uint i = 0; i < LIGHT_TREE_WIDTH; ++i)
     {
-        GpuLightTreeNode node = i == 0 ? group[0] : i == 1 ? group[1] : i == 2 ? group[2] : group[3];
+        GpuLightTreeNode node = nodes[first + i];
+        uint link = LightTreeChildOrLight(node);
         float nodeImportance = LightTreeNodeImportance(node, ctx);
+        childOrLight = uint4(i == 0 ? link : childOrLight.x, i == 1 ? link : childOrLight.y,
+                             i == 2 ? link : childOrLight.z, i == 3 ? link : childOrLight.w);
         importance = float4(i == 0 ? nodeImportance : importance.x, i == 1 ? nodeImportance : importance.y,
                             i == 2 ? nodeImportance : importance.z, i == 3 ? nodeImportance : importance.w);
     }
@@ -302,37 +298,58 @@ uint LightTreePickChild(float4 importance, float sum, inout float u)
     return chosen;
 }
 
-// Stochastic traversal with one light sample per query, then a pick within the leaf in proportion to
-// flux. u is a uniform random number in [0, 1) which is rescaled at each level.
-// Returns false when no light can contribute.
-bool SampleLightTree(StructuredBuffer<GpuLightTreeNode> nodes, StructuredBuffer<GpuLightTreeLeafEntry> leafLights,
-                     LightTreeShadingContext ctx, float u, out uint lightIndex, out float pmf)
+struct LightTreePath
+{
+    uint leafPosition;
+    float leafPmf;
+};
+
+LightTreePath LightTreeFindLight(StructuredBuffer<GpuLightTreeLeafEntry> leafOfLight, uint lightIndex, uint leafOffset)
+{
+    GpuLightTreeLeafEntry leaf = leafOfLight[lightIndex];
+    LightTreePath path;
+    path.leafPosition = leaf.index - leafOffset;
+    path.leafPmf = leaf.pmf;
+    return path;
+}
+
+bool WalkLightTree(StructuredBuffer<GpuLightTreeNode> nodes, LightTreeShadingContext ctx, bool follow, uint leafPosition,
+                   uint shift, inout float u, out uint leaf, out float pmf)
 {
     pmf = 1.0;
-    lightIndex = 0;
-
+    leaf = 0;
     uint first = 0;
-    uint leaf;
     [loop]
     while (true)
     {
         uint4 childOrLight;
         float4 importance = LightTreeGroupImportance(nodes, first, ctx, childOrLight);
         float sum = LightTreeImportanceSum(importance);
-        if (!(sum > 0.0))
+        // A sampled child never lacks importance when the group has some (LightTreePickChild).
+        uint chosen = follow ? (leafPosition >> shift) & (LIGHT_TREE_WIDTH - 1) : LightTreePickChild(importance, sum, u);
+        shift -= 2; // wraps past the leaf level, which the walk never goes below
+        float share = importance[chosen];
+        if (!(share > 0.0 && sum > 0.0))
+        {
+            pmf = 0.0;
             return false;
-
-        uint chosen = LightTreePickChild(importance, sum, u);
-        pmf *= importance[chosen] / sum;
+        }
+        pmf *= share / sum;
         uint next = childOrLight[chosen];
         if ((next & LIGHT_TREE_LEAF_BIT) != 0)
         {
             leaf = next;
-            break;
+            return true;
         }
         first = next;
     }
+    return false;
+}
 
+// A light of the leaf (a child link with LIGHT_TREE_LEAF_BIT) in proportion to its share of the leaf's flux, picked
+// with u, and that share.
+void PickLeafLight(StructuredBuffer<GpuLightTreeLeafEntry> leafLights, uint leaf, float u, out uint lightIndex, out float pmf)
+{
     // The leaf's entries are loaded together; past its count they repeat its last one.
     uint begin = leaf & LIGHT_TREE_LEAF_FIRST_MASK;
     uint last = (leaf >> LIGHT_TREE_LEAF_COUNT_SHIFT) & (LIGHT_TREE_MAX_LEAF_LIGHTS - 1);
@@ -351,33 +368,29 @@ bool SampleLightTree(StructuredBuffer<GpuLightTreeNode> nodes, StructuredBuffer<
             chosen = i;
     }
     lightIndex = entries[chosen].index;
-    pmf *= entries[chosen].pmf;
+    pmf = entries[chosen].pmf;
+}
+
+bool SampleLightTree(StructuredBuffer<GpuLightTreeNode> nodes, StructuredBuffer<GpuLightTreeLeafEntry> leafLights,
+                     LightTreeShadingContext ctx, float u, out uint lightIndex, out float pmf)
+{
+    lightIndex = 0;
+    uint leaf;
+    if (!WalkLightTree(nodes, ctx, false, 0, 0, u, leaf, pmf))
+        return false;
+    float leafPmf;
+    PickLeafLight(leafLights, leaf, u, lightIndex, leafPmf);
+    pmf *= leafPmf;
     return true;
 }
 
-// Probability of SampleLightTree selecting lightIndex. Needed for MIS when BRDF sampling hits an emitter.
-// Walks from the light's leaf up to the root using the parent link of each group.
-float LightTreePmf(StructuredBuffer<GpuLightTreeNode> nodes, StructuredBuffer<uint> parents,
-                   StructuredBuffer<GpuLightTreeLeafEntry> leafOfLight, LightTreeShadingContext ctx, uint lightIndex)
+float LightTreePmf(StructuredBuffer<GpuLightTreeNode> nodes, StructuredBuffer<GpuLightTreeLeafEntry> leafOfLight,
+                   LightTreeShadingContext ctx, uint lightIndex, uint leafLevel, uint leafOffset)
 {
-    GpuLightTreeLeafEntry leaf = leafOfLight[lightIndex];
-    uint index = leaf.index;
-    float pmf = leaf.pmf;
-    [loop]
-    while (true)
-    {
-        // The group is known from the node's index alone, so its loads need not wait for the parent.
-        uint first = index & ~(LIGHT_TREE_WIDTH - 1);
-        uint parent = parents[first / LIGHT_TREE_WIDTH];
-        uint4 childOrLight;
-        float4 importance = LightTreeGroupImportance(nodes, first, ctx, childOrLight);
-        float sum = LightTreeImportanceSum(importance);
-        if (!(sum > 0.0))
-            return 0.0;
-        pmf *= importance[index - first] / sum;
-        if (first == 0)
-            return pmf;
-        index = parent;
-    }
-    return pmf;
+    LightTreePath path = LightTreeFindLight(leafOfLight, lightIndex, leafOffset);
+    float u = 0.0;
+    uint leaf;
+    float pmf;
+    WalkLightTree(nodes, ctx, true, path.leafPosition, 2 * leafLevel, u, leaf, pmf);
+    return pmf * path.leafPmf;
 }

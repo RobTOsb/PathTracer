@@ -76,8 +76,8 @@ float CloudShadow(float3 position)
 
 // Radiance from beyond the scene along a ray from origin that leaves it: the sky and the light of the sun disc
 // already weighted for MIS (sun), with the clouds in front. Rays the camera sees through (view) march the clouds in
-// more steps.
-float3 SkyRadiance(float3 origin, float3 dir, float3 sun, bool view, inout uint rng)
+// more steps; rays whose sky the camera sees, also in a mirror-like surface (seen), take the clouds' detail noise.
+float3 SkyRadiance(float3 origin, float3 dir, float3 sun, bool view, bool seen, inout uint rng)
 {
     float3 sky = EnvironmentRadiance(dir);
 #ifdef ATMOSPHERE
@@ -86,7 +86,7 @@ float3 SkyRadiance(float3 origin, float3 dir, float3 sun, bool view, inout uint 
     {
         float3 pos = CloudSpacePosition(c, origin);
         CloudSegment cloud = MarchClouds(SceneClouds(), pos, dir, view ? c.viewSteps : c.indirectSteps, SunIlluminance(),
-                                         EnvironmentRadiance(float3(0.0, 1.0, 0.0)), Rand3(rng));
+                                         EnvironmentRadiance(float3(0.0, 1.0, 0.0)), Rand3(rng), view || seen);
         if (cloud.transmittance < 1.0)
         {
             // The air between the origin and the cloud dims it, and scatters in the part of the sky's light that
