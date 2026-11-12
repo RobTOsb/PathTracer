@@ -128,7 +128,7 @@ float CloudDensity(CloudLayer layer, float3 pos, float h, bool detail)
 {
     CloudParameters c = layer.c;
     Texture2D<float2> weatherMap = ResourceDescriptorHeap[c.weatherMap];
-    Texture3D<float4> shapeNoise = ResourceDescriptorHeap[c.shapeNoise];
+    Texture3D<float> shapeNoise = ResourceDescriptorHeap[c.shapeNoise];
     Texture3D<float4> detailNoise = ResourceDescriptorHeap[c.detailNoise];
 
     // Relative to the ground below the planet centre, and carried along by the wind.
@@ -137,11 +137,10 @@ float CloudDensity(CloudLayer layer, float3 pos, float h, bool detail)
     float2 weather = weatherMap.SampleLevel(layer.linearWrap, p.xz * kWeatherFrequency, 0.0);
     float coverage = saturate(weather.r + c.coverage);
 
-    // .r Perlin-Worley, .gba three octaves of Worley noise.
-    float4 shape = 0.5 * (shapeNoise.SampleLevel(layer.linearWrap, p * kShapeFrequency, 0.0) +
-                          shapeNoise.SampleLevel(layer.linearWrap, p * kShapeFrequency2 + float3(13.7, 5.3, 9.1), 0.0));
-    float worleyFbm = dot(shape.gba, float3(0.625, 0.25, 0.125));
-    float fbm = shape.r * 0.625 + worleyFbm * 0.375;
+    // The Perlin-Worley and Worley octaves already summed (ShapeNoise in CloudTextures.slang), which is linear, so
+    // the sum of the two copies is the average of their sums.
+    float fbm = 0.5 * (shapeNoise.SampleLevel(layer.linearWrap, p * kShapeFrequency, 0.0) +
+                       shapeNoise.SampleLevel(layer.linearWrap, p * kShapeFrequency2 + float3(13.7, 5.3, 9.1), 0.0));
 
     float base = saturate(Remap(fbm * CloudHeightProfile(h, weather.g), 1.0 - coverage, 1.0, 0.0, 1.0)) * coverage;
     if (base <= 0.0 || !detail)
@@ -296,4 +295,49 @@ CloudSegment MarchClouds(CloudLayer layer, float3 pos, float3 dir, uint maxSteps
         segment.distance = distanceSum / weightSum;
     }
     return segment;
+}
+
+// The sky along dir from pos (cloud space) with the clouds in front of it, sky being the sky's radiance there
+// without them: .rgb the radiance, .a the clouds' transmittance, by which the caller adds the sun disc. The rest
+// as MarchClouds.
+float4 CloudySky(CloudLayer layer, float3 sky, float3 pos, float3 dir, uint maxSteps, float3 sunIlluminance,
+                 float3 skyAmbient, float3 u, bool detail)
+{
+    CloudSegment cloud = MarchClouds(layer, pos, dir, maxSteps, sunIlluminance, skyAmbient, u, detail);
+    if (!(cloud.transmittance < 1.0))
+        return float4(sky, 1.0);
+    // The air between the origin and the cloud dims it, and scatters in the part of the sky's light that its
+    // transmittance says comes from in front of the cloud, which the cloud does not hide.
+    CloudParameters c = layer.c;
+    AtmosphereParameters atmosphere = (AtmosphereParameters)0;
+    atmosphere.bottomRadius = c.planetRadius;
+    atmosphere.topRadius = c.atmosphereTopRadius;
+    Texture2D<float4> transmittanceLut = ResourceDescriptorHeap[c.transmittanceLut];
+    float3 cloudPos = pos + dir * cloud.distance;
+    float r = length(pos);
+    float cloudR = length(cloudPos);
+    float3 toTop = transmittanceLut.SampleLevel(layer.linearClamp, TransmittanceLutUv(atmosphere, r, dot(dir, pos) / r), 0.0).rgb;
+    float3 cloudToTop =
+        transmittanceLut.SampleLevel(layer.linearClamp, TransmittanceLutUv(atmosphere, cloudR, dot(dir, cloudPos) / cloudR), 0.0).rgb;
+    float3 air = saturate(toTop / max(cloudToTop, 1.0e-6));
+    float3 front = saturate((1.0 - air) / max(1.0 - toTop, 1.0e-4));
+    return float4(sky * (front + cloud.transmittance * (1.0 - front)) + air * cloud.inScattered, cloud.transmittance);
+}
+
+// The cloud panorama's octahedral map of the sphere of directions, +Y at its centre.
+float2 CloudPanoramaUv(float3 dir)
+{
+    float2 e = dir.xz / (abs(dir.x) + abs(dir.y) + abs(dir.z));
+    if (dir.y < 0.0)
+        e = (1.0 - abs(e.yx)) * float2(e.x >= 0.0 ? 1.0 : -1.0, e.y >= 0.0 ? 1.0 : -1.0);
+    return e * 0.5 + 0.5;
+}
+
+float3 CloudPanoramaDirection(float2 uv)
+{
+    float2 e = uv * 2.0 - 1.0;
+    float3 v = float3(e.x, 1.0 - abs(e.x) - abs(e.y), e.y);
+    if (v.y < 0.0)
+        v.xz = (1.0 - abs(v.zx)) * float2(v.x >= 0.0 ? 1.0 : -1.0, v.z >= 0.0 ? 1.0 : -1.0);
+    return normalize(v);
 }

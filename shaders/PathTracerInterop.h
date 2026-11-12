@@ -165,13 +165,24 @@ struct FrameConstants
 	uint reducedMaterialDiffuseBounces;
 	float fireflyFilterThreshold;
 	uint exposureBuffer;
-	// The light tree's leaf level (its depth less one) and that level's first node, so a walk can follow a known
-	// light's leaf down from the root (LightTreePath in LightTree.slang).
+	// The light tree's shape, whose links are implicit (LightTreeShape in LightTree.slang): its leaf level (its depth
+	// less one), the lights it holds and the lights per leaf.
 	uint lightTreeLeafLevel;
-	uint lightTreeLeafOffset;
+	uint lightTreeLightCount;
+	uint lightTreeLeafSize;
+	// Light tree node means are 16-bit steps of this size from lightTreeOrigin (LightTreeBuilder::GetQuantisation).
+	float lightTreeStep;
+	// The air's sky visibility ray (atmosphereSkyVisibility) looks for occluders this far, scene units. FLT_MAX = all.
+	float atmosphereSkyVisibilityDistance;
+	float3 lightTreeOrigin;
 	uint padLightTree0;
-	uint padLightTree1;
-	uint padLightTree2;
+	// DLSS_RR, Preset F: the responsivity mask on smooth reflectors the camera sees, so that DLSS-RR keeps less history
+	// for their reflections, reflectionResponsivity at a mirror falling to 0 at reflectionResponsivityMaxRoughness
+	// (perceptual). 0 for the sky, PSR's virtual surfaces and panes' reflections. 0 = off.
+	float reflectionResponsivity;
+	float reflectionResponsivityMaxRoughness;
+	uint padResponsivity0;
+	uint padResponsivity1;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -596,7 +607,8 @@ enum GuideView
 	GUIDE_VIEW_DEPTH = 5,
 	GUIDE_VIEW_MOTION_VECTORS = 6,
 	GUIDE_VIEW_SPECULAR_MOTION_VECTORS = 7,
-	GUIDE_VIEW_SHADOW_CHANGES = 8 // the bias current colour mask, see FrameConstants::shadowChanges
+	GUIDE_VIEW_SHADOW_CHANGES = 8, // the bias current colour mask, see FrameConstants::shadowChanges
+	GUIDE_VIEW_RESPONSIVITY = 9 // the responsivity mask, see FrameConstants::reflectionResponsivity
 };
 
 // Root constants of GuideView.slang.
@@ -646,7 +658,7 @@ struct AutoExposureConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
-static_assert(sizeof(FrameConstants) == 800,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 848,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
 static_assert(sizeof(GpuMaterial) == 152,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,

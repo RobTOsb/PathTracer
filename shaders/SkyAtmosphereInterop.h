@@ -64,12 +64,14 @@ struct AtmosphereLUTConstants
 #define ATMOSPHERE_LIGHTING_MULTI_SCATTERING 1 // .rgb, Psi_ms for a unit sun illuminance
 #define ATMOSPHERE_LIGHTING_ROWS 2
 
-// Cloud textures of CloudTextures.slang: the shape (RGBA8) and detail (RGBA8) noise tile in 3D, the weather
-// map (RG16F) in 2D, and the shadow map (R16F) covers the scene.
+// Cloud textures of CloudTextures.slang: the shape (R8) and detail (RGBA8) noise tile in 3D, the weather
+// map (RG8) in 2D, the shadow map (R16F) covers the scene and the panorama (RGBA16F, octahedral) is the cloudy
+// sky seen from the camera.
 #define CLOUD_SHAPE_NOISE_SIZE 128u
 #define CLOUD_DETAIL_NOISE_SIZE 32u
 #define CLOUD_WEATHER_MAP_SIZE 512u
 #define CLOUD_SHADOW_MAP_SIZE 512u
+#define CLOUD_PANORAMA_SIZE 256u
 
 // A layer of clouds in the atmosphere (Clouds.slang), in its km with the planet centre at the origin. Written
 // by SkyAtmospherePass for its cloud kernels and carried into the path tracer by FrameConstants::clouds.
@@ -103,13 +105,33 @@ struct CloudParameters
 	float2 shadowMapOrigin; // min x, z corner
 	float shadowMapInvSize; // 1 / side
 	float shadowMapPlane;
+
+	// The cloudy sky seen from the camera, for a sun of unit illuminance with the clouds' transmittance in .a
+	// (CloudPanorama in CloudTextures.slang), which the rays the camera does not see the sky along read instead of
+	// marching the clouds. INVALIDDESCRIPTORHANDLE to march them all.
+	uint skyPanorama;
+	uint padPanorama0;
+	uint padPanorama1;
+	uint padPanorama2;
+};
+
+// Root constants of CloudPanorama.
+struct CloudPanoramaConstants
+{
+	float3 origin; // the camera, scene units
+	float viewHeight; // km from the planet centre, as AtmosphereLUTConstants::viewHeight
+	uint frame; // seeds the march's jitter
+	float blend; // of this frame's march into the panorama, 1 to start afresh
+	float pad0;
+	float pad1;
 };
 
 #ifdef __cplusplus
 static_assert(sizeof(AtmosphereParameters) % 16 == 0, "AtmosphereParameters must match the HLSL cbuffer layout");
 static_assert(sizeof(AtmosphereParameters) == 128, "AtmosphereParameters must match the HLSL cbuffer layout");
 static_assert(sizeof(AtmosphereLUTConstants) == 16, "AtmosphereLUTConstants must fit the root constants");
-static_assert(sizeof(CloudParameters) == 96, "CloudParameters must match the HLSL cbuffer layout");
+static_assert(sizeof(CloudParameters) == 112, "CloudParameters must match the HLSL cbuffer layout");
+static_assert(sizeof(CloudPanoramaConstants) == 32, "CloudPanoramaConstants must fit the root constants");
 #endif
 
 #endif // SKY_ATMOSPHERE_INTEROP_H

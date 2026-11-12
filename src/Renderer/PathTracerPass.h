@@ -29,6 +29,9 @@ struct PathTracerGuides
 	ResourceHandle specularMotionVectors = InvalidResourceHandle; // RG16F
 	// R8, 1 where a moving object's shadow changed the light since last frame: DLSS-RR's bias current colour mask.
 	ResourceHandle shadowChanges = InvalidResourceHandle;
+	// R16F, -1..1: DLSS-RR's responsivity mask (Preset F only), positive on smooth reflectors so their reflections keep
+	// less history (FrameConstants::reflectionResponsivity).
+	ResourceHandle responsivity = InvalidResourceHandle;
 };
 
 // Traces one path per pixel into an HDR radiance target (RGBA16F) using the DXR pipeline in

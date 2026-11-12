@@ -21,6 +21,7 @@ static const uint kCloudShapeNoiseSize = CLOUD_SHAPE_NOISE_SIZE;
 static const uint kCloudDetailNoiseSize = CLOUD_DETAIL_NOISE_SIZE;
 static const uint kCloudWeatherMapSize = CLOUD_WEATHER_MAP_SIZE;
 static const uint kCloudShadowMapSize = CLOUD_SHADOW_MAP_SIZE;
+static const uint kCloudPanoramaSize = CLOUD_PANORAMA_SIZE;
 
 // Distance from r0 along rd to the nearest intersection with the sphere at s0 of radius sR, or -1
 // if there is none.

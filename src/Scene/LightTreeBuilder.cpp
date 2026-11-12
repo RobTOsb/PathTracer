@@ -113,7 +113,6 @@ void LightTreeBuilder::DestroyBuffers()
 								   &radixCounts_,
 								   &blockSums_,
 								   &nodes_,
-								   &parents_,
 								   &leafLights_,
 								   &leafOfLight_,
 								   &power_ })
@@ -126,17 +125,11 @@ void LightTreeBuilder::DestroyBuffers()
 	}
 	lightCount_ = 0;
 	depth_ = 0;
-	leafOffset_ = 0;
+	leafSize_ = 1;
 }
 
 void LightTreeBuilder::Reset(std::span<const float> fluxScales, ResourceHandle lightEmitters)
 {
-	if (fluxScales.size() > static_cast<size_t>(LIGHT_TREE_LEAF_FIRST_MASK) + 1)
-	{
-		// Leaves address their first slot with 28 bits.
-		throw std::runtime_error("Too many lights for the light tree");
-	}
-
 	renderContext_->WaitForGPUIdle();
 	DestroyBuffers();
 	lightCount_ = static_cast<uint32_t>(fluxScales.size());
@@ -164,7 +157,6 @@ void LightTreeBuilder::Reset(std::span<const float> fluxScales, ResourceHandle l
 	radixCounts_ = create((1u << LIGHT_TREE_RADIX_BITS) * blockCount, sizeof(uint32_t), "LightTree_RadixCounts");
 	blockSums_ = create(blockCount, sizeof(uint32_t), "LightTree_BlockSums");
 	nodes_ = create(nodeCount, sizeof(GpuLightTreeNode), "LightTree_Nodes");
-	parents_ = create(nodeCount / LIGHT_TREE_WIDTH, sizeof(uint32_t), "LightTree_Parents");
 	leafLights_ = create(count, sizeof(GpuLightTreeLeafEntry), "LightTree_LeafLights");
 	leafOfLight_ = create(count, sizeof(GpuLightTreeLeafEntry), "LightTree_LeafOfLight");
 	power_ = create(count, sizeof(GpuLightPowerEntry), "LightTree_Power");
@@ -192,7 +184,6 @@ void LightTreeBuilder::Reset(std::span<const float> fluxScales, ResourceHandle l
 	resources.radixCounts = index(radixCounts_);
 	resources.blockSums = index(blockSums_);
 	resources.nodes = index(nodes_);
-	resources.parents = index(parents_);
 	resources.leafLights = index(leafLights_);
 	resources.leafOfLight = index(leafOfLight_);
 	resources.power = index(power_);
@@ -210,7 +201,7 @@ void LightTreeBuilder::Build(const Inputs &inputs)
 	const uint32_t leafSize = std::clamp(inputs.maxLeafLights, 1u, LIGHT_TREE_MAX_LEAF_LIGHTS);
 	const TreeLayout layout(lightCount_, leafSize);
 	depth_ = layout.leafLevel + 1;
-	leafOffset_ = layout.NodeCount() - layout.Nodes(layout.leafLevel);
+	leafSize_ = leafSize;
 	const uint32_t blockCount = GroupCount(lightCount_, LIGHT_TREE_BUILD_BLOCK_SIZE);
 
 	LightTreeBuildConstants constants = {};
@@ -220,6 +211,11 @@ void LightTreeBuilder::Build(const Inputs &inputs)
 									inputs.boundsMax.z - inputs.boundsMin.z,
 									0.0f });
 	constants.boundsScale = extent > 0.0f ? 1024.0f / extent : 0.0f;
+	// The node means are 16-bit steps over the same cube (PackLightTreeNode). The bounds are only finite with lights.
+	origin_ = isfinite(extent) ? inputs.boundsMin : float3(0.0f, 0.0f, 0.0f);
+	step_ = isfinite(extent) && extent > 0.0f ? extent / 65535.0f : 0.0f;
+	constants.boundsMin = origin_;
+	constants.quantStep = step_;
 	constants.lightCount = lightCount_;
 	constants.leafSize = leafSize;
 	constants.lightsHandle = renderContext_->GetResourceViewInfo(inputs.lights).descriptorIndex;
@@ -230,7 +226,7 @@ void LightTreeBuilder::Build(const Inputs &inputs)
 
 	// The barriers also order this frame's writes after last frame's reads. Between the kernels, which all read
 	// what the one before wrote, global barriers do instead, leaving these states as they are.
-	const ResourceHandle outputs[] = { nodes_, parents_, leafLights_, leafOfLight_, power_ };
+	const ResourceHandle outputs[] = { nodes_, leafLights_, leafOfLight_, power_ };
 	for (ResourceHandle buffer: { lightClusters_, nodeClusters_, keys_[0], keys_[1], values_[0], values_[1], radixCounts_, blockSums_ })
 	{
 		renderContext_->TransitionResource(buffer, ResourceLayout::UnorderedAccess, ResourceSync::ComputeShading, ResourceAccess::UnorderedAccess);

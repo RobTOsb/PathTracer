@@ -8,30 +8,25 @@
 
 #define LIGHT_TREE_WIDTH 4u
 
-#define LIGHT_TREE_LEAF_BIT 0x80000000u
-#define LIGHT_TREE_LEAF_COUNT_SHIFT 28u // bits 28 to 30 hold the leaf's light count less one
-#define LIGHT_TREE_LEAF_FIRST_MASK 0x0FFFFFFFu
 #define LIGHT_TREE_MAX_LEAF_LIGHTS 8u
 
 // One node of the light tree: the cluster of "Hierarchical Light Sampling with Accurate Spherical Gaussian
-// Lighting" (Tokuyoshi, Ikeda, Kulkarni and Harada 2024, Section 3.1) and the child link, packed into 32
-// bytes so that the shader fetches it with two 16 byte loads. The parent links, which only the PMF walk
-// needs, live in a buffer of their own (one per group).
-//
-// Empty nodes, which pad a group, have a radius of -FLT_MAX: LightTreeNodeImportance then rejects them
-// as lying below the horizon, so they get zero importance without a test of their own.
+// Lighting" (Tokuyoshi, Ikeda, Kulkarni and Harada 2024, Section 3.1), quantised to 16 bytes, so a group of four is
+// half a cache line. The links are implicit (LightTreeShape in LightTree.slang). LightTree.slang's
+// UnpackLightTreeNode decodes it:
+//   x  mean.x | mean.y << 16    the flux weighted mean of the light positions, in 16-bit steps of
+//   y  mean.z | radius << 16    lightTreeStep from lightTreeOrigin (FrameConstants), and a half bounding sphere
+//                               radius around that quantised mean, rounded up
+//   z  amplitude | axis << 16   bfloat16 Phi / (2 pi int g(w; -nu, lambda) dw), the node constant part of the SG light
+//                               amplitude, and nu, the vMF axis of the radiant intensity, octahedral snorm8x2
+//   w  sharpness | stdDev << 16 halves: lambda (vMF sharpness, 0 for isotropic emitters) and sigma_s
+// An empty node, which pads a group, is all zero: its amplitude of 0 gets it no importance.
 struct GpuLightTreeNode
 {
 #ifdef __cplusplus
-	float3 mean; // mu, flux weighted mean of the light positions
-	float amplitude; // Phi / (2 pi int g(w; -nu, lambda) dw), the node constant part of the SG light amplitude
-	uint32_t childOrLight; // interior: first node of the child group; leaf: see LIGHT_TREE_LEAF_BIT
-	uint32_t axis; // nu, vMF axis of the radiant intensity, octahedral snorm16x2 (x in the low half)
-	uint32_t sharpnessStdDev; // half2: lambda (vMF sharpness, 0 for isotropic emitters) low, sigma_s high
-	float radius; // bounding sphere radius around the mean
+	uint32_t packed[4];
 #else
-	float4 meanAmplitude;
-	uint4 packed; // childOrLight, axis, sharpnessStdDev, asuint(radius)
+	uint4 packed;
 #endif
 };
 
@@ -96,6 +91,7 @@ struct LightTreeBuildConstants
 	uint pass; // per kernel: the radix sort pass, the tree level, or the first of the levels built together
 	uint lightsHandle; // RWStructuredBuffer<GpuLight>, only read: the light buffer has a UAV descriptor alone
 	uint emissionScalesHandle; // StructuredBuffer<float>, per emissive instance
+	float quantStep; // the node means' 16-bit steps from boundsMin (LightTreeBuilder::GetStep)
 };
 
 // One dynamic instance's world transform for TransformDynamicLights (DynamicLights.slang), in the CPU's float3x4
@@ -145,14 +141,13 @@ struct LightTreeBuildResources
 	uint radixCounts; // per radix digit and block, digit major
 	uint blockSums; // per scan block of the power CDF
 	uint nodes; // GpuLightTreeNode
-	uint parents; // uint per group
 	uint leafLights; // GpuLightTreeLeafEntry per leaf slot
 	uint leafOfLight; // GpuLightTreeLeafEntry per light
 	uint power; // GpuLightPowerEntry per light
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(GpuLightTreeNode) == 32, "GpuLightTreeNode must match the structured buffer stride");
+static_assert(sizeof(GpuLightTreeNode) == 16, "GpuLightTreeNode must match the structured buffer stride");
 static_assert(sizeof(GpuLightTreeLeafEntry) == 8, "GpuLightTreeLeafEntry must match the structured buffer stride");
 static_assert(sizeof(GpuLightPowerEntry) == 16, "GpuLightPowerEntry must match the structured buffer stride");
 static_assert(sizeof(GpuLightTreeCluster) == 36, "GpuLightTreeCluster must match the structured buffer stride");

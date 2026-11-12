@@ -97,14 +97,31 @@ float VmfSharpness(float averageDirectionLength)
     return (3.0 * len - len * len * len) / (1.0 - len * len);
 }
 
-// Octahedral encoding of a unit vector as snorm16x2, x in the low half. LightTreeAxis decodes it.
-uint PackOctahedralSnorm16x2(float3 v)
+// Octahedral encoding of a unit vector as snorm8x2, x in the low byte. LightTreeAxis decodes it. The emission lobes
+// are broad (a one-sided emitter's sharpness is at most about 1.8), so 8 bits a component are plenty.
+uint PackOctahedralSnorm8x2(float3 v)
 {
     float2 e = v.xy / (abs(v.x) + abs(v.y) + abs(v.z));
     if (v.z < 0.0)
         e = (1.0 - abs(e.yx)) * float2(e.x >= 0.0 ? 1.0 : -1.0, e.y >= 0.0 ? 1.0 : -1.0);
-    int2 s = int2(round(clamp(e, -1.0, 1.0) * 32767.0));
-    return (uint(s.x) & 0xFFFF) | (uint(s.y) << 16);
+    int2 s = int2(round(clamp(e, -1.0, 1.0) * 127.0));
+    return (uint(s.x) & 0xFF) | ((uint(s.y) & 0xFF) << 8);
+}
+
+// The smallest half at least x, up to the largest finite one.
+uint HalfAtLeast(float x)
+{
+    x = min(x, LIGHT_TREE_BUILD_MAX_HALF);
+    uint h = f32tof16(x);
+    return f16tof32(h) < x ? h + 1 : h;
+}
+
+// bfloat16, the top half of a float, rounded to nearest even and kept from rounding a positive value to 0.
+uint Bfloat16(float x)
+{
+    uint bits = asuint(x);
+    uint rounded = (bits + 0x7FFFu + ((bits >> 16) & 1u)) >> 16;
+    return x > 0.0 ? max(rounded, 1u) : rounded;
 }
 
 // A one-sided Lambertian triangle, Phi = pi L A, or an isotropic point light, Phi = 4 pi I, times fluxScale.
@@ -185,33 +202,31 @@ GpuLightTreeCluster CombineClusters<let N : int>(GpuLightTreeCluster children[N]
     return c;
 }
 
-// A node that LightTreeNodeImportance rejects as lying below the horizon, for empty slots.
-GpuLightTreeNode EmptyLightTreeNode()
-{
-    GpuLightTreeNode node;
-    node.meanAmplitude = float4(0.0, 0.0, 0.0, 0.0);
-    node.packed = uint4(0, 0, 0, asuint(-LIGHT_TREE_BUILD_FLT_MAX));
-    return node;
-}
-
 // The vMF axis and sharpness from the average direction (Eq. 3), with the flux and the sharpness dependent
-// normalisation folded into one amplitude so that the traversal does not recompute it per visit. An empty node for a
-// cluster without flux.
-GpuLightTreeNode PackLightTreeNode(GpuLightTreeCluster c, uint childOrLight)
+// normalisation folded into one amplitude so that the traversal does not recompute it per visit, packed as
+// GpuLightTreeNode describes. The mean is rounded to the nearest of the steps, clamped to the 16 bits (looser bounds
+// than the centroids' only cost precision), and the radius grows by what that moved it, so the sphere still holds the
+// cluster. An empty node, all zero, for a cluster without flux.
+uint4 PackLightTreeNode(GpuLightTreeCluster c)
 {
     if (!(c.flux > 0.0))
-        return EmptyLightTreeNode();
+        return uint4(0, 0, 0, 0);
 
     float len = length(c.averageDirection);
     float3 axis = len > 0.0 ? c.averageDirection / len : float3(0.0, 0.0, 1.0);
     float sharpness = VmfSharpness(len);
     float stdDev = min(sqrt(max(c.variance, 0.0)), LIGHT_TREE_BUILD_MAX_HALF);
+    float amplitude = c.flux / (2.0 * LIGHT_TREE_BUILD_PI * SGIntegral(sharpness));
 
-    GpuLightTreeNode node;
-    node.meanAmplitude = float4(c.mean, c.flux / (2.0 * LIGHT_TREE_BUILD_PI * SGIntegral(sharpness)));
-    node.packed = uint4(childOrLight, PackOctahedralSnorm16x2(axis), f32tof16(sharpness) | (f32tof16(stdDev) << 16),
-                        asuint(c.radius));
-    return node;
+    float step = g_PushConstants.quantStep;
+    float3 origin = g_PushConstants.boundsMin;
+    uint3 q = step > 0.0 ? uint3(clamp(round((c.mean - origin) / step), 0.0, 65535.0)) : uint3(0, 0, 0);
+    // As UnpackLightTreeNode decodes it, relative to the origin.
+    float3 offset = float3(q) * step - (c.mean - origin);
+    float radius = c.radius + length(offset);
+
+    return uint4(q.x | (q.y << 16), q.z | (HalfAtLeast(radius) << 16),
+                 Bfloat16(amplitude) | (PackOctahedralSnorm8x2(axis) << 16), f32tof16(sharpness) | (f32tof16(stdDev) << 16));
 }
 
 groupshared uint gs_WaveSums[LIGHT_TREE_BUILD_GROUP_SIZE];
@@ -432,18 +447,9 @@ void RadixScatter(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
     }
 }
 
-// The parent link of the group that node j of level d starts, if it starts one. The root group's is never read.
-void WriteParentLink(LightTreeLayout layout, uint d, uint j, uint node)
-{
-    if (j % LIGHT_TREE_WIDTH != 0)
-        return;
-    RWStructuredBuffer<uint> parents = ResourceDescriptorHeap[g_Resources.parents];
-    parents[node / LIGHT_TREE_WIDTH] = d == 0 ? 0 : layout.Offset(d - 1) + j / LIGHT_TREE_WIDTH;
-}
-
-// Leaf j: the sorted lights from j * leafSize on, picked within it in proportion to their flux. The lights without
-// flux, sorted to the end, get no entry of the leaf, a leaf slot with a PMF of 0 and a PMF of 0 at node 0, which the
-// PMF walk turns into 0 after one group.
+// Leaf j: the sorted lights from j * leafSize on, picked within it in proportion to their flux. Each light's entry
+// holds j, its leaf's position along the leaf level. The lights without flux, sorted to the end, get no share of the
+// leaf, a leaf slot with a PMF of 0 and a PMF of 0 at leaf 0, which the PMF walk turns into 0.
 [shader("compute")]
 [numthreads(LIGHT_TREE_BUILD_GROUP_SIZE, 1, 1)]
 void BuildLeaves(uint3 dispatchThread : SV_DispatchThreadID)
@@ -463,8 +469,6 @@ void BuildLeaves(uint3 dispatchThread : SV_DispatchThreadID)
     RWStructuredBuffer<GpuLightTreeLeafEntry> leafOfLight = ResourceDescriptorHeap[g_Resources.leafOfLight];
 
     uint node = layout.Offset(d) + j;
-    WriteParentLink(layout, d, j, node);
-
     uint first = j * g_PushConstants.leafSize;
     uint count = j < layout.leafCount ? min(g_PushConstants.leafSize, g_PushConstants.lightCount - first) : 0;
     GpuLightTreeCluster children[LIGHT_TREE_MAX_LEAF_LIGHTS];
@@ -495,13 +499,12 @@ void BuildLeaves(uint3 dispatchThread : SV_DispatchThreadID)
             float pmf = i < valid ? children[i].flux / leaf.flux : 0.0;
             GpuLightTreeLeafEntry slot = { lights[i], pmf };
             leafLights[first + i] = slot;
-            GpuLightTreeLeafEntry entry = { i < valid ? node : 0, pmf };
+            GpuLightTreeLeafEntry entry = { i < valid ? j : 0, pmf };
             leafOfLight[lights[i]] = entry;
         }
     }
 
-    uint link = LIGHT_TREE_LEAF_BIT | ((max(valid, 1) - 1) << LIGHT_TREE_LEAF_COUNT_SHIFT) | first;
-    nodes[node] = PackLightTreeNode(leaf, link);
+    nodes[node].packed = PackLightTreeNode(leaf);
     nodeClusters[node] = leaf;
 }
 
@@ -513,10 +516,9 @@ GpuLightTreeCluster BuildInteriorNode(LightTreeLayout layout, uint d, uint j, Gp
     RWStructuredBuffer<GpuLightTreeNode> nodes = ResourceDescriptorHeap[g_Resources.nodes];
 
     uint node = layout.Offset(d) + j;
-    WriteParentLink(layout, d, j, node);
     GpuLightTreeCluster cluster = j < layout.Width(d) ? CombineClusters(children, LIGHT_TREE_WIDTH)
                                                        : (GpuLightTreeCluster)0;
-    nodes[node] = PackLightTreeNode(cluster, layout.Offset(d + 1) + j * LIGHT_TREE_WIDTH);
+    nodes[node].packed = PackLightTreeNode(cluster);
     nodeClusters[node] = cluster;
     return cluster;
 }

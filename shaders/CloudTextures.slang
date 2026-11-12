@@ -1,5 +1,5 @@
-// The cloud textures of Clouds.slang, run by SkyAtmospherePass: three tiling noise textures made once, and the
-// shadow map of the clouds over the scene whenever the clouds or the sun change.
+// The cloud textures of Clouds.slang, run by SkyAtmospherePass: three tiling noise textures made once, the shadow map
+// of the clouds over the scene whenever the clouds or the sun change, and the panorama of the cloudy sky every frame.
 
 import Clouds;
 import SkyAtmosphere;
@@ -8,6 +8,10 @@ ConstantBuffer<CloudParameters> g_Clouds : register(b0);
 RWTexture3D<float4> g_NoiseOutput : register(u0);
 RWTexture2D<float2> g_WeatherOutput : register(u1);
 RWTexture2D<float> g_ShadowMapOutput : register(u2);
+RWTexture3D<float> g_ShapeOutput : register(u3);
+RWTexture2D<float4> g_PanoramaOutput : register(u4);
+Texture2D<float4> g_SkyViewLUT : register(t0);
+ConstantBuffer<CloudPanoramaConstants> g_PushConstants : register(b1);
 SamplerState g_LinearClamp : register(s2);
 SamplerState g_LinearWrap : register(s3);
 
@@ -97,8 +101,9 @@ float3 NoisePosition(uint3 texel, uint size)
     return (float3(texel) + 0.5) / float(size) * kNoiseCells;
 }
 
-// CLOUD_SHAPE_NOISE_SIZE^3: .r Perlin-Worley (Perlin noise remapped by Worley noise, billowing), .gba Worley noise
-// at 1, 2 and 4 times the frequency.
+// CLOUD_SHAPE_NOISE_SIZE^3, one channel: Perlin-Worley (Perlin noise remapped by Worley noise, billowing), 0.625 of
+// it, and Worley noise at 1, 2 and 4 times the frequency, 0.375 of it in octaves of 0.625, 0.25 and 0.125. Only that
+// sum is ever read, so a quarter of the bytes a texel of all four would take.
 [shader("compute")]
 [numthreads(4, 4, 4)]
 void ShapeNoise(uint3 id: SV_DispatchThreadID)
@@ -109,7 +114,8 @@ void ShapeNoise(uint3 id: SV_DispatchThreadID)
     float3 p = NoisePosition(id, kCloudShapeNoiseSize);
     float worley = WorleyFbm(p, period);
     float perlinWorley = Remap(Perlin(p, period), 1.0 - worley, 1.0, 0.0, 1.0);
-    g_NoiseOutput[id] = float4(perlinWorley, worley, WorleyFbm(p * 2.0, period * 2), WorleyFbm(p * 4.0, period * 4));
+    float worleyFbm = dot(float3(worley, WorleyFbm(p * 2.0, period * 2), WorleyFbm(p * 4.0, period * 4)), float3(0.625, 0.25, 0.125));
+    g_ShapeOutput[id] = perlinWorley * 0.625 + worleyFbm * 0.375;
 }
 
 // CLOUD_DETAIL_NOISE_SIZE^3: .rgb curl noise, .a Worley noise.
@@ -152,4 +158,31 @@ void ShadowMap(uint3 id: SV_DispatchThreadID)
     float2 uv = (float2(id.xy) + 0.5) / float(kCloudShadowMapSize);
     float3 pos = CloudSpacePosition(g_Clouds, CloudShadowMapPosition(g_Clouds, uv));
     g_ShadowMapOutput[id.xy] = CloudTransmittance(layer, pos, g_Clouds.sunDirection, kShadowMapSteps);
+}
+
+// CLOUD_PANORAMA_SIZE^2, octahedral (CloudPanoramaDirection): the cloudy sky seen from the camera, as the path tracer's
+// SkyRadiance would see it along a ray the camera sees through but for a sun of unit illuminance and without the sun
+// disc, whose share the clouds let through is in .a. Each frame's march is jittered and blended in.
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void CloudPanorama(uint3 id: SV_DispatchThreadID)
+{
+    if (any(id.xy >= kCloudPanoramaSize))
+        return;
+    CloudLayer layer = { g_Clouds, g_LinearWrap, g_LinearClamp };
+    float3 dir = CloudPanoramaDirection((float2(id.xy) + 0.5) / float(kCloudPanoramaSize));
+    float viewHeight = g_PushConstants.viewHeight;
+    float3 sky = g_SkyViewLUT.SampleLevel(g_LinearClamp, SkyViewLutUvFromDirection(g_Clouds.planetRadius, viewHeight, dir,
+                                                                                      g_Clouds.sunDirection), 0.0).rgb;
+    float3 ambient = g_SkyViewLUT.SampleLevel(g_LinearClamp, SkyViewLutUvFromDirection(g_Clouds.planetRadius, viewHeight,
+                                                                                          float3(0.0, 1.0, 0.0), g_Clouds.sunDirection), 0.0).rgb;
+    uint3 h = uint3(id.xy, g_PushConstants.frame) * uint3(1664525u, 1013904223u, 2654435761u);
+    h ^= h.yzx >> 16;
+    h *= uint3(2246822519u, 3266489917u, 668265263u);
+    h ^= h.zxy >> 13;
+    float3 u = float3(h >> 8) * (1.0 / 16777216.0);
+    float4 cloudy = CloudySky(layer, sky, CloudSpacePosition(g_Clouds, g_PushConstants.origin), dir, g_Clouds.viewSteps,
+                              float3(1.0, 1.0, 1.0), ambient, u, true);
+    float blend = g_PushConstants.blend;
+    g_PanoramaOutput[id.xy] = blend >= 1.0 ? cloudy : lerp(g_PanoramaOutput[id.xy], cloudy, blend);
 }

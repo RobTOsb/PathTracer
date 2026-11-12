@@ -25,6 +25,8 @@ float4 GuideValue(uint2 pixel)
         return float4(g.x, 0.0, 0.0, 0.0);
     case GUIDE_VIEW_SHADOW_CHANGES:
         return float4(g.xxx, 0.0);
+    case GUIDE_VIEW_RESPONSIVITY:
+        return float4(g.x, 0.0, 0.0, 0.0);
     case GUIDE_VIEW_MOTION_VECTORS:
     case GUIDE_VIEW_SPECULAR_MOTION_VECTORS:
         return float4(g.xy, 0.0, 0.0);
@@ -63,6 +65,7 @@ float GuideChange(float4 current, float4 previous, float expectedDepth)
     case GUIDE_VIEW_NORMAL:
         return length(current.xyz - previous.xyz) * 2.0;
     case GUIDE_VIEW_ROUGHNESS:
+    case GUIDE_VIEW_RESPONSIVITY:
         return abs(current.x - previous.x) * 4.0;
     case GUIDE_VIEW_DEPTH:
         // Reversed Z with an infinite far plane is proportional to 1 / distance, so this is the relative error of
@@ -96,6 +99,9 @@ float3 GuideColour(float4 value)
         return value.xyz * 0.5 + 0.5;
     case GUIDE_VIEW_ROUGHNESS:
         return value.xxx;
+    case GUIDE_VIEW_RESPONSIVITY:
+        // More responsive green, less blue.
+        return pow(float3(0.0, saturate(value.x), saturate(-value.x)), 1.0 / 2.2);
     case GUIDE_VIEW_DEPTH:
         // Proportional to 1 / distance, so near is bright.
         return saturate(sqrt(value.x * gain * 10.0)).xxx;

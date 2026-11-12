@@ -814,7 +814,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 if (bounce < g_Frame.atmosphereInScatterSegments)
                 {
                     bool seen = SeenSegment(flags, fromCamera, chainActive);
-                    radiance += ClampFirefly(throughput * FireflyFilter(AtmosphereInScattering(origin, dir, segmentLength, rng), seen, fireflyK),
+                    radiance += ClampFirefly(throughput * FireflyFilter(AtmosphereInScattering(origin, dir, segmentLength, fromCamera || chainActive, rng), seen, fireflyK),
                                              seen, DirectSegment(flags, fromCamera, chainActive));
                 }
                 throughput *= AtmosphereTransmittance(segmentLength);
@@ -1180,6 +1180,14 @@ void RayGen()
     g_NormalRoughness[pixel] = float4(guides.normal, guides.roughness);
     g_MotionVectors[pixel] = motion;
     g_Depth[pixel] = depth;
+
+    // A smooth reflector's reflection is told to keep less history, most at a mirror. Not PSR's virtual surfaces,
+    // whose image is the reflection itself, nor a pane's reflection, nor the sky.
+    float responsivity = 0.0;
+    if (g_Frame.reflectionResponsivity != 0.0 && guides.position.w > 0.0 && !guides.replaced && !guides.reflectorIsPane)
+        responsivity = g_Frame.reflectionResponsivity *
+                       saturate(1.0 - guides.reflectorRoughness / g_Frame.reflectionResponsivityMaxRoughness);
+    g_Responsivity[pixel] = responsivity;
 
     // A rough reflector's reflection is a blur of things at many depths that one hit distance cannot place: its
     // specular motion vectors are the surface's own, so the field stays smooth across a highlight (Bevy Solari).

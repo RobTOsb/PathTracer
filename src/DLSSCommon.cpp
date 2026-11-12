@@ -414,6 +414,7 @@ bool NGXContext::EvaluateFeature(const DLSSEvalInputs &inputs, ID3D12GraphicsCom
 		evalParams.pInRoughness = inputs.normalRoughness;
 		evalParams.pInMotionVectorsReflections = inputs.specularMotionVectors;
 		evalParams.pInBiasCurrentColorMask = inputs.biasCurrentColourMask;
+		evalParams.pInResponsivityMask = inputs.responsivityMask;
 		evalParams.pInWorldToViewMatrix = const_cast<float *>(inputs.worldToView);
 		evalParams.pInViewToClipMatrix = const_cast<float *>(inputs.viewToClip);
 

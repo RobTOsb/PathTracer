@@ -27,6 +27,9 @@ namespace
 	// Most of the scene's projection onto the cloud shadow map's plane along a low sun, scene units.
 	constexpr float kMaxCloudShadowMapSize = 50000.0f;
 
+	// The share of each frame's jittered march in the cloud panorama, which averages about the last 1 / share.
+	constexpr float kCloudPanoramaBlend = 0.25f;
+
 	uint32_t GroupCount(uint32_t size)
 	{
 		return (size + kGroupSize - 1) / kGroupSize;
@@ -47,6 +50,7 @@ SkyAtmospherePass::SkyAtmospherePass(RenderContext *renderContext,
 	detailNoisePipeline_ = CreatePipeline("CloudTextures.slang", "DetailNoise");
 	weatherMapPipeline_ = CreatePipeline("CloudTextures.slang", "WeatherMap");
 	cloudShadowPipeline_ = CreatePipeline("CloudTextures.slang", "ShadowMap");
+	cloudPanoramaPipeline_ = CreatePipeline("CloudTextures.slang", "CloudPanorama");
 
 	transmittanceLUT_ =
 			CreateLUT(TRANSMITTANCE_LUT_WIDTH, TRANSMITTANCE_LUT_HEIGHT, "SkyAtmosphere_Transmittance", transmittanceSRV_);
@@ -66,7 +70,7 @@ SkyAtmospherePass::SkyAtmospherePass(RenderContext *renderContext,
 							CLOUD_SHAPE_NOISE_SIZE,
 							"Clouds_ShapeNoise",
 							shapeNoiseSRV_,
-							Format::R8G8B8A8_UNORM,
+							Format::R8_UNORM,
 							CLOUD_SHAPE_NOISE_SIZE);
 	detailNoise_ = CreateLUT(CLOUD_DETAIL_NOISE_SIZE,
 							 CLOUD_DETAIL_NOISE_SIZE,
@@ -78,7 +82,8 @@ SkyAtmospherePass::SkyAtmospherePass(RenderContext *renderContext,
 							CLOUD_WEATHER_MAP_SIZE,
 							"Clouds_WeatherMap",
 							weatherMapSRV_,
-							Format::R16G16_FLOAT);
+							Format::R8G8_UNORM);
+	cloudPanorama_ = CreateLUT(CLOUD_PANORAMA_SIZE, CLOUD_PANORAMA_SIZE, "Clouds_Panorama", cloudPanoramaSRV_);
 
 	BufferDesc lightingDesc = {};
 	lightingDesc.sizeInBytes = ATMOSPHERE_LIGHTING_ROWS * sizeof(float4);
@@ -111,6 +116,7 @@ SkyAtmospherePass::~SkyAtmospherePass()
 									detailNoiseSRV_,
 									weatherMapSRV_,
 									cloudShadowMapSRV_,
+									cloudPanoramaSRV_,
 									transmittanceLUT_,
 									multiScatteringLUT_,
 									skyViewLUT_,
@@ -118,6 +124,7 @@ SkyAtmospherePass::~SkyAtmospherePass()
 									detailNoise_,
 									weatherMap_,
 									cloudShadowMap_,
+									cloudPanorama_,
 									sceneLighting_ })
 	{
 		if (resource != InvalidResourceHandle)
@@ -228,6 +235,8 @@ CloudParameters SkyAtmospherePass::MakeCloudParameters() const
 	c.weatherMap = renderContext_->GetResourceViewInfo(weatherMapSRV_).descriptorIndex;
 	c.shadowMap = renderContext_->GetResourceViewInfo(cloudShadowMapSRV_).descriptorIndex;
 	c.transmittanceLut = renderContext_->GetResourceViewInfo(transmittanceSRV_).descriptorIndex;
+	c.skyPanorama = settings.indirectPanorama ? renderContext_->GetResourceViewInfo(cloudPanoramaSRV_).descriptorIndex
+											  : INVALIDDESCRIPTORHANDLE;
 
 	// The shadow map covers the square of the scene's floor that its bounds project onto along the sun (as
 	// CloudShadowMapUv does), with a margin.
@@ -385,9 +394,10 @@ void SkyAtmospherePass::Execute(RenderContext *renderContext)
 	renderContext->SetComputeSRVByName("g_MultiScatteringLUT", multiScatteringSRV_);
 	renderContext->SetComputeUAVByName("g_Output", skyViewLUT_);
 	renderContext->Dispatch(GroupCount(SKY_VIEW_LUT_WIDTH), GroupCount(SKY_VIEW_LUT_HEIGHT), 1);
+	// Also read by the cloud panorama.
 	renderContext->TransitionResource(skyViewLUT_,
 									  ResourceLayout::ShaderResource,
-									  ResourceSync::Raytracing,
+									  ResourceSync::AllShading,
 									  ResourceAccess::ShaderResource);
 
 	renderContext->TransitionResource(sceneLighting_,
@@ -413,7 +423,7 @@ void SkyAtmospherePass::Execute(RenderContext *renderContext)
 		{
 			const uint shapeGroups = CLOUD_SHAPE_NOISE_SIZE / kNoiseGroupSize;
 			const uint detailGroups = CLOUD_DETAIL_NOISE_SIZE / kNoiseGroupSize;
-			RenderCloudNoise(renderContext, shapeNoisePipeline_, shapeNoise_, "g_NoiseOutput", shapeGroups, shapeGroups, shapeGroups);
+			RenderCloudNoise(renderContext, shapeNoisePipeline_, shapeNoise_, "g_ShapeOutput", shapeGroups, shapeGroups, shapeGroups);
 			RenderCloudNoise(renderContext, detailNoisePipeline_, detailNoise_, "g_NoiseOutput", detailGroups, detailGroups, detailGroups);
 			RenderCloudNoise(renderContext,
 							 weatherMapPipeline_,
@@ -425,10 +435,10 @@ void SkyAtmospherePass::Execute(RenderContext *renderContext)
 			cloudNoiseValid_ = true;
 		}
 
+		const ResourceHandle cloudBuffer = cloudBuffers_[renderContext->GetCurrentFrameIndex()];
+		renderContext->UpdateConstantBuffer(cloudBuffer, &cloudParameters_, sizeof(cloudParameters_));
 		if (!shadowMapValid_ || std::memcmp(&shadowMapParameters_, &cloudParameters_, sizeof(CloudParameters)) != 0)
 		{
-			const ResourceHandle cloudBuffer = cloudBuffers_[renderContext->GetCurrentFrameIndex()];
-			renderContext->UpdateConstantBuffer(cloudBuffer, &cloudParameters_, sizeof(cloudParameters_));
 			renderContext->TransitionResource(cloudShadowMap_,
 											  ResourceLayout::UnorderedAccess,
 											  ResourceSync::ComputeShading,
@@ -443,6 +453,41 @@ void SkyAtmospherePass::Execute(RenderContext *renderContext)
 											  ResourceAccess::ShaderResource);
 			shadowMapParameters_ = cloudParameters_;
 			shadowMapValid_ = true;
+		}
+
+		if (cloudParameters_.skyPanorama != INVALIDDESCRIPTORHANDLE)
+		{
+			// Each frame's march blends into the last frames', unless the clouds changed other than by the wind, which
+			// moves them slowly enough for the blend to follow.
+			CloudParameters key = cloudParameters_;
+			key.windOffset = { 0.0f, 0.0f };
+			const bool restart = !panoramaValid_ || std::memcmp(&panoramaParameters_, &key, sizeof(CloudParameters)) != 0;
+			panoramaParameters_ = key;
+			panoramaValid_ = true;
+
+			CloudPanoramaConstants panorama = {};
+			panorama.origin = camera_.GetPosition();
+			panorama.viewHeight = viewHeight_;
+			panorama.frame = panoramaFrame_++;
+			panorama.blend = restart ? 1.0f : kCloudPanoramaBlend;
+			renderContext->TransitionResource(cloudPanorama_,
+											  ResourceLayout::UnorderedAccess,
+											  ResourceSync::ComputeShading,
+											  ResourceAccess::UnorderedAccess);
+			renderContext->SetComputePipeline(cloudPanoramaPipeline_);
+			renderContext->SetCompute32BitConstants(&panorama, sizeof(panorama) / sizeof(uint32_t));
+			renderContext->SetComputeConstantBufferByName("g_Clouds", cloudBuffer);
+			renderContext->SetComputeSRVByName("g_SkyViewLUT", skyViewSRV_);
+			renderContext->SetComputeUAVByName("g_PanoramaOutput", cloudPanorama_);
+			renderContext->Dispatch(GroupCount(CLOUD_PANORAMA_SIZE), GroupCount(CLOUD_PANORAMA_SIZE), 1);
+			renderContext->TransitionResource(cloudPanorama_,
+											  ResourceLayout::ShaderResource,
+											  ResourceSync::Raytracing,
+											  ResourceAccess::ShaderResource);
+		}
+		else
+		{
+			panoramaValid_ = false;
 		}
 	}
 

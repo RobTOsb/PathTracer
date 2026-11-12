@@ -77,37 +77,30 @@ float CloudShadow(float3 position)
 // Radiance from beyond the scene along a ray from origin that leaves it: the sky and the light of the sun disc
 // already weighted for MIS (sun), with the clouds in front. Rays the camera sees through (view) march the clouds in
 // more steps; rays whose sky the camera sees, also in a mirror-like surface (seen), take the clouds' detail noise.
+// The others read the cloud panorama, the cloudy sky as the camera sees it, where there is one: their light only
+// reaches the camera after a scattering that blurs it, which hides that it was seen from elsewhere. The reference
+// marches every ray.
 float3 SkyRadiance(float3 origin, float3 dir, float3 sun, bool view, bool seen, inout uint rng)
 {
-    float3 sky = EnvironmentRadiance(dir);
 #ifdef ATMOSPHERE
     CloudParameters c = g_Frame.clouds;
     if (c.enabled != 0)
     {
-        float3 pos = CloudSpacePosition(c, origin);
-        CloudSegment cloud = MarchClouds(SceneClouds(), pos, dir, view ? c.viewSteps : c.indirectSteps, SunIlluminance(),
-                                         EnvironmentRadiance(float3(0.0, 1.0, 0.0)), Rand3(rng), view || seen);
-        if (cloud.transmittance < 1.0)
+#ifndef REFERENCE
+        if (!view && !seen && c.skyPanorama != INVALIDDESCRIPTORHANDLE)
         {
-            // The air between the origin and the cloud dims it, and scatters in the part of the sky's light that
-            // its transmittance says comes from in front of the cloud, which the cloud does not hide.
-            AtmosphereParameters atmosphere = (AtmosphereParameters)0;
-            atmosphere.bottomRadius = c.planetRadius;
-            atmosphere.topRadius = c.atmosphereTopRadius;
-            Texture2D<float4> transmittanceLut = ResourceDescriptorHeap[c.transmittanceLut];
-            float3 cloudPos = pos + dir * cloud.distance;
-            float r = length(pos);
-            float cloudR = length(cloudPos);
-            float3 toTop = transmittanceLut.SampleLevel(g_LinearClamp, TransmittanceLutUv(atmosphere, r, dot(dir, pos) / r), 0.0).rgb;
-            float3 cloudToTop =
-                transmittanceLut.SampleLevel(g_LinearClamp, TransmittanceLutUv(atmosphere, cloudR, dot(dir, cloudPos) / cloudR), 0.0).rgb;
-            float3 air = saturate(toTop / max(cloudToTop, 1.0e-6));
-            float3 front = saturate((1.0 - air) / max(1.0 - toTop, 1.0e-4));
-            return sky * (front + cloud.transmittance * (1.0 - front)) + air * cloud.inScattered + cloud.transmittance * sun;
+            Texture2D<float4> panorama = ResourceDescriptorHeap[c.skyPanorama];
+            float4 cloudy = panorama.SampleLevel(g_LinearClamp, CloudPanoramaUv(dir), 0.0);
+            return SunIlluminance() * cloudy.rgb + cloudy.a * sun;
         }
+#endif
+        float4 cloudy = CloudySky(SceneClouds(), EnvironmentRadiance(dir), CloudSpacePosition(c, origin), dir,
+                                  view ? c.viewSteps : c.indirectSteps, SunIlluminance(),
+                                  EnvironmentRadiance(float3(0.0, 1.0, 0.0)), Rand3(rng), view || seen);
+        return cloudy.rgb + cloudy.a * sun;
     }
 #endif
-    return sky + sun;
+    return EnvironmentRadiance(dir) + sun;
 }
 
 // Transmittance of the scene's air over distance (capped at the distance to the sky), 1 without the
@@ -123,9 +116,9 @@ float3 AtmosphereTransmittance(float distance)
 
 #ifdef ATMOSPHERE
 // Sunlight the air scatters towards origin along a segment, estimated at one distance along it. The
-// single scattering is shadowed by a ray towards the sun, the LUT's multiple scattering by one in a
-// random direction.
-float3 AtmosphereInScattering(float3 origin, float3 dir, float segmentLength, inout uint rng)
+// single scattering is shadowed by a ray towards the sun, the LUT's multiple scattering, where view (a segment the
+// camera looks along), by one in a random direction out to atmosphereSkyVisibilityDistance.
+float3 AtmosphereInScattering(float3 origin, float3 dir, float segmentLength, bool view, inout uint rng)
 {
     float3 sigmaT = g_Frame.atmosphereExtinction;
     float sigmaMean = (sigmaT.x + sigmaT.y + sigmaT.z) * (1.0 / 3.0);
@@ -152,13 +145,14 @@ float3 AtmosphereInScattering(float3 origin, float3 dir, float segmentLength, in
 
     float3 scattering = g_Frame.atmosphereRayleighScattering + g_Frame.atmosphereMieScattering;
     float3 inScattered = g_AtmosphereLighting[kAtmosphereLightingMultiScattering].rgb * scattering;
-    if (g_Frame.atmosphereSkyVisibility != 0)
+    if (view && g_Frame.atmosphereSkyVisibility != 0)
     {
         // The LUT's multiple scattering arrives from the whole of an open sky, so only the fraction of
         // directions that reach it lights the point, estimated by one uniform direction on the sphere
         // (a cone of 1 - cos = 2).
         float2 v = Rand3(rng).xy;
-        inScattered *= TraceShadowRay(origin + dir * s, SampleUniformCone(float3(0.0, 1.0, 0.0), 2.0, v), FLT_MAX);
+        inScattered *= TraceShadowRay(origin + dir * s, SampleUniformCone(float3(0.0, 1.0, 0.0), 2.0, v),
+                                      g_Frame.atmosphereSkyVisibilityDistance);
     }
     float3 sunTransmittance = SunTransmittance();
     if (any(sunTransmittance > 0.0))

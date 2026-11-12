@@ -66,6 +66,7 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 		guides_.specularHitDistance = CreateTarget(Format::R16_FLOAT, "PathTracer_SpecularHitDistance");
 		guides_.specularMotionVectors = CreateTarget(Format::R16G16_FLOAT, "PathTracer_SpecularMotionVectors");
 		guides_.shadowChanges = CreateTarget(Format::R8_UNORM, "PathTracer_ShadowChanges");
+		guides_.responsivity = CreateTarget(Format::R16_FLOAT, "PathTracer_Responsivity");
 
 		BufferDesc cameraStateDesc = {};
 		cameraStateDesc.sizeInBytes = static_cast<uint64_t>(width_) * height_ * sizeof(GpuCameraState);
@@ -120,6 +121,7 @@ PathTracerPass::~PathTracerPass()
 								  guides_.specularHitDistance,
 								  guides_.specularMotionVectors,
 								  guides_.shadowChanges,
+								  guides_.responsivity,
 								  cameraState_,
 								  deferredBranches_,
 								  accumulation_,
@@ -613,7 +615,10 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.lightTreeBounces = static_cast<uint>(std::max(lights.treeBounces, 0));
 	constants.lightTreePowerMix = std::clamp(lights.treePowerMix, 0.0f, 1.0f);
 	constants.lightTreeLeafLevel = std::max(scene_.GetLightTreeDepth(), 1u) - 1;
-	constants.lightTreeLeafOffset = scene_.GetLightTreeLeafOffset();
+	constants.lightTreeLightCount = scene_.GetLightTreeLightCount();
+	constants.lightTreeLeafSize = scene_.GetLightTreeLeafSize();
+	constants.lightTreeOrigin = scene_.GetLightTreeOrigin();
+	constants.lightTreeStep = scene_.GetLightTreeStep();
 	constants.sunSelectProbability = sunActive ? (lightsActive ? 0.5f : 1.0f) : 0.0f;
 	constants.lightTreeGlossyBounces = static_cast<uint>(std::max(lights.glossyImportanceBounces, 0));
 	constants.lightTreeFarFieldSharpness = lights.farFieldImportance ? lights.farFieldSharpness : FLT_MAX;
@@ -682,6 +687,12 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.specularHitDistanceHoldRoughness =
 			settings_.holdSpecularHitDistance ? settings_.holdHitDistanceMaxRoughness : -1.0f;
 	constants.specularMotionMaxRoughness = settings_.specularMotionMaxRoughness;
+	// Only Preset F reads the mask, so no other preset pays for it.
+	if (settings_.rrPreset == DLSSRayReconstructionPreset::PresetF)
+	{
+		constants.reflectionResponsivity = settings_.reflectionResponsivity;
+		constants.reflectionResponsivityMaxRoughness = std::max(settings_.reflectionResponsivityMaxRoughness, 1e-3f);
+	}
 
 	if (atmosphere)
 	{
@@ -699,6 +710,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		constants.atmosphereInScatterSegments = static_cast<uint>(std::max(atmosphereSettings.inScatterSegments, 0));
 		constants.atmosphereVolumetricShadows = atmosphereSettings.volumetricShadows ? 1u : 0u;
 		constants.atmosphereSkyVisibility = atmosphereSettings.skyVisibility ? 1u : 0u;
+		constants.atmosphereSkyVisibilityDistance =
+				atmosphereSettings.skyVisibilityDistance > 0.0f ? atmosphereSettings.skyVisibilityDistance : FLT_MAX;
 		constants.clouds = atmosphere_.GetCloudParameters();
 	}
 	constants.frameIndex = renderContext->GetCurrentFrame();
@@ -803,10 +816,13 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 									  ResourceAccess::UnorderedAccess);
 	if (rayReconstruction_)
 	{
-		renderContext->TransitionResource(guides_.shadowChanges,
-										  ResourceLayout::UnorderedAccess,
-										  ResourceSync::Raytracing,
-										  ResourceAccess::UnorderedAccess);
+		for (ResourceHandle guide: { guides_.shadowChanges, guides_.responsivity })
+		{
+			renderContext->TransitionResource(guide,
+											  ResourceLayout::UnorderedAccess,
+											  ResourceSync::Raytracing,
+											  ResourceAccess::UnorderedAccess);
+		}
 	}
 
 	// Bound again after the photon map's passes, whose compute pipelines replace the root signature.
@@ -847,6 +863,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		if (rayReconstruction_)
 		{
 			renderContext->SetRaytracingUAV(10, guides_.shadowChanges);
+			renderContext->SetRaytracingUAV(11, guides_.responsivity);
 		}
 		if (reference_)
 		{

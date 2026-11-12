@@ -98,6 +98,7 @@ private:
 	PipelineHandle detailNoisePipeline_ = InvalidPipelineHandle;
 	PipelineHandle weatherMapPipeline_ = InvalidPipelineHandle;
 	PipelineHandle cloudShadowPipeline_ = InvalidPipelineHandle;
+	PipelineHandle cloudPanoramaPipeline_ = InvalidPipelineHandle;
 
 	ResourceHandle transmittanceLUT_ = InvalidResourceHandle;
 	ResourceHandle transmittanceSRV_ = InvalidResourceHandle;
@@ -123,6 +124,12 @@ private:
 	CloudParameters cloudParameters_ = {};
 	CloudParameters shadowMapParameters_ = {}; // what the shadow map holds
 	bool shadowMapValid_ = false;
+	// Rendered every frame with clouds, unless CloudSettings::indirectPanorama is off.
+	ResourceHandle cloudPanorama_ = InvalidResourceHandle;
+	ResourceHandle cloudPanoramaSRV_ = InvalidResourceHandle;
+	CloudParameters panoramaParameters_ = {}; // what the panorama holds, the wind offset left out
+	bool panoramaValid_ = false;
+	uint32_t panoramaFrame_ = 0;
 
 	AtmosphereParameters parameters_ = {};
 	AtmosphereParameters lutParameters_ = {}; // what the transmittance and multiple scattering LUTs hold

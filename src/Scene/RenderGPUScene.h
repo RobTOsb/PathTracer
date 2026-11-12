@@ -268,7 +268,7 @@ public:
 		return lightTreeBuilder_->GetNodes();
 	}
 
-	// GpuLightTreeLeafEntry per light: its leaf node and its PMF within it, for the shader's PMF walk.
+	// GpuLightTreeLeafEntry per light: its leaf position and its PMF within it, for the shader's PMF walk.
 	ResourceHandle GetLightLeafBuffer() const
 	{
 		return lightTreeBuilder_->GetLeafOfLight();
@@ -335,10 +335,25 @@ public:
 		return lightTreeBuilder_->GetDepth();
 	}
 
-	// The last tree's leaf level's first node (LightTreeBuilder::GetLeafOffset).
-	uint32_t GetLightTreeLeafOffset() const
+	// The last tree's light count, lights per leaf and node mean quantisation (see LightTreeBuilder).
+	uint32_t GetLightTreeLightCount() const
 	{
-		return lightTreeBuilder_->GetLeafOffset();
+		return lightTreeBuilder_->GetLightCount();
+	}
+
+	uint32_t GetLightTreeLeafSize() const
+	{
+		return lightTreeBuilder_->GetLeafSize();
+	}
+
+	float3 GetLightTreeOrigin() const
+	{
+		return lightTreeBuilder_->GetOrigin();
+	}
+
+	float GetLightTreeStep() const
+	{
+		return lightTreeBuilder_->GetStep();
 	}
 
 	// World-space bounds over every instanced primitive, for framing the camera.

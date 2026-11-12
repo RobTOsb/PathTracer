@@ -38,19 +38,13 @@ public:
 		return nodes_;
 	}
 
-	// Parent node of each group (uint), for the PMF walk.
-	ResourceHandle GetParents() const
-	{
-		return parents_;
-	}
-
 	// GpuLightTreeLeafEntry per leaf slot: the light and its PMF within the leaf.
 	ResourceHandle GetLeafLights() const
 	{
 		return leafLights_;
 	}
 
-	// GpuLightTreeLeafEntry per light: its leaf node and its PMF within it.
+	// GpuLightTreeLeafEntry per light: its leaf's position along the leaf level and its PMF within it.
 	ResourceHandle GetLeafOfLight() const
 	{
 		return leafOfLight_;
@@ -68,10 +62,27 @@ public:
 		return depth_;
 	}
 
-	// The leaf level's first node in the last build: a light's leaf less this is its position along the level.
-	uint32_t GetLeafOffset() const
+	// The lights the tree holds and the lights per leaf in the last build, which with the depth make its shape
+	// (LightTreeShape in LightTree.slang).
+	uint32_t GetLightCount() const
 	{
-		return leafOffset_;
+		return lightCount_;
+	}
+
+	uint32_t GetLeafSize() const
+	{
+		return leafSize_;
+	}
+
+	// The node means' quantisation in the last build: 16-bit steps of GetStep() from GetOrigin().
+	float3 GetOrigin() const
+	{
+		return origin_;
+	}
+
+	float GetStep() const
+	{
+		return step_;
 	}
 
 private:
@@ -101,10 +112,11 @@ private:
 	ResourceHandle radixCounts_ = InvalidResourceHandle;
 	ResourceHandle blockSums_ = InvalidResourceHandle;
 	ResourceHandle nodes_ = InvalidResourceHandle;
-	ResourceHandle parents_ = InvalidResourceHandle;
 	ResourceHandle leafLights_ = InvalidResourceHandle;
 	ResourceHandle leafOfLight_ = InvalidResourceHandle;
 	ResourceHandle power_ = InvalidResourceHandle;
 	uint32_t depth_ = 0;
-	uint32_t leafOffset_ = 0;
+	uint32_t leafSize_ = 1;
+	float3 origin_ = { 0.0f, 0.0f, 0.0f };
+	float step_ = 0.0f;
 };

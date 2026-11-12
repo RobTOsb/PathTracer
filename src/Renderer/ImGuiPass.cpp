@@ -46,6 +46,7 @@ namespace
 		{ GUIDE_VIEW_MOTION_VECTORS, "Motion vectors" },
 		{ GUIDE_VIEW_SPECULAR_MOTION_VECTORS, "Specular motion vectors" },
 		{ GUIDE_VIEW_SHADOW_CHANGES, "Shadow changes" },
+		{ GUIDE_VIEW_RESPONSIVITY, "Responsivity" },
 	};
 
 	constexpr ComboEntry<DLSSMode> kDLSSModes[] = {
@@ -432,6 +433,14 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SetItemTooltip("While the animation moves things, traces each pixel's light sample shadow ray in last "
 							  "frame's TLAS too, and where its shadow changed tells DLSS-RR to favour the current frame "
 							  "over its history, so moving shadows do not ghost");
+		ImGui::BeginDisabled(settings_.rrPreset != DLSSRayReconstructionPreset::PresetF);
+		ImGui::SliderFloat("Reflection responsivity", &settings_.reflectionResponsivity, 0.0f, 1.0f, "%.2f");
+		ImGui::SetItemTooltip("Preset F only. Tells DLSS-RR to keep less history on smooth reflectors the camera sees, "
+							  "this much at a mirror, so bright reflections do not blur and trail across a polished "
+							  "surface in motion. Too much may flicker. 0 = off");
+		ImGui::SliderFloat("Responsivity max roughness", &settings_.reflectionResponsivityMaxRoughness, 0.01f, 1.0f, "%.2f");
+		ImGui::SetItemTooltip("The responsivity falls to none at reflectors this (perceptually) rough");
+		ImGui::EndDisabled();
 		EnumCombo("Guide view", kGuideViews, settings_.guideView);
 		ImGui::SetItemTooltip("Shows one of the guides given to DLSS-RR in place of the image, at render resolution");
 		ImGui::BeginDisabled(settings_.guideView == GUIDE_VIEW_OFF);
@@ -620,6 +629,13 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 			ImGui::Checkbox("Sky visibility", &atmosphere.skyVisibility);
 			ImGui::SetItemTooltip("The air's multiple-scattered light, that of an open sky, counts only where a "
 								  "shadow ray in a random direction reaches the sky, so enclosed spaces stay clear");
+			if (atmosphere.skyVisibility)
+			{
+				ImGui::SliderFloat("Sky visibility distance", &atmosphere.skyVisibilityDistance, 0.0f, 10000.0f, "%.0f m",
+								   ImGuiSliderFlags_Logarithmic);
+				ImGui::SetItemTooltip("How far the sky visibility ray looks for occluders, 0 for all the way to the sky. "
+									  "It is traced only on segments the camera looks along");
+			}
 			ImGui::SliderFloat("Rayleigh scale", &atmosphere.rayleighScale, 0.0f, 10.0f, "%.2f");
 			ImGui::SliderFloat("Mie scale", &atmosphere.mieScale, 0.0f, 50.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
 			ImGui::SetItemTooltip("Aerosols: haze, and the glow around the sun");
@@ -647,7 +663,11 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 				ImGui::SetItemTooltip("Most march steps through the clouds of rays the camera sees through (0.2 km apart "
 									  "where fewer reach across the layer)");
 				ImGui::SliderInt("Indirect steps", &clouds.indirectSteps, 1, 128);
-				ImGui::SetItemTooltip("Most march steps through the clouds of every other ray that leaves the scene");
+				ImGui::SetItemTooltip("Most march steps through the clouds of every other ray that leaves the scene (with "
+									  "the indirect panorama, only in the reference)");
+				ImGui::Checkbox("Indirect panorama", &clouds.indirectPanorama);
+				ImGui::SetItemTooltip("Rays whose sky the camera does not see, not even in a mirror, read the cloudy sky "
+									  "from a panorama rendered from the camera each frame instead of marching the clouds");
 			}
 		}
 		else

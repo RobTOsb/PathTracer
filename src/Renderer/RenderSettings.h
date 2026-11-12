@@ -102,6 +102,9 @@ struct AtmosphereSettings
 	// direction and keeps it only if that reaches the sky, so enclosed and shadowed spaces are not lit as if
 	// they stood in the open.
 	bool skyVisibility = true;
+	// How far the sky visibility ray looks for occluders, metres; 0 for all the way to the sky. Most of what keeps an
+	// enclosed space clear is close by, and a ray through all of a large scene costs as much as a light's shadow ray.
+	float skyVisibilityDistance = 250.0f;
 
 	// Scales of Earth's atmosphere.
 	float rayleighScale = 1.0f;
@@ -128,6 +131,9 @@ struct CloudSettings
 	// Most march steps along rays that leave the scene: those the camera sees through, and the rest.
 	int viewSteps = 16;
 	int indirectSteps = 16;
+	// Rays whose sky the camera does not see, not even in a mirror, read the cloudy sky from a panorama rendered from
+	// the camera each frame instead of marching the clouds (indirectSteps then only counts in the reference).
+	bool indirectPanorama = true;
 	// Kept by the main loop: how far the wind has carried the clouds in x and z.
 	float2 windOffsetKm = { 0.0f, 0.0f };
 };
@@ -319,6 +325,11 @@ struct RenderSettings
 	// ray in last frame's TLAS, and where the light was blocked differently DLSS-RR is told to trust the current
 	// frame over its history (bias current colour mask), so moving shadows do not ghost.
 	bool shadowChangeMask = true;
+	// Preset F only: DLSS-RR's responsivity mask on the smooth reflectors the camera sees, so it keeps less history
+	// for their reflections (an emitter's image trailing across a polished floor), this much at a mirror and falling
+	// to none at reflectionResponsivityMaxRoughness (perceptual). 0 = off.
+	float reflectionResponsivity = 0.5f;
+	float reflectionResponsivityMaxRoughness = 0.25f;
 	// Set by the main loop for a frame whose view does not follow on from the last (another view chosen, the
 	// scene camera starting, stopping or looping), so DLSS drops its history.
 	bool cameraCut = false;

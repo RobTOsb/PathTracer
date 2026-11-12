@@ -65,6 +65,8 @@ StructuredBuffer<float4> g_PreviousTransforms : register(t16);
 // 1 where the guides' surface is lit differently than last frame by a moving object's shadow, the bias current
 // colour mask of DLSS-RR (see FrameConstants::shadowChanges).
 RWTexture2D<float> g_ShadowChanges : register(u10);
+// DLSS-RR's responsivity mask (Preset F), -1..1, positive keeping less history (FrameConstants::reflectionResponsivity).
+RWTexture2D<float> g_Responsivity : register(u11);
 #endif
 // The reference's sum of every path so far per pixel (RGBA32F); PathTracerPass binds it only under REFERENCE.
 #ifdef REFERENCE
