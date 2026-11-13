@@ -338,20 +338,108 @@ struct PsrChainEnd
     // The surface's specular hit distance, InitialSpecularHitDistance until the path's next hit gives it.
     float hitDistance;
     bool replaceable; // not inside glass
+    bool sky; // the last ray left into the sky, dir its direction: no surface, t, Ng or normal
 };
+
+// The chain's end where its last ray, along dir, left into the sky: what the guides take for the sky (DefaultGuides).
+PsrChainEnd SkyChainEnd(float3 dir)
+{
+    PrimaryGuides g = DefaultGuides(dir);
+    PsrChainEnd end;
+    end.diffuseAlbedo = g.diffuseAlbedo;
+    end.specularAlbedo = g.specularAlbedo;
+    end.normal = -dir; // unused, but a unit vector to pack
+    end.roughness = 0.0;
+    end.curvature = 0.0;
+    end.dir = dir;
+    end.Ng = -dir;
+    end.t = 0.0;
+    end.throughputScale = float3(1.0, 1.0, 1.0);
+    end.hitDistance = SKY_HIT_DISTANCE;
+    end.replaceable = true;
+    end.sky = true;
+    return end;
+}
+
+// The motion vector of the sky a chain left into, at infinity, where only directions count: last frame's camera saw
+// it along cameraDir + a u + b v (CameraPixelAxes), where a and b undo the turn the camera's move gives the chain's
+// last direction: motion.dD + a pixelU.dD + b pixelV.dD = 0, in the least squares sense. A flat chain's directions do
+// not move with the camera, so a = b = 0 and the sky moves with the camera's rotation alone, as seen directly.
+bool ChainSkyMotionVector(SpecularChain chain, float3 cameraDir, out float2 motion)
+{
+    motion = float2(0.0, 0.0);
+    if (!chain.differentialsValid)
+        return false;
+    float3 du = chain.pixelU.dD;
+    float3 dv = chain.pixelV.dD;
+    float3 dm = chain.motion.dD;
+    float uu = dot(du, du);
+    float uv = dot(du, dv);
+    float vv = dot(dv, dv);
+    float det = uu * vv - uv * uv;
+    // A fold of the image maps the pixel's directions onto a line. NaN fails here too.
+    if (!(det > 1.0e-4 * uu * vv))
+        return false;
+    float um = dot(du, dm);
+    float vm = dot(dv, dm);
+    float a = (uv * vm - vv * um) / det;
+    float b = (uv * um - uu * vm) / det;
+
+    float3 u, v;
+    CameraPixelAxes(cameraDir, u, v);
+    float4 currClip = mul(float4(cameraDir, 0.0), g_Frame.viewProj);
+    float4 prevClip = mul(float4(cameraDir + a * u + b * v, 0.0), g_Frame.prevViewProj);
+    if (currClip.w <= 0.0 || prevClip.w <= 0.0)
+        return false;
+    motion = CalculateMotionVector(currClip, prevClip, float2(DispatchRaysDimensions().xy));
+    return all(isfinite(motion));
+}
+
+// Swap the primary surface's guides for the sky the chain left into, which in virtual space lies at infinity along
+// the camera ray. Without a motion vector the chain stands only if no event turns the path by a pixel's width across
+// the pixel, so the sky's reprojection with the camera's rotation alone is near enough. Returns whether it did.
+bool ReplacePrimarySurfaceWithSky(SpecularChain chain, PsrChainEnd end, float3 cameraDir, inout PrimaryGuides guides,
+                                  out PsrOutcome outcome)
+{
+    float2 motion;
+    bool hasMotion = ChainSkyMotionVector(chain, cameraDir, motion);
+    outcome = PSR_OUTCOME_SKY;
+    if (!hasMotion && chain.pixelDeflection > g_Frame.rayConePixelSpread)
+    {
+        outcome = chain.differentialsValid ? PSR_OUTCOME_REFUSED_FOLD : PSR_OUTCOME_REFUSED_NO_DIFFERENTIALS;
+        return false;
+    }
+    guides.hasMotion = hasMotion;
+    guides.motion = motion;
+    guides.displacement = float3(0.0, 0.0, 0.0);
+    guides.replaced = true;
+    guides.position = float4(cameraDir, 0.0);
+    guides.normal = float3(0.0, 0.0, 0.0);
+    guides.roughness = 0.0;
+    guides.diffuseAlbedo += chain.throughput * end.diffuseAlbedo;
+    guides.specularAlbedo = lerp(guides.specularAlbedo, chain.throughput * end.specularAlbedo, chain.primaryFraction);
+    guides.specularHitDistance = SKY_HIT_DISTANCE;
+    guides.curvature = 0.0;
+    return true;
+}
 
 // Swap the primary surface's guides for the surface the chain ends on. A chain with a motion vector
 // through it stands unless it shrinks the surface's image past psrMaxMinification; one without, unless
 // an event on the way is curved enough to smear the virtual image. Returns whether it did.
-bool ReplacePrimarySurface(SpecularChain chain, PsrChainEnd end, float3 cameraDir, inout PrimaryGuides guides)
+bool ReplacePrimarySurface(SpecularChain chain, PsrChainEnd end, float3 cameraDir, inout PrimaryGuides guides, out PsrOutcome outcome)
 {
     float pathLength = chain.primaryDistance + chain.length;
     float2 motion;
     float minification;
     bool hasMotion = ChainMotionVector(chain, cameraDir, end.dir, end.Ng, pathLength, motion, minification);
+    outcome = hasMotion ? PSR_OUTCOME_REPLACED_MOTION : PSR_OUTCOME_REPLACED_FLAT;
     if (hasMotion ? minification > g_Frame.psrMaxMinification
                   : chain.pixelDeflection * chain.length > PSR_MAX_VIRTUAL_DEPTH_JITTER * pathLength)
+    {
+        outcome = hasMotion ? PSR_OUTCOME_REFUSED_MINIFICATION
+                  : chain.differentialsValid ? PSR_OUTCOME_REFUSED_FOLD : PSR_OUTCOME_REFUSED_NO_DIFFERENTIALS;
         return false;
+    }
     guides.hasMotion = hasMotion;
     guides.motion = motion;
     guides.displacement = float3(0.0, 0.0, 0.0);

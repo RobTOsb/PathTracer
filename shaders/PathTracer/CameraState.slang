@@ -50,6 +50,7 @@ static const uint CAMERA_CHAIN_THROUGH_GLASS = 2;
 static const uint CAMERA_CHAIN_DIFFERENTIALS = 4; // SpecularChain::differentialsValid
 // GpuChainEnd::flags
 static const uint CHAIN_END_REPLACEABLE = 1;
+static const uint CHAIN_END_SKY = 2;
 
 uint3 PackDifferential(RayDifferential r)
 {
@@ -159,7 +160,7 @@ GpuChainEnd PackChainEnd(PsrChainEnd e)
     p.t = e.t;
     p.throughputScale = uint2(PackHalf2(e.throughputScale.xy), PackHalf2(float2(e.throughputScale.z, 0.0)));
     p.hitDistance = e.hitDistance;
-    p.flags = e.replaceable ? CHAIN_END_REPLACEABLE : 0;
+    p.flags = (e.replaceable ? CHAIN_END_REPLACEABLE : 0) | (e.sky ? CHAIN_END_SKY : 0);
     return p;
 }
 
@@ -180,6 +181,7 @@ PsrChainEnd UnpackChainEnd(GpuChainEnd p)
     e.throughputScale = float3(UnpackHalf2(p.throughputScale.x), UnpackHalf2(p.throughputScale.y).x);
     e.hitDistance = p.hitDistance;
     e.replaceable = (p.flags & CHAIN_END_REPLACEABLE) != 0;
+    e.sky = (p.flags & CHAIN_END_SKY) != 0;
     return e;
 }
 
@@ -301,15 +303,27 @@ void FinishChainEnd(inout CameraState s)
     uint i = PixelIndex();
     SpecularChain chain = UnpackChain(g_CameraState[i].chain);
     PsrChainEnd end = UnpackChainEnd(g_CameraState[i].chainEnd);
-    HitInfo arrival = (HitInfo)0;
-    arrival.t = end.t;
-    arrival.Ng = end.Ng;
-    chain.length += end.t;
-    ChainArrive(chain, end.dir, arrival);
-    chain.throughput *= end.throughputScale;
-    if (!(end.replaceable && ReplacePrimarySurface(chain, end, s.cameraDir, s.guides)) && chain.throughGlass)
+    PsrOutcome outcome = PSR_OUTCOME_REFUSED_INSIDE;
+    bool replaced;
+    if (end.sky)
+    {
+        // At infinity the differentials' directions are all there is, as they left the last event.
+        replaced = ReplacePrimarySurfaceWithSky(chain, end, s.cameraDir, s.guides, outcome);
+    }
+    else
+    {
+        HitInfo arrival = (HitInfo)0;
+        arrival.t = end.t;
+        arrival.Ng = end.Ng;
+        chain.length += end.t;
+        ChainArrive(chain, end.dir, arrival);
+        chain.throughput *= end.throughputScale;
+        replaced = end.replaceable && ReplacePrimarySurface(chain, end, s.cameraDir, s.guides, outcome);
+    }
+    if (!replaced && chain.throughGlass)
         s.guides.diffuseAlbedo += s.transmittance * chain.throughput;
     s.guides.chainEnd = false;
+    g_PsrOutcome[DispatchRaysIndex().xy] = float(uint(outcome));
 #endif
 }
 

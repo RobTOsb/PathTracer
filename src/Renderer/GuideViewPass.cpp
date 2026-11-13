@@ -91,6 +91,9 @@ void GuideViewPass::Execute(RenderContext *renderContext)
 	case GUIDE_VIEW_RESPONSIVITY:
 		source = guides.responsivity;
 		break;
+	case GUIDE_VIEW_PSR_OUTCOME:
+		source = guides.psrOutcome;
+		break;
 	default:
 		source = guides.specularMotionVectors;
 		break;

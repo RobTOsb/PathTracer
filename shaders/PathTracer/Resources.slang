@@ -67,6 +67,8 @@ StructuredBuffer<float4> g_PreviousTransforms : register(t16);
 RWTexture2D<float> g_ShadowChanges : register(u10);
 // DLSS-RR's responsivity mask (Preset F), -1..1, positive keeping less history (FrameConstants::reflectionResponsivity).
 RWTexture2D<float> g_Responsivity : register(u11);
+// PsrOutcome per pixel, for GUIDE_VIEW_PSR_OUTCOME.
+RWTexture2D<float> g_PsrOutcome : register(u12);
 #endif
 // The reference's sum of every path so far per pixel (RGBA32F); PathTracerPass binds it only under REFERENCE.
 #ifdef REFERENCE

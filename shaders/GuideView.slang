@@ -26,6 +26,7 @@ float4 GuideValue(uint2 pixel)
     case GUIDE_VIEW_SHADOW_CHANGES:
         return float4(g.xxx, 0.0);
     case GUIDE_VIEW_RESPONSIVITY:
+    case GUIDE_VIEW_PSR_OUTCOME:
         return float4(g.x, 0.0, 0.0, 0.0);
     case GUIDE_VIEW_MOTION_VECTORS:
     case GUIDE_VIEW_SPECULAR_MOTION_VECTORS:
@@ -67,6 +68,8 @@ float GuideChange(float4 current, float4 previous, float expectedDepth)
     case GUIDE_VIEW_ROUGHNESS:
     case GUIDE_VIEW_RESPONSIVITY:
         return abs(current.x - previous.x) * 4.0;
+    case GUIDE_VIEW_PSR_OUTCOME:
+        return current.x == previous.x ? 0.0 : 1.0;
     case GUIDE_VIEW_DEPTH:
         // Reversed Z with an infinite far plane is proportional to 1 / distance, so this is the relative error of
         // last frame's distance there, 10% at full heat.
@@ -102,6 +105,20 @@ float3 GuideColour(float4 value)
     case GUIDE_VIEW_RESPONSIVITY:
         // More responsive green, less blue.
         return pow(float3(0.0, saturate(value.x), saturate(-value.x)), 1.0 / 2.2);
+    case GUIDE_VIEW_PSR_OUTCOME:
+        switch ((PsrOutcome)uint(round(value.x)))
+        {
+        case PSR_OUTCOME_REPLACED_MOTION: return float3(0.0, 0.8, 0.0); // green
+        case PSR_OUTCOME_REPLACED_FLAT: return float3(0.0, 0.8, 0.8); // cyan
+        case PSR_OUTCOME_REFUSED_MINIFICATION: return float3(1.0, 0.5, 0.0); // orange
+        case PSR_OUTCOME_REFUSED_FOLD: return float3(1.0, 0.0, 0.0); // red
+        case PSR_OUTCOME_REFUSED_NO_DIFFERENTIALS: return float3(0.5, 0.0, 0.0); // dark red
+        case PSR_OUTCOME_REFUSED_INSIDE: return float3(1.0, 0.0, 1.0); // magenta
+        case PSR_OUTCOME_SKY: return float3(0.0, 0.2, 1.0); // blue
+        case PSR_OUTCOME_CUT_SHORT: return float3(1.0, 1.0, 0.0); // yellow
+        case PSR_OUTCOME_HELD: return float3(1.0, 1.0, 1.0); // white
+        default: return float3(0.15, 0.15, 0.15); // no chain: dark grey
+        }
     case GUIDE_VIEW_DEPTH:
         // Proportional to 1 / distance, so near is bright.
         return saturate(sqrt(value.x * gain * 10.0)).xxx;

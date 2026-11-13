@@ -67,6 +67,7 @@ PathTracerPass::PathTracerPass(RenderContext *renderContext,
 		guides_.specularMotionVectors = CreateTarget(Format::R16G16_FLOAT, "PathTracer_SpecularMotionVectors");
 		guides_.shadowChanges = CreateTarget(Format::R8_UNORM, "PathTracer_ShadowChanges");
 		guides_.responsivity = CreateTarget(Format::R16_FLOAT, "PathTracer_Responsivity");
+		guides_.psrOutcome = CreateTarget(Format::R16_FLOAT, "PathTracer_PsrOutcome");
 
 		BufferDesc cameraStateDesc = {};
 		cameraStateDesc.sizeInBytes = static_cast<uint64_t>(width_) * height_ * sizeof(GpuCameraState);
@@ -122,6 +123,7 @@ PathTracerPass::~PathTracerPass()
 								  guides_.specularMotionVectors,
 								  guides_.shadowChanges,
 								  guides_.responsivity,
+								  guides_.psrOutcome,
 								  cameraState_,
 								  deferredBranches_,
 								  accumulation_,
@@ -688,6 +690,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.specularHitDistanceHoldRoughness =
 			settings_.holdSpecularHitDistance ? settings_.holdHitDistanceMaxRoughness : -1.0f;
 	constants.specularMotionMaxRoughness = settings_.specularMotionMaxRoughness;
+	constants.psrSky = settings_.psrSky ? 1u : 0u;
+	constants.psrGuideSamples = static_cast<uint>(std::clamp(settings_.psrGuideSamples, 0, 8));
 	// Only Preset F reads the mask, so no other preset pays for it.
 	if (settings_.rrPreset == DLSSRayReconstructionPreset::PresetF)
 	{
@@ -817,7 +821,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 									  ResourceAccess::UnorderedAccess);
 	if (rayReconstruction_)
 	{
-		for (ResourceHandle guide: { guides_.shadowChanges, guides_.responsivity })
+		for (ResourceHandle guide: { guides_.shadowChanges, guides_.responsivity, guides_.psrOutcome })
 		{
 			renderContext->TransitionResource(guide,
 											  ResourceLayout::UnorderedAccess,
@@ -865,6 +869,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		{
 			renderContext->SetRaytracingUAV(10, guides_.shadowChanges);
 			renderContext->SetRaytracingUAV(11, guides_.responsivity);
+			renderContext->SetRaytracingUAV(12, guides_.psrOutcome);
 		}
 		if (reference_)
 		{

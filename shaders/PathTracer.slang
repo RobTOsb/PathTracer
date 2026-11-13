@@ -597,6 +597,7 @@ SurfaceOutcome ShadeSurfaceEnd<let SIMPLE : bool>(SurfaceShading shading, LightS
             end.throughputScale = exp(-arrivedExtinction * hit.t);
             end.hitDistance = InitialSpecularHitDistance(end.roughness);
             end.replaceable = !ctx.inside;
+            end.sky = false;
             StoreChainEnd(end);
             flags = SetFlag(flags, PATH_END_HIT_PENDING, end.replaceable && specularReflection);
         }
@@ -836,6 +837,18 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                     // Sky seen through a window: the guides describe the sky, as for a camera ray.
                     if (fromCamera)
                         camera.guides = DefaultGuides(dir);
+#ifdef DLSS_RR
+                    if (chainActive)
+                        g_PsrOutcome[DispatchRaysIndex().xy] = float(uint(PSR_OUTCOME_SKY));
+#endif
+#ifdef PSR
+                    // A chain that leaves into the sky ends on it, for RayGen to put in the guides' place.
+                    if (chainActive && !inMedium && g_Frame.psrSky != 0)
+                    {
+                        StoreChainEnd(SkyChainEnd(dir));
+                        flags &= ~PATH_CHAIN_ACTIVE;
+                    }
+#endif
                     StoreCameraState(camera, firstSegment ? CAMERA_ALL & ~CAMERA_CHAIN : fromCamera ? CAMERA_GUIDES : 0);
                 }
 
@@ -905,6 +918,11 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         // A refraction chain the path ended on leaves the glass's transmittance as its diffuse albedo.
         if (ChainActive(flags))
         {
+#ifdef DLSS_RR
+            uint2 outcomePixel = DispatchRaysIndex().xy;
+            if (g_PsrOutcome[outcomePixel] != float(uint(PSR_OUTCOME_SKY)))
+                g_PsrOutcome[outcomePixel] = float(uint(PSR_OUTCOME_CUT_SHORT));
+#endif
             CameraState camera = LoadCameraState(CAMERA_CHAIN | CAMERA_GUIDES | CAMERA_VIEW);
             if (camera.chain.throughGlass)
             {
@@ -980,20 +998,17 @@ float TraceGuideHitDistance(float3 position, float3 N, float3 viewDir, float rou
 
 // The guides of a camera ray's hit, as ShadeSurface makes them for the surface the camera sees, behind walls of
 // the given transmittance; opacity is how much of it is there (LoadOpacity).
-PrimaryGuides SurfaceGuides(HitPayload payload, float3 origin, float3 dir, float3 transmittance, out float opacity)
+// The material of a guide ray's hit as ShadeSurface sees it, a ray cone coneWidth wide there: opaque and thin-walled
+// surfaces faced to the viewer, solid glass left as it is, so its context knows the inside from the outside.
+void GuideMaterial(inout HitInfo hit, float3 wo, float coneWidth, out OpenPBRBaseParams mat, out OpenPBRContext ctx)
 {
-    HitInfo hit = UnpackHit(payload, origin, dir);
-    float3 wo = -dir;
-    float coneWidth = g_Frame.rayConePixelSpread * hit.t;
     bool anisotropic = 0 < g_Frame.anisotropicSegments;
     float turn = HitCurvature(hit) * coneWidth;
     float cosView = dot(hit.N, wo);
     float stretch = 1.0 + 1.0 / max(cosView * cosView, 0.01);
     float2 specularAA = float2(g_Frame.specularAAVariance * turn * turn * stretch, g_Frame.specularAANormalMapScale);
-    OpenPBRBaseParams mat = LoadMaterial(hit, coneWidth * g_Frame.textureLodScale, anisotropic, false, specularAA);
-    opacity = LoadOpacity(hit, coneWidth * g_Frame.textureLodScale, anisotropic);
+    mat = LoadMaterial(hit, coneWidth * g_Frame.textureLodScale, anisotropic, false, specularAA);
 
-    // Faced to the viewer as ShadeSurface does.
     bool opaque = mat.transmissionWeight <= 0.0 && !HasDiffuseTransmission(mat);
     if (opaque || mat.geometryThinWalled)
     {
@@ -1007,7 +1022,18 @@ PrimaryGuides SurfaceGuides(HitPayload payload, float3 origin, float3 dir, float
         }
     }
     SetShadingBasis(mat, hit.T, hit.B, hit.N, hit.Ns, hit.Ng, wo);
-    OpenPBRContext ctx = OpenPBRSetup(mat, wo);
+    ctx = OpenPBRSetup(mat, wo);
+}
+
+PrimaryGuides SurfaceGuides(HitPayload payload, float3 origin, float3 dir, float3 transmittance, out float opacity)
+{
+    HitInfo hit = UnpackHit(payload, origin, dir);
+    float3 wo = -dir;
+    float coneWidth = g_Frame.rayConePixelSpread * hit.t;
+    opacity = LoadOpacity(hit, coneWidth * g_Frame.textureLodScale, 0 < g_Frame.anisotropicSegments);
+    OpenPBRBaseParams mat;
+    OpenPBRContext ctx;
+    GuideMaterial(hit, wo, coneWidth, mat, ctx);
 
     PrimaryGuides g = DefaultGuides(dir);
     g.position = float4(hit.position, 1.0);
@@ -1111,6 +1137,177 @@ void SupersampleGuides(inout PrimaryGuides guides, uint2 pixel)
     float length2 = dot(normal, normal);
     guides.normal = length2 > 1.0e-6 ? normal * rsqrt(length2) : float3(0.0, 0.0, 0.0);
 }
+
+#ifdef PSR
+bool WalkPsrEvent(OpenPBRBaseParams mat, OpenPBRContext ctx, out bool reflection, out float fraction)
+{
+    fraction = 1.0;
+    uint lobe = PsrStrongerLobe(mat, ctx);
+    if (lobe == LOBE_NONE)
+    {
+        reflection = true;
+        return IsPsrEvent(mat, ctx, LOBE_SPECULAR_REFLECTION, fraction);
+    }
+    reflection = lobe == LOBE_SPECULAR_REFLECTION;
+    if (!ctx.inside)
+    {
+        float2 fractions = SpecularFractions(mat);
+        fraction = reflection ? fractions.x : fractions.y;
+    }
+    return true;
+}
+
+// The chain's walk is at most this many events past the camera's surface, or the specular bounce budget if less.
+static const uint PSR_WALK_MAX_EVENTS = 8;
+
+PrimaryGuides WalkPsrGuideSample(float3 origin, float3 dir)
+{
+    HitPayload payload;
+    if (!TraceGuideSurface(origin, dir, 0.0, FLT_MAX, uint(INSTANCE_MASK_SOLID), payload))
+        return DefaultGuides(dir);
+    HitInfo hit = UnpackHit(payload, origin, dir);
+    float travelled = hit.t;
+    OpenPBRBaseParams mat;
+    OpenPBRContext ctx;
+    GuideMaterial(hit, -dir, g_Frame.rayConePixelSpread * travelled, mat, ctx);
+
+    // The camera's surface, whose own guides these are unless a chain starts here.
+    PrimaryGuides own = DefaultGuides(dir);
+    own.position = float4(hit.position, 1.0);
+    own.normal = mat.geometryNormal;
+    own.roughness = GuideRoughness(mat, ctx);
+    ReflectanceGuides(mat, ctx, -dir, own);
+    bool reflection;
+    float primaryFraction;
+    if (!WalkPsrEvent(mat, ctx, reflection, primaryFraction))
+        return own;
+
+    SpecularChain chain = (SpecularChain)0;
+    chain.rotor = float4(0.0, 0.0, 0.0, 1.0);
+    chain.parityOdd = false;
+    bool throughGlass = !reflection && !mat.geometryThinWalled;
+    float3 throughput = PsrEventThroughput(mat, ctx, -dir, reflection);
+    float3 extinction = float3(0.0, 0.0, 0.0);
+    uint budget = min(g_Frame.maxSpecularBounces, PSR_WALK_MAX_EVENTS);
+    PrimaryGuides g = own;
+    [loop]
+    for (uint event = 0;; ++event)
+    {
+        // The event's turn about the shading normal faced to the incoming ray, as the path's smooth lobes turn it;
+        // its chain transform about the geometry normal, as AddPsrEvent's.
+        float3 N = ToWorld(mat, float3(0.0, 0.0, 1.0));
+        float3 n = dot(N, dir) < 0.0 ? N : -N;
+        float3 dirOut = reflection ? reflect(dir, n) : refract(dir, n, 1.0 / ctx.eta);
+        if (dot(dirOut, dirOut) == 0.0)
+        {
+            reflection = true;
+            dirOut = reflect(dir, n);
+        }
+        dirOut = normalize(dirOut);
+        if (reflection)
+        {
+            chain.rotor = QuaternionMultiply(chain.rotor, MirrorRotor(mat.geometryNormal, chain.parityOdd));
+            chain.parityOdd = !chain.parityOdd;
+        }
+        else
+        {
+            float4 q = ArcRotor(dirOut, dir);
+            chain.rotor = QuaternionMultiply(chain.rotor, chain.parityOdd ? float4(-q.xy, q.zw) : q);
+            // Into solid glass its medium, out of it the air.
+            if (!mat.geometryThinWalled)
+                extinction = ctx.inside ? float3(0.0, 0.0, 0.0) : MediumExtinction(mat);
+        }
+
+        // Past the budget the path's chain is cut short: through glass, the glass's transmittance as its content.
+        if (event >= budget)
+        {
+            if (throughGlass)
+                g.diffuseAlbedo += throughput;
+            return g;
+        }
+
+        origin = OffsetRay(hit.position, hit.Ng, dirOut);
+        dir = dirOut;
+        if (!TraceGuideSurface(origin, dir, 0.0, FLT_MAX, uint(INSTANCE_MASK_SOLID), payload))
+        {
+            // Into the sky, which takes the guides' place (ReplacePrimarySurfaceWithSky), or without psrSky the
+            // content of a chain through glass.
+            if (g_Frame.psrSky == 0)
+            {
+                if (throughGlass)
+                    g.diffuseAlbedo += throughput;
+                return g;
+            }
+            PrimaryGuides sky = DefaultGuides(dir);
+            g.normal = float3(0.0, 0.0, 0.0);
+            g.roughness = 0.0;
+            g.diffuseAlbedo += throughput * sky.diffuseAlbedo;
+            g.specularAlbedo = lerp(g.specularAlbedo, throughput * sky.specularAlbedo, primaryFraction);
+            return g;
+        }
+        hit = UnpackHit(payload, origin, dir);
+        travelled += hit.t;
+        throughput *= exp(-extinction * hit.t);
+        GuideMaterial(hit, -dir, g_Frame.rayConePixelSpread * travelled, mat, ctx);
+        float unused;
+        if (!WalkPsrEvent(mat, ctx, reflection, unused))
+        {
+            // The chain's end. Inside glass the path's chain is refused, which leaves the glass's content.
+            if (ctx.inside)
+            {
+                if (throughGlass)
+                    g.diffuseAlbedo += throughput;
+                return g;
+            }
+            PrimaryGuides seen;
+            ReflectanceGuides(mat, ctx, -dir, seen);
+            g.normal = normalize(ApplySpecularChain(chain, mat.geometryNormal));
+            g.roughness = GuideRoughness(mat, ctx);
+            g.diffuseAlbedo += throughput * seen.diffuseAlbedo;
+            g.specularAlbedo = lerp(g.specularAlbedo, throughput * seen.specularAlbedo, primaryFraction);
+            return g;
+        }
+        throughput *= PsrEventThroughput(mat, ctx, -dir, reflection);
+    }
+    return g;
+}
+
+// Fixed points of the pixel, from its centre, that PsrDeterministicGuides walks chains from: the centre, then
+// Halton (2, 3) less 1/2.
+static const float2 PSR_GUIDE_FIXED_OFFSETS[GUIDE_SAMPLE_MAX] = {
+    float2(0.0, 0.0), float2(0.0, -0.1666667), float2(-0.25, 0.1666667), float2(0.25, -0.3888889),
+    float2(-0.375, -0.0555556), float2(0.125, 0.2777778), float2(-0.125, -0.2777778), float2(0.375, 0.0555556)
+};
+
+void PsrDeterministicGuides(inout PrimaryGuides guides, uint2 pixel)
+{
+    uint count = min(g_Frame.psrGuideSamples, GUIDE_SAMPLE_MAX);
+    float3 diffuse = float3(0.0, 0.0, 0.0);
+    float3 specular = float3(0.0, 0.0, 0.0);
+    float3 normal = float3(0.0, 0.0, 0.0);
+    float roughness = 0.0;
+    [loop]
+    for (uint i = 0; i < count; ++i)
+    {
+        float3 origin, dir;
+        GenerateCameraRay(pixel, 0.5 + PSR_GUIDE_FIXED_OFFSETS[i], origin, dir);
+        PrimaryGuides g = WalkPsrGuideSample(origin, dir);
+        diffuse += g.diffuseAlbedo;
+        specular += g.specularAlbedo;
+        normal += g.normal;
+        roughness += g.roughness;
+    }
+    float weight = 1.0 / float(count);
+    guides.diffuseAlbedo = diffuse * weight;
+    guides.specularAlbedo = specular * weight;
+    if (guides.replaced)
+    {
+        guides.roughness = roughness * weight;
+        float length2 = dot(normal, normal);
+        guides.normal = length2 > 1.0e-6 ? normal * rsqrt(length2) : float3(0.0, 0.0, 0.0);
+    }
+}
+#endif
 #endif
 
 // Entry points
@@ -1163,6 +1360,7 @@ void RayGen()
 #ifdef DLSS_RR
     // Before the paths, any of which may mark it.
     g_ShadowChanges[pixel] = 0.0;
+    g_PsrOutcome[pixel] = float(uint(PSR_OUTCOME_NONE));
 #endif
     // No photon receiver until a path's camera ray meets one.
     if (g_Frame.photons.enabled != 0)
@@ -1196,7 +1394,12 @@ void RayGen()
     // A PSR chain that broke by chance keeps last frame's guides, so that a random few pixels of a glass
     // object do not flip to its own surface each frame, which DLSS-RR takes for disocclusion in motion.
     if (camera.guides.hold)
+    {
+        g_PsrOutcome[pixel] = float(uint(PSR_OUTCOME_HELD));
         return;
+    }
+    // Whether the path followed a PSR chain: one that ended (on a surface or the sky), or one the budget cut short.
+    bool followedChain = camera.guides.chainEnd || g_PsrOutcome[pixel] == float(uint(PSR_OUTCOME_CUT_SHORT));
 #ifdef PSR
     if (camera.guides.chainEnd)
         FinishChainEnd(camera);
@@ -1204,6 +1407,12 @@ void RayGen()
     if (g_Frame.blendGuides != 0)
         ResolveBlendGuides(camera, origin);
     PrimaryGuides guides = FinishGuides(camera, origin);
+#ifdef PSR
+    // A chain's guides from chains walked from fixed points of the pixel.
+    if (followedChain && g_Frame.psrGuideSamples != 0 && !guides.reflectorIsPane)
+        PsrDeterministicGuides(guides, pixel);
+    else
+#endif
     // Only guides of the surface the camera sees in the open: not PSR's virtual ones, nor through or off glass.
     if (g_Frame.guideSamples != 0 && !guides.replaced && !guides.reflectorIsPane && all(camera.transmittance == 1.0))
         SupersampleGuides(guides, pixel);
@@ -1241,7 +1450,8 @@ void RayGen()
     // A rough reflector's reflection is a blur of things at many depths that one hit distance cannot place: its
     // specular motion vectors are the surface's own, so the field stays smooth across a highlight (Bevy Solari).
     // A pane's reflection is never rough, and otherwise the reflector is the guides' surface, moving with motion.
-    if (guides.reflectorRoughness > g_Frame.specularMotionMaxRoughness)
+    // The sky a chain put in the guides' place has no reflection of its own, so it moves as the sky does.
+    if (guides.reflectorRoughness > g_Frame.specularMotionMaxRoughness || (guides.replaced && guides.position.w == 0.0))
     {
         g_SpecularMotionVectors[pixel] = motion;
         return;

@@ -47,6 +47,7 @@ namespace
 		{ GUIDE_VIEW_SPECULAR_MOTION_VECTORS, "Specular motion vectors" },
 		{ GUIDE_VIEW_SHADOW_CHANGES, "Shadow changes" },
 		{ GUIDE_VIEW_RESPONSIVITY, "Responsivity" },
+		{ GUIDE_VIEW_PSR_OUTCOME, "PSR outcome" },
 	};
 
 	constexpr ComboEntry<DLSSMode> kDLSSModes[] = {
@@ -417,6 +418,16 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SetItemTooltip("How far a curved chain may shrink the image of the surface it shows before PSR gives up "
 							  "on it, its detail then being finer than a pixel");
 		ImGui::EndDisabled();
+		ImGui::Checkbox("Chains into the sky", &settings_.psrSky);
+		ImGui::SliderInt("Deterministic chain guides", &settings_.psrGuideSamples, 0, 8,
+						 settings_.psrGuideSamples <= 0 ? "off" : "%d");
+		ImGui::SetItemTooltip("Pixels that see through mirrors and glass take their guides from chains walked along the "
+							  "ideal reflection and refraction from fixed points of the pixel, not from the path's "
+							  "jittered chain, so wavy glass's guides are the same every frame. 1 walks from the pixel's "
+							  "centre; more average over the pixel at that many times the cost");
+		ImGui::SetItemTooltip("A mirror or glass chain that leaves into the sky puts the sky in the guides' place, "
+							  "moving as the chain turns it, instead of keeping the mirror's or glass's own motion. "
+							  "Off: what such chains show (stars, distant lights through glass) moves with the surface");
 		ImGui::EndDisabled();
 		ImGui::SliderFloat("Specular MV max roughness", &settings_.specularMotionMaxRoughness, 0.0f, 1.0f, "%.2f");
 		ImGui::SetItemTooltip("Surfaces at most this rough get specular motion vectors that follow their reflection, "

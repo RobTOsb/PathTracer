@@ -32,6 +32,8 @@ struct PathTracerGuides
 	// R16F, -1..1: DLSS-RR's responsivity mask (Preset F only), positive on smooth reflectors so their reflections keep
 	// less history (FrameConstants::reflectionResponsivity).
 	ResourceHandle responsivity = InvalidResourceHandle;
+	// R16F, PsrOutcome per pixel: what became of its PSR chain, for GUIDE_VIEW_PSR_OUTCOME only.
+	ResourceHandle psrOutcome = InvalidResourceHandle;
 };
 
 // Traces one path per pixel into an HDR radiance target (RGBA16F) using the DXR pipeline in

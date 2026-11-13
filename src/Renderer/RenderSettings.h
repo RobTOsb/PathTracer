@@ -306,6 +306,11 @@ struct RenderSettings
 	// unless they shrink the image of the surface they show by more than psrMaxMinification (linear).
 	bool psrCurvedSurfaces = true;
 	float psrMaxMinification = 64.0f;
+	// A chain that leaves into the sky puts the sky in the guides' place (FrameConstants::psrSky).
+	bool psrSky = true;
+	// Pixels that followed a PSR chain take their guides from this many chains walked from fixed points of the pixel,
+	// 1 = the centre alone (FrameConstants::psrGuideSamples). 0 = the path's jittered chain.
+	int psrGuideSamples = 1;
 	// Past the camera's first surface, a chain through smooth glass always takes the lobe it follows, so its guides
 	// never hold last frame's; the other lobe's light (faint internal reflections) is left out.
 	bool psrStrongerLobe = true;

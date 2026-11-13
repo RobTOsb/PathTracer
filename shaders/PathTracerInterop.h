@@ -181,8 +181,10 @@ struct FrameConstants
 	// (perceptual). 0 for the sky, PSR's virtual surfaces and panes' reflections. 0 = off.
 	float reflectionResponsivity;
 	float reflectionResponsivityMaxRoughness;
-	uint padResponsivity0;
-	uint padResponsivity1;
+	// PSR: a chain that leaves into the sky puts the sky in the guides' place, with a motion vector from how its
+	// last direction turns as the camera moves (ReplacePrimarySurfaceWithSky). 0: the guides stay the surface's.
+	uint psrSky;
+	uint psrGuideSamples;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -608,7 +610,24 @@ enum GuideView
 	GUIDE_VIEW_MOTION_VECTORS = 6,
 	GUIDE_VIEW_SPECULAR_MOTION_VECTORS = 7,
 	GUIDE_VIEW_SHADOW_CHANGES = 8, // the bias current colour mask, see FrameConstants::shadowChanges
-	GUIDE_VIEW_RESPONSIVITY = 9 // the responsivity mask, see FrameConstants::reflectionResponsivity
+	GUIDE_VIEW_RESPONSIVITY = 9, // the responsivity mask, see FrameConstants::reflectionResponsivity
+	GUIDE_VIEW_PSR_OUTCOME = 10 // what became of each pixel's PSR chain, PsrOutcome
+};
+
+// What became of a pixel's PSR chain this frame (the path tracer's PSR outcome target, GUIDE_VIEW_PSR_OUTCOME).
+UnscopedEnum
+enum PsrOutcome
+{
+	PSR_OUTCOME_NONE = 0, // no chain: the camera's surface is not a PSR mirror or glass
+	PSR_OUTCOME_REPLACED_MOTION = 1, // replaced, motion vector through the chain's ray differentials
+	PSR_OUTCOME_REPLACED_FLAT = 2, // replaced without differentials, the virtual position's own reprojection
+	PSR_OUTCOME_REFUSED_MINIFICATION = 3, // the chain shrinks the image past psrMaxMinification
+	PSR_OUTCOME_REFUSED_FOLD = 4, // the image folds (differentials degenerate) and the chain is curved
+	PSR_OUTCOME_REFUSED_NO_DIFFERENTIALS = 5, // differentials lost (grazing hit or refraction, curved off) and curved
+	PSR_OUTCOME_REFUSED_INSIDE = 6, // the chain ended on a surface inside glass
+	PSR_OUTCOME_SKY = 7, // the chain left into the sky: replaced by it (psrSky), else the surface's guides stay
+	PSR_OUTCOME_CUT_SHORT = 8, // the path ended while the chain was open (bounce budget)
+	PSR_OUTCOME_HELD = 9 // the chain broke by chance: last frame's guides and motion vectors stay
 };
 
 // Root constants of GuideView.slang.
