@@ -175,7 +175,7 @@ struct FrameConstants
 	// The air's sky visibility ray (atmosphereSkyVisibility) looks for occluders this far, scene units. FLT_MAX = all.
 	float atmosphereSkyVisibilityDistance;
 	float3 lightTreeOrigin;
-	uint padLightTree0;
+	uint guideSamples;
 	// DLSS_RR, Preset F: the responsivity mask on smooth reflectors the camera sees, so that DLSS-RR keeps less history
 	// for their reflections, reflectionResponsivity at a mirror falling to 0 at reflectionResponsivityMaxRoughness
 	// (perceptual). 0 for the sky, PSR's virtual surfaces and panes' reflections. 0 = off.

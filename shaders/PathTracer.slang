@@ -1065,6 +1065,52 @@ void ResolveBlendGuides(inout CameraState s, float3 origin)
     g.blendOpacity = 1.0;
     s.guides = g;
 }
+
+// FrameConstants::guideSamples is at most this.
+static const uint GUIDE_SAMPLE_MAX = 8;
+// The extra guide samples' offsets from the jittered sample, in pixels: Halton (2, 3) less 1/2, so any first few
+// spread over a pixel-wide box around it.
+static const float2 GUIDE_SAMPLE_OFFSETS[GUIDE_SAMPLE_MAX] = {
+    float2(0.0, -0.1666667), float2(-0.25, 0.1666667), float2(0.25, -0.3888889), float2(-0.375, -0.0555556),
+    float2(0.125, 0.2777778), float2(-0.125, -0.2777778), float2(0.375, 0.0555556), float2(-0.4375, 0.3888889)
+};
+
+void SupersampleGuides(inout PrimaryGuides guides, uint2 pixel)
+{
+    uint count = min(g_Frame.guideSamples, GUIDE_SAMPLE_MAX);
+    float3 diffuse = guides.diffuseAlbedo;
+    float3 specular = guides.specularAlbedo;
+    float3 normal = guides.normal;
+    float roughness = guides.roughness;
+    [loop]
+    for (uint i = 0; i < count; ++i)
+    {
+        float3 origin, dir;
+        GenerateCameraRay(pixel, 0.5 + g_Frame.jitter + GUIDE_SAMPLE_OFFSETS[i], origin, dir);
+        HitPayload payload;
+        PrimaryGuides g;
+        if (TraceGuideSurface(origin, dir, 0.0, FLT_MAX, uint(INSTANCE_MASK_SOLID), payload))
+        {
+            float unused;
+            g = SurfaceGuides(payload, origin, dir, float3(1.0, 1.0, 1.0), unused);
+        }
+        else
+        {
+            g = DefaultGuides(dir);
+        }
+        diffuse += g.diffuseAlbedo;
+        specular += g.specularAlbedo;
+        normal += g.normal;
+        roughness += g.roughness;
+    }
+    float weight = 1.0 / float(count + 1);
+    guides.diffuseAlbedo = diffuse * weight;
+    guides.specularAlbedo = specular * weight;
+    guides.roughness = roughness * weight;
+    // The sky's normal is zero, so a mix with it stays a direction only while some surface is in it.
+    float length2 = dot(normal, normal);
+    guides.normal = length2 > 1.0e-6 ? normal * rsqrt(length2) : float3(0.0, 0.0, 0.0);
+}
 #endif
 
 // Entry points
@@ -1158,6 +1204,9 @@ void RayGen()
     if (g_Frame.blendGuides != 0)
         ResolveBlendGuides(camera, origin);
     PrimaryGuides guides = FinishGuides(camera, origin);
+    // Only guides of the surface the camera sees in the open: not PSR's virtual ones, nor through or off glass.
+    if (g_Frame.guideSamples != 0 && !guides.replaced && !guides.reflectorIsPane && all(camera.transmittance == 1.0))
+        SupersampleGuides(guides, pixel);
 
     // Last frame's specular hit distance, loaded first so its latency hides behind the guides below.
     float heldHitDistance = g_SpecularHitDistance[pixel];

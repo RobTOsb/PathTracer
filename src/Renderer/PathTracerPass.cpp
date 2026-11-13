@@ -677,6 +677,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.opacityMicromap2StateBounce = settings_.opacityMicromap2StateBounce >= 0
 													? static_cast<uint>(settings_.opacityMicromap2StateBounce)
 													: UINT32_MAX;
+	constants.guideSamples = static_cast<uint>(std::clamp(settings_.guideSamples, 0, 8));
 
 	constants.skyRadiance = settings_.skyColour * settings_.skyIntensity;
 

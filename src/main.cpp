@@ -83,8 +83,8 @@ static float QueryDisplayPeakNits(void *hwnd)
 //constexpr const char *kDefaultScenePath = "h:\\landscape\\view-0.glb";
 //constexpr const char *kDefaultScenePath = "h:\\modern_apartment.glb";
 //constexpr const char *kDefaultScenePath = "h:\\LucyCheckerboard.glb";
-//constexpr const char *kDefaultScenePath = "h:\\StressTest\\StressTest.glb";
-constexpr const char *kDefaultScenePath = "H:\\PineForest\\PineForest.gltf";
+constexpr const char *kDefaultScenePath = "h:\\StressTest\\StressTest.glb";
+//constexpr const char *kDefaultScenePath = "H:\\PineForest\\PineForest.gltf";
 
 constexpr uint kFramesInFlight = 2;
 constexpr uint kSwapchainImageCount = 3;

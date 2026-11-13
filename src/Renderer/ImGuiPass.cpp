@@ -441,6 +441,12 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SliderFloat("Responsivity max roughness", &settings_.reflectionResponsivityMaxRoughness, 0.01f, 1.0f, "%.2f");
 		ImGui::SetItemTooltip("The responsivity falls to none at reflectors this (perceptually) rough");
 		ImGui::EndDisabled();
+		ImGui::SliderInt("Guide samples", &settings_.guideSamples, 0, 8, settings_.guideSamples <= 0 ? "off" : "%d");
+		ImGui::SetItemTooltip("Extra camera rays per pixel, around the jittered sample within a pixel's width, whose "
+							  "surfaces the albedo, normal and roughness guides average in. Geometry finer than a "
+							  "pixel (needles, distant twigs) then gives DLSS-RR a steady mix instead of flipping "
+							  "between leaf and sky with the jitter, which it shows as crawl. Each ray is a closest hit "
+							  "and a material load, no shading. Depth and motion stay the camera ray's. 0 = off");
 		EnumCombo("Guide view", kGuideViews, settings_.guideView);
 		ImGui::SetItemTooltip("Shows one of the guides given to DLSS-RR in place of the image, at render resolution");
 		ImGui::BeginDisabled(settings_.guideView == GUIDE_VIEW_OFF);

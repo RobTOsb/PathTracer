@@ -332,6 +332,9 @@ struct RenderSettings
 	// to none at reflectionResponsivityMaxRoughness (perceptual). 0 = off.
 	float reflectionResponsivity = 0.5f;
 	float reflectionResponsivityMaxRoughness = 0.25f;
+	// DLSS-RR albedo/normal/roughness guides averaged over this many extra sub-pixel camera rays, 0 = off
+	// (FrameConstants::guideSamples, at most 8).
+	int guideSamples = 2;
 	// Set by the main loop for a frame whose view does not follow on from the last (another view chosen, the
 	// scene camera starting, stopping or looping), so DLSS drops its history.
 	bool cameraCut = false;
