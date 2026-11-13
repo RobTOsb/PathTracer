@@ -797,6 +797,111 @@ std::vector<uint32_t> RenderGPUScene::FindEmissiveInstances(uint32_t materialInd
 	return found;
 }
 
+std::vector<uint32_t> RenderGPUScene::ClusterEmissiveInstances(float linkDistance, uint32_t &clusterCount) const
+{
+	const uint32_t count = static_cast<uint32_t>(emissiveInstances_.size());
+	clusterCount = 0;
+	if (count == 0 || !(linkDistance > 0.0f))
+	{
+		return {};
+	}
+
+	// A grid of linkDistance cells, so a pair within linkDistance is in the same or a neighbouring cell. The
+	// emissive instances are sorted by cell, and each cell is a range of that order.
+	std::vector<float3> positions(count);
+	std::vector<std::array<int32_t, 3>> cells(count);
+	auto cellKey = [](const std::array<int32_t, 3> &c)
+	{
+		// 21 bits a coordinate, which wraps only for scenes over 2M cells across, and then only costs time.
+		return (static_cast<uint64_t>(c[0] & 0x1FFFFF) << 42) | (static_cast<uint64_t>(c[1] & 0x1FFFFF) << 21) |
+			   static_cast<uint64_t>(c[2] & 0x1FFFFF);
+	};
+	std::vector<uint64_t> keys(count);
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		const float *m = instances[emissiveInstances_[i]].worldMatrix;
+		positions[i] = float3(m[3], m[7], m[11]);
+		cells[i] = { static_cast<int32_t>(floorf(m[3] / linkDistance)),
+					 static_cast<int32_t>(floorf(m[7] / linkDistance)),
+					 static_cast<int32_t>(floorf(m[11] / linkDistance)) };
+		keys[i] = cellKey(cells[i]);
+	}
+	std::vector<uint32_t> order(count);
+	std::iota(order.begin(), order.end(), 0u);
+	std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return keys[a] < keys[b]; });
+	std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> ranges; // cell -> [begin, end) into order
+	ranges.reserve(count);
+	for (uint32_t begin = 0; begin < count;)
+	{
+		uint32_t end = begin + 1;
+		while (end < count && keys[order[end]] == keys[order[begin]])
+		{
+			++end;
+		}
+		ranges.emplace(keys[order[begin]], std::make_pair(begin, end));
+		begin = end;
+	}
+
+	// Union-find over the emissive instances, the smaller root kept so the roots are each cluster's first.
+	std::vector<uint32_t> root(count);
+	std::iota(root.begin(), root.end(), 0u);
+	auto find = [&](uint32_t i)
+	{
+		while (root[i] != i)
+		{
+			root[i] = root[root[i]];
+			i = root[i];
+		}
+		return i;
+	};
+	const float linkSquared = linkDistance * linkDistance;
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		for (int32_t dx = -1; dx <= 1; ++dx)
+		{
+			for (int32_t dy = -1; dy <= 1; ++dy)
+			{
+				for (int32_t dz = -1; dz <= 1; ++dz)
+				{
+					const auto range = ranges.find(cellKey({ cells[i][0] + dx, cells[i][1] + dy, cells[i][2] + dz }));
+					if (range == ranges.end())
+					{
+						continue;
+					}
+					for (uint32_t k = range->second.first; k < range->second.second; ++k)
+					{
+						const uint32_t j = order[k];
+						// Each pair once.
+						if (j <= i)
+						{
+							continue;
+						}
+						const float3 d = positions[j] - positions[i];
+						if (d.x * d.x + d.y * d.y + d.z * d.z > linkSquared)
+						{
+							continue;
+						}
+						const uint32_t a = find(i);
+						const uint32_t b = find(j);
+						if (a != b)
+						{
+							root[std::max(a, b)] = std::min(a, b);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	std::vector<uint32_t> cluster(count);
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		const uint32_t r = find(i);
+		cluster[i] = r == i ? clusterCount++ : cluster[r];
+	}
+	return cluster;
+}
+
 void RenderGPUScene::SetEmissionScale(uint32_t emissiveInstance, float scale)
 {
 	scale = std::max(scale, 0.0f);

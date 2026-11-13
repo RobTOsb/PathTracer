@@ -548,6 +548,12 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 			ImGui::SetItemTooltip("The %u emissive bunnies flash on their own, the violet one like a broken light",
 								  lights.bunnyCount);
 		}
+		if (lights.clusterCount > 0)
+		{
+			ImGui::Checkbox("Flash light clusters", &lights.flashClusters);
+			ImGui::SetItemTooltip("The %u clusters of emitters switch on and off at their own random times",
+								  lights.clusterCount);
+		}
 		ImGui::BeginDisabled(lightCount == 0);
 		ImGui::Checkbox("Enabled", &lights.enabled);
 		EnumCombo("Sampling", kLightSamplingModes, lights.sampling);

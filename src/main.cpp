@@ -83,7 +83,8 @@ static float QueryDisplayPeakNits(void *hwnd)
 //constexpr const char *kDefaultScenePath = "h:\\landscape\\view-0.glb";
 //constexpr const char *kDefaultScenePath = "h:\\modern_apartment.glb";
 //constexpr const char *kDefaultScenePath = "h:\\LucyCheckerboard.glb";
-constexpr const char *kDefaultScenePath = "h:\\StressTest\\StressTest.glb";
+//constexpr const char *kDefaultScenePath = "h:\\StressTest\\StressTest.glb";
+constexpr const char *kDefaultScenePath = "H:\\PineForest\\PineForest.gltf";
 
 constexpr uint kFramesInFlight = 2;
 constexpr uint kSwapchainImageCount = 3;
@@ -379,6 +380,64 @@ std::vector<FlashingBunny> FindBunnies(const std::filesystem::path &scenePath, c
 	return bunnies;
 }
 
+// The stress test's swarms of emitters, as clusters of emissive instances: cluster c is members[first[c]] to
+// members[first[c + 1] - 1].
+struct LightClusters
+{
+	std::vector<uint32_t> first;
+	std::vector<uint32_t> members;
+	uint32_t Count() const { return first.empty() ? 0u : static_cast<uint32_t>(first.size() - 1); }
+};
+
+// Emitters closer than this are in one cluster. Within a swarm, neighbours are at most about 11 m apart, while
+// make_stress_scene.py keeps the swarms at least 15 m apart when they don't move.
+constexpr float kLightClusterLinkMetres = 13.0f;
+
+LightClusters FindLightClusters(const std::filesystem::path &scenePath, const RenderGPUScene &gpuScene)
+{
+	LightClusters clusters;
+	if (scenePath.stem() != "StressTest")
+	{
+		return clusters;
+	}
+	const auto start = std::chrono::steady_clock::now();
+	uint32_t count = 0;
+	const std::vector<uint32_t> clusterOf = gpuScene.ClusterEmissiveInstances(kLightClusterLinkMetres, count);
+	clusters.first.assign(count + 1, 0);
+	for (uint32_t c: clusterOf)
+	{
+		++clusters.first[c + 1];
+	}
+	for (uint32_t c = 0; c < count; ++c)
+	{
+		clusters.first[c + 1] += clusters.first[c];
+	}
+	clusters.members.resize(clusterOf.size());
+	std::vector<uint32_t> next(clusters.first.begin(), clusters.first.end() - 1);
+	for (uint32_t i = 0; i < static_cast<uint32_t>(clusterOf.size()); ++i)
+	{
+		clusters.members[next[clusterOf[i]]++] = i;
+	}
+	logi("Found {} light cluster(s) among {} emissive instance(s) in {:.2f} s",
+		 count,
+		 clusterOf.size(),
+		 std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count());
+	return clusters;
+}
+
+// Cluster c's emission: its own period of 1.5 to 6 s and phase, and each period on (60 %) or off by a hash, with a
+// 0.25 s fade from the last period's state into this one's.
+float ClusterFlash(uint32_t cluster, float seconds)
+{
+	const float period = 1.5f + 4.5f * Hash01(cluster * 3u + 1u);
+	const float t = seconds + period * Hash01(cluster * 3u + 2u);
+	const uint32_t episode = static_cast<uint32_t>(t / period);
+	auto on = [&](uint32_t e) { return Hash01((cluster * 0x9E3779B9u) ^ (e * 0x85EBCA6Bu + 0x27D4EB2Fu)) < 0.6f ? 1.0f : 0.0f; };
+	const float from = on(episode - 1u);
+	const float to = on(episode);
+	return from + (to - from) * SmoothStep(0.0f, 0.25f, t - static_cast<float>(episode) * period);
+}
+
 int Run(const char *scenePath)
 {
 	Window window(WindowDesc{ "PathTracer", 1920, 1080, true });
@@ -444,6 +503,11 @@ int Run(const char *scenePath)
 	settings.lights.bunnyCount = static_cast<uint32_t>(bunnies.size());
 	std::vector<float> bunnyScales(bunnies.size(), 1.0f);
 	float flashSeconds = 0.0f;
+
+	const LightClusters clusters = FindLightClusters(scenePath, gpuScene);
+	settings.lights.clusterCount = clusters.Count();
+	std::vector<float> clusterScales(clusters.Count(), 1.0f);
+	float clusterSeconds = 0.0f;
 
 	auto lastTime = std::chrono::steady_clock::now();
 	float animatedSeconds = -1.0f; // the time the scene was last posed at, none yet
@@ -571,6 +635,23 @@ int Run(const char *scenePath)
 			{
 				gpuScene.SetEmissionScale(bunnies[i].emissiveInstance, scale);
 				bunnyScales[i] = scale;
+				++settings.reference.restartCount;
+			}
+		}
+		if (settings.lights.flashClusters && settings.renderMode != RenderMode::Reference)
+		{
+			clusterSeconds += deltaSeconds;
+		}
+		for (uint32_t c = 0; c < clusters.Count(); ++c)
+		{
+			const float scale = settings.lights.flashClusters ? ClusterFlash(c, clusterSeconds) : 1.0f;
+			if (scale != clusterScales[c])
+			{
+				for (uint32_t k = clusters.first[c]; k < clusters.first[c + 1]; ++k)
+				{
+					gpuScene.SetEmissionScale(clusters.members[k], scale);
+				}
+				clusterScales[c] = scale;
 				++settings.reference.restartCount;
 			}
 		}

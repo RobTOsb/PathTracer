@@ -139,6 +139,8 @@ public:
 	// The emissive instances with a primitive of this material (its glTF index), in emissive instance order.
 	std::vector<uint32_t> FindEmissiveInstances(uint32_t materialIndex) const;
 
+	std::vector<uint32_t> ClusterEmissiveInstances(float linkDistance, uint32_t &clusterCount) const;
+
 	void SetEmissionScale(uint32_t emissiveInstance, float scale);
 
 	// Picks the current frame's set of TLASes and rebuilds it if the dynamic instances have moved since it was

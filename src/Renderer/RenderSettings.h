@@ -39,7 +39,7 @@ struct LightSettings
 	int glossyImportanceBounces = 1;
 	// Light tree: rank nodes by the SG lighting integrals of Tokuyoshi et al. (the SG_LIGHT_TREE permutation) rather
 	// than the cheap bound over the cone to each node, oriented by the normal. More accurate, far more code.
-	bool sgImportance = false;
+	bool sgImportance = true;
 	// Light tree, SG importance: nodes wholly above the horizon whose SG light is at least this sharp (squared
 	// distance over spatial variance) use the cheap point light form of the importance.
 	bool farFieldImportance = true;
@@ -49,12 +49,14 @@ struct LightSettings
 	int maxLeafLights = 4;
 	// Light tree: the share of the tree's light samples that select by power instead (defensive sampling), which
 	// bounds the noise of a light the tree's importance underrates. 0 for the tree alone.
-	float treePowerMix = 0.25f;
+	float treePowerMix = 0.0f;
 	// Intel Sponza's emissive bunnies flash on clocks of their own, one like a broken light, so that the light
 	// tree's lights change every frame. The main loop finds them (the checkbox shows only if it did) and holds
 	// them still in the reference.
 	bool flashBunnies = true;
 	uint32_t bunnyCount = 0;
+	bool flashClusters = true;
+	uint32_t clusterCount = 0;
 };
 
 // The scene's glTF animations (RenderGPUScene::Animate), which play together and loop, except in the reference.
@@ -299,7 +301,7 @@ struct RenderSettings
 	// refracts, so RR denoises that surface's texture detail as it would on screen instead of blurring
 	// it as the mirror's or glass's lighting.
 	bool primarySurfaceReplacement = true;
-	float psrMaxRoughness = 0.1f;
+	float psrMaxRoughness = 0.01f;
 	// Curved mirrors and glass keep PSR too, with motion vectors traced through them by ray differentials,
 	// unless they shrink the image of the surface they show by more than psrMaxMinification (linear).
 	bool psrCurvedSurfaces = true;
