@@ -102,10 +102,11 @@ struct FrameConstants
 	// leaves only the chains that barely bend the virtual image.
 	float psrMaxMinification;
 
-	// Geometric specular antialiasing of the opaque surfaces the camera sees (Tokuyoshi and Kaplanyan 2019):
-	// GGX alpha^2 grows by specularAAVariance times the squared turn of the vertex normals across the pixel,
-	// plus specularAANormalMapScale times the normal maps' variance from their mips (Toksvig), together at
-	// most specularAAMaxVariance. Zero turns either off.
+	// Geometric specular antialiasing of the surfaces the camera sees (Tokuyoshi and Kaplanyan 2019 / 2021): GGX
+	// alpha^2 grows along each axis by specularAAVariance times the covariance of the vertex normals' turn across the
+	// ray cone's footprint (FootprintSpecularAA), plus specularAANormalMapScale times the normal maps' variance from
+	// their mips (Toksvig), together at most specularAAMaxVariance per axis. Zero turns either off. Glass (not
+	// pass-through walls) only with specularAAGlass.
 	float specularAAVariance;
 	float specularAANormalMapScale;
 	float specularAAMaxVariance;
@@ -185,6 +186,11 @@ struct FrameConstants
 	// last direction turns as the camera moves (ReplacePrimarySurfaceWithSky). 0: the guides stay the surface's.
 	uint psrSky;
 	uint psrGuideSamples;
+	uint specularAAGlass; // see specularAAVariance
+	// The vertex normals' covariance widens only by the share the pixel cannot resolve, t^4 / (t^4 + t0^4) per axis for
+	// t its turn per pixel and t0 this (1 / the curvature radius in pixels that stays sharp). 0 = all of it.
+	float specularAAResolvedTurn;
+	uint2 specularAAPad;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -677,7 +683,7 @@ struct AutoExposureConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
-static_assert(sizeof(FrameConstants) == 848,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 864,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
 static_assert(sizeof(GpuMaterial) == 152,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,

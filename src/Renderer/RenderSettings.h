@@ -72,15 +72,19 @@ struct AnimationSettings
 	bool sceneCamera = true;
 };
 
-// Geometric specular antialiasing of the opaque surfaces the camera sees: glossy lobes widen by how much
-// the normals turn across the pixel, so highlights smaller than a pixel stop flickering with the jitter.
+// Geometric specular antialiasing of the surfaces the camera sees past mirrors and glass (PSR's chain)
 struct SpecularAASettings
 {
-	bool enabled = false;
+	bool enabled = true;
 	float strength = 1.0f; // scales the kernel, 1 = Tokuyoshi and Kaplanyan's
 	// The normal maps' variance as their mips average it away (Toksvig).
 	bool normalMaps = true;
-	float maxVariance = 0.18f; // cap on what is added to alpha^2
+	// Glass (not pass-through walls) widens too, which can turn its PSR off where it widens past PSR's roughness.
+	bool glass = true;
+	// Curvature radius in pixels above which the turn of the normals is left to the jitter (half widened there,
+	// ramping as radius^-4), so mirror balls stay sharp while thin tubes and ripples are prefiltered. 0 = widen all.
+	float sharpRadiusPixels = 4.0f;
+	float maxVariance = 0.18f; // cap on what is added to alpha^2, per axis
 };
 
 // Sky and aerial perspective of Hillaire 2020 (SkyAtmospherePass), lit by the sun. While it is on, the
@@ -214,7 +218,7 @@ struct RenderSettings
 	// Firefly clamp: each contribution of indirect light (more than one scattering away from the surface the
 	// camera sees, PSR's mirrors and glass and pass-throughs not counting) is scaled down to at most
 	// indirectClampValue in its largest channel. Biased darker.
-	bool clampIndirect = true;
+	bool clampIndirect = false;
 	float indirectClampValue = 5.0f;
 	// The same for direct light: what the surface the camera sees scatters, by light sampling or a sample of a
 	// lobe that is not mirror-like. Light the camera sees, also as a mirror-like surface's image, is not clamped.

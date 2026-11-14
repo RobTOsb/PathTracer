@@ -227,7 +227,7 @@ void TracePhoton(PhotonStart start, inout uint rng)
         TransferDifferential(db, dir, hit.t, hit.Ng);
 
         float3 wo = -dir;
-        OpenPBRBaseParams mat = LoadMaterial(hit, 0.0, false, IsSimpleMaterial(hit.materialId), float2(0.0, 0.0));
+        OpenPBRBaseParams mat = LoadMaterial(hit, 0.0, false, IsSimpleMaterial(hit.materialId), NoSpecularAA());
         // Faced to the incoming light as ShadeSurface faces surfaces to the viewer.
         bool opaque = mat.transmissionWeight <= 0.0 && !HasDiffuseTransmission(mat);
         if (opaque || mat.geometryThinWalled)

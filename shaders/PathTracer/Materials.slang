@@ -176,6 +176,78 @@ float WidenRoughness(float roughness, float variance)
     return sqrt(sqrt(min(r2 * r2 + variance, 1.0)));
 }
 
+// What LoadMaterial widens the specular lobes by. Zero for none.
+struct SpecularAA
+{
+    // The covariance of the vertex normals' turn across the ray cone's footprint, already times the kernel
+    // (FrameConstants::specularAAVariance): xx, xy, yy in the hit's shape frame (T, cross(N, T)).
+    float3 normalCovariance;
+    float normalMapScale; // times the normal maps' variance from their mips (Toksvig)
+};
+
+SpecularAA NoSpecularAA()
+{
+    SpecularAA aa;
+    aa.normalCovariance = float3(0.0, 0.0, 0.0);
+    aa.normalMapScale = 0.0;
+    return aa;
+}
+
+SpecularAA FootprintSpecularAA(HitInfo hit, float3 wo, float coneWidth)
+{
+    SpecularAA aa;
+    aa.normalMapScale = g_Frame.specularAANormalMapScale;
+    float3 B = cross(hit.N, hit.T);
+    float cosView = max(abs(dot(hit.N, wo)), 0.1);
+    float2 u = float2(dot(wo, hit.T), dot(wo, B)) / cosView;
+    float w2 = g_Frame.specularAAVariance * coneWidth * coneWidth;
+    float2x2 footprint = w2 * float2x2(1.0 + u.x * u.x, u.x * u.y, u.x * u.y, 1.0 + u.y * u.y);
+    float2x2 S = float2x2(hit.shape.x, hit.shape.y, hit.shape.z, hit.shape.w);
+    float2x2 C = mul(mul(S, footprint), transpose(S));
+    aa.normalCovariance = float3(C[0][0], 0.5 * (C[0][1] + C[1][0]), C[1][1]);
+    return aa;
+}
+
+float UnresolvedShare(float lambda)
+{
+    float t2 = lambda / max(g_Frame.specularAAVariance, 1.0e-20);
+    float t02 = g_Frame.specularAAResolvedTurn * g_Frame.specularAAResolvedTurn;
+    return t2 * t2 / max(t2 * t2 + t02 * t02, 1.0e-30);
+}
+
+void WidenSpecular(inout OpenPBRBaseParams p, inout HitInfo hit, bool simple, float lambda1, float lambda2, float3 major,
+                   float normalVariance)
+{
+    float maxVariance = g_Frame.specularAAMaxVariance;
+    if (simple)
+    {
+        // SimplifyMaterial drops anisotropy: the larger axis all round.
+        p.specularRoughness = WidenRoughness(p.specularRoughness, min(lambda1 + normalVariance, maxVariance));
+        return;
+    }
+
+    // GGXAlpha without its floor, so that adding nothing leaves the lobe as it was.
+    float r2 = p.specularRoughness * p.specularRoughness;
+    float oneMinusA = 1.0 - p.specularRoughnessAnisotropy;
+    float alphaT = r2 * sqrt(2.0 / (1.0 + oneMinusA * oneMinusA));
+    float alphaB = oneMinusA * alphaT;
+    if (p.specularRoughnessAnisotropy <= 0.0 && lambda1 > lambda2)
+        RotateTangent(hit, major);
+    float c2 = saturate(dot(major, hit.T) * dot(major, hit.T));
+    float alphaT2 = min(alphaT * alphaT + min(lerp(lambda2, lambda1, c2) + normalVariance, maxVariance), 1.0);
+    float alphaB2 = min(alphaB * alphaB + min(lerp(lambda1, lambda2, c2) + normalVariance, maxVariance), 1.0);
+    if (alphaB2 > alphaT2)
+    {
+        RotateTangent(hit, cross(hit.N, hit.T));
+        float swap = alphaT2;
+        alphaT2 = alphaB2;
+        alphaB2 = swap;
+    }
+    // Back through SetGltfAnisotropy's mapping, which GGXAlpha inverts.
+    p.specularRoughnessAnisotropy = alphaT2 > 0.0 ? 1.0 - sqrt(alphaB2 / alphaT2) : 0.0;
+    p.specularRoughness = sqrt(sqrt(0.5 * (alphaT2 + alphaB2)));
+}
+
 // Toksvig: a normal map's mips average its normals, which come out the shorter the more they spread.
 // Their variance as a vMF lobe of the averaged length, 2 * 0.25 / kappa for kappa = (3r - r^3) / (1 - r^2)
 // as in Filament, slopes scaled by the map's scale. The few thousandths an 8-bit, BC7-encoded normal
@@ -189,11 +261,11 @@ float NormalMapVariance(float3 averaged, float scale)
 // Reads the material row once, samples all of its textures and applies the normal map to hit.Ns.
 // The textures are filtered over the footprint of a ray cone coneWidth wide where it meets the surface.
 // simple: the row is GPU_MATERIAL_SIMPLE, so only the base's textures are read.
-// specularAA: geometric specular antialiasing of opaque surfaces, (variance of the vertex normals across
-// the pixel, scale of the normal maps' variance), zero for none.
+// specularAA: geometric specular antialiasing (FootprintSpecularAA), NoSpecularAA() for none. Pass-through thin walls
+// are left alone, and glass unless FrameConstants::specularAAGlass.
 // reduced: a hit deep in a diffuse path (FrameConstants::reducedMaterialDiffuseBounces), which skips the normal maps
 // and takes solid subsurface as the Lambertian stand-in.
-OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotropic, bool simple, float2 specularAA,
+OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotropic, bool simple, SpecularAA specularAA,
                                bool reduced = false)
 {
     MaterialData material = LoadGpuMaterial(hit.materialId);
@@ -201,13 +273,27 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     float2 ddx = hit.uvGradients.xy * coneWidth;
     float2 ddy = hit.uvGradients.zw * coneWidth;
 
+    // The vertex normals' covariance along its axes, lambda1 >= lambda2, the first along major (world space), taken
+    // in the shape frame before anisotropy turns the tangent.
+    float3 cov = specularAA.normalCovariance;
+    float halfTrace = 0.5 * (cov.x + cov.z);
+    float deviation = sqrt(0.25 * (cov.x - cov.z) * (cov.x - cov.z) + cov.y * cov.y);
+    float lambda1 = max(halfTrace + deviation, 0.0);
+    float lambda2 = max(halfTrace - deviation, 0.0);
+    lambda1 *= UnresolvedShare(lambda1);
+    lambda2 *= UnresolvedShare(lambda2);
+    float2 axis = cov.x >= cov.z ? float2(lambda1 - cov.z, cov.y) : float2(cov.y, lambda1 - cov.x);
+    float axisLengthSq = dot(axis, axis);
+    axis = axisLengthSq > 1.0e-20 ? axis * rsqrt(axisLengthSq) : float2(1.0, 0.0);
+    float3 major = hit.T * axis.x + cross(hit.N, hit.T) * axis.y;
+
     // Tangent-space normal map: +X along the tangent, +Y along the bitangent, +Z along N.
-    float normalVariance = specularAA.x;
+    float normalVariance = 0.0;
     if (!reduced && material.normalTexture != INVALIDDESCRIPTORHANDLE)
     {
         float3 tn = SampleTextureGrad(material.normalTexture, uv, ddx, ddy, anisotropic).xyz * 2.0 - 1.0;
-        if (specularAA.y > 0.0)
-            normalVariance += specularAA.y * NormalMapVariance(tn, material.normalScale);
+        if (specularAA.normalMapScale > 0.0)
+            normalVariance += specularAA.normalMapScale * NormalMapVariance(tn, material.normalScale);
         tn.y = -tn.y; // flip green channel (DirectX-style normal map convention)
         tn.xy *= material.normalScale;
         hit.Ns = normalize(hit.T * tn.x + hit.B * tn.y + hit.N * tn.z);
@@ -218,7 +304,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     float coatWeight = material.coatWeight;
     float coatRoughness = material.coatRoughness;
     float3 coatNormal = hit.N;
-    float coatNormalVariance = specularAA.x;
+    float coatNormalVariance = 0.0;
     if (!simple && coatWeight > 0.0)
     {
         if (material.coatWeightTexture != INVALIDDESCRIPTORHANDLE)
@@ -228,8 +314,8 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
         if (!reduced && material.coatNormalTexture != INVALIDDESCRIPTORHANDLE)
         {
             float3 tn = SampleTextureGrad(material.coatNormalTexture, uv, ddx, ddy, anisotropic).xyz * 2.0 - 1.0;
-            if (specularAA.y > 0.0)
-                coatNormalVariance += specularAA.y * NormalMapVariance(tn, material.coatNormalScale);
+            if (specularAA.normalMapScale > 0.0)
+                coatNormalVariance += specularAA.normalMapScale * NormalMapVariance(tn, material.coatNormalScale);
             tn.y = -tn.y;
             tn.xy *= material.coatNormalScale;
             coatNormal = normalize(hit.T * tn.x + hit.B * tn.y + hit.N * tn.z);
@@ -255,12 +341,12 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     bool thinWalled = (material.transmissionFlags & TRANSMISSION_THIN_WALLED) != 0;
     if (thinWalled && material.transmission > 0.0 && (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) == 0)
         roughness = max(roughness, 1.0e-4);
-    // Glass is left alone: its splits, pass-throughs and PSR depend on the material's own roughness.
-    if (transmission <= 0.0 && any(specularAA > 0.0))
-    {
-        roughness = WidenRoughness(roughness, min(normalVariance, g_Frame.specularAAMaxVariance));
-        coatRoughness = WidenRoughness(coatRoughness, min(coatNormalVariance, g_Frame.specularAAMaxVariance));
-    }
+    // A pass-through wall has no lobe to widen. Glass widens only if asked: its PSR depends on its roughness.
+    bool widen = (lambda1 > 0.0 || normalVariance > 0.0 || coatNormalVariance > 0.0) &&
+                 (transmission <= 0.0 || (g_Frame.specularAAGlass != 0 && (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) == 0));
+    // The coat's lobe is isotropic, so it takes the covariance's larger axis.
+    if (widen)
+        coatRoughness = WidenRoughness(coatRoughness, min(lambda1 + coatNormalVariance, g_Frame.specularAAMaxVariance));
 
     float anisotropyStrength = 0.0;
     float2 anisotropy = material.anisotropy;
@@ -279,10 +365,8 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
         // Mips average opposite directions towards zero; the rotation alone is the best guess there.
         float lengthSq = dot(direction, direction);
         direction = lengthSq > 1.0e-8 ? direction * rsqrt(lengthSq) : anisotropy * rsqrt(dot(anisotropy, anisotropy));
-        // The normal map's tangent space: glTF's +Y is -hit.B.
-        float3 T = hit.T * direction.x - hit.B * direction.y;
-        hit.B = hit.T * direction.y + hit.B * direction.x;
-        hit.T = T;
+        // The normal map's tangent space: glTF's +Y is -hit.B. The shape turns with it, for PSR's ray differentials.
+        RotateTangent(hit, hit.T * direction.x - hit.B * direction.y);
     }
 
     if (any(material.emissive > 0.0))
@@ -306,6 +390,8 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     SetGltfSpecular(p, specularWeight, specularColour);
     if (anisotropyStrength > 0.0)
         SetGltfAnisotropy(p, saturate(anisotropyStrength));
+    if (widen)
+        WidenSpecular(p, hit, simple, lambda1, lambda2, major, normalVariance);
     SetDiffuseRoughness(p);
     if (!simple && any(material.sheenColour > 0.0))
     {

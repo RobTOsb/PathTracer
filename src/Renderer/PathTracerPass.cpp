@@ -636,6 +636,8 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.specularAAVariance = specularAAEnabled ? 2.0f * 0.15915494f * std::max(specularAA.strength, 0.0f) : 0.0f;
 	constants.specularAANormalMapScale = specularAAEnabled && specularAA.normalMaps ? std::max(specularAA.strength, 0.0f) : 0.0f;
 	constants.specularAAMaxVariance = std::max(specularAA.maxVariance, 0.0f);
+	constants.specularAAGlass = specularAA.glass ? 1u : 0u;
+	constants.specularAAResolvedTurn = specularAA.sharpRadiusPixels > 0.0f ? 1.0f / specularAA.sharpRadiusPixels : 0.0f;
 
 	// Enough bits to tell every material row apart, up to the 16 that MaybeReorderThread honours.
 	uint hintBits = 0;
@@ -658,7 +660,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 			settings_.rayConeTextureLod ? exp2f(settings_.textureLodBias + upscalerBias) : 0.0f;
 	constants.anisotropicSegments = static_cast<uint>(std::max(settings_.anisotropicSegments, 0));
 	// TracePath counts splits in 7 bits.
-	constants.glassReflectionSplits = static_cast<uint>(std::clamp(settings_.glassReflectionSplits, 0, 127));
+	constants.glassReflectionSplits = static_cast<uint>(std::clamp(settings_.glassReflectionSplits, 0, 15));
 	constants.indirectClamp = settings_.clampIndirect && approximations ? std::max(settings_.indirectClampValue, 0.0f) : FLT_MAX;
 	constants.directClamp = settings_.clampDirect && approximations ? std::max(settings_.directClampValue, 0.0f) : FLT_MAX;
 	constants.opaqueAlphaDiffuseBounces = settings_.opaqueAlphaDiffuseBounces > 0 && approximations

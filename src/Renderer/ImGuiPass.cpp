@@ -616,13 +616,22 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		SpecularAASettings &specularAA = settings_.specularAA;
 		ImGui::BeginDisabled(unbiasedReference);
 		ImGui::Checkbox("Enabled##SpecularAA", &specularAA.enabled);
-		ImGui::SetItemTooltip("Widens the glossy lobes of opaque surfaces the camera sees by how much their normals "
-							  "turn across the pixel (DLSS-RR builds only), so sub-pixel highlights stop flickering");
+		ImGui::SetItemTooltip("Widens the glossy lobes of surfaces seen in mirrors and through glass (never the surface "
+							  "the camera sees directly, nor inside its object) along each axis by how much their normals "
+							  "turn across the pixel's footprint (DLSS-RR builds only), so sub-pixel detail in "
+							  "reflections and refractions stops speckling");
 		ImGui::BeginDisabled(!specularAA.enabled);
 		ImGui::SliderFloat("Strength##SpecularAA", &specularAA.strength, 0.0f, 4.0f, "%.2f");
 		ImGui::Checkbox("Normal map variance", &specularAA.normalMaps);
 		ImGui::SetItemTooltip("Toksvig: also widen by the spread of normals that a normal map's mips average away");
+		ImGui::Checkbox("Glass##SpecularAA", &specularAA.glass);
+		ImGui::SetItemTooltip("Also widen glass, so finely rippled or distant glass stops speckling. Glass widened past "
+							  "PSR's roughness limit loses its PSR guides there");
+		ImGui::SliderFloat("Sharp radius", &specularAA.sharpRadiusPixels, 0.0f, 32.0f, "%.1f px");
+		ImGui::SetItemTooltip("Curvature with a radius above this many pixels stays sharp (left to the jitter, as for "
+							  "mirror balls); tighter curvature, like thin tubes and ripples, is widened. 0 widens all");
 		ImGui::SliderFloat("Max alpha^2 added", &specularAA.maxVariance, 0.0f, 1.0f, "%.3f");
+		ImGui::SetItemTooltip("Cap on what each axis of the lobe's GGX alpha^2 grows by");
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 	}

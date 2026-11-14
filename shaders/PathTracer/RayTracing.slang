@@ -48,6 +48,22 @@ float HitMeanCurvature(HitInfo hit)
     return 0.5 * (hit.shape.x + hit.shape.w);
 }
 
+// Turns the hit's tangent frame about N to the unit tangent T (perpendicular to N), and its shape with it so that
+// NormalDerivative still holds. B keeps its handedness.
+void RotateTangent(inout HitInfo hit, float3 T)
+{
+    float3 B0 = cross(hit.N, hit.T);
+    float c = dot(T, hit.T);
+    float s = dot(T, B0);
+    float handedness = dot(hit.B, B0) < 0.0 ? -1.0 : 1.0;
+    // (a, b) along (T, cross(N, T)) become R (a, b) along the new pair, and the shape R S R^T.
+    float2x2 R = float2x2(c, s, -s, c);
+    float2x2 S = mul(mul(R, float2x2(hit.shape.x, hit.shape.y, hit.shape.z, hit.shape.w)), transpose(R));
+    hit.shape = float4(S[0][0], S[0][1], S[1][0], S[1][1]);
+    hit.T = T;
+    hit.B = cross(hit.N, T) * handedness;
+}
+
 // The shape of the hit with N turned around, which turns dN and cross(N, T) around with it.
 void FlipShape(inout HitInfo hit)
 {

@@ -38,8 +38,11 @@ static const uint PATH_DIFFUSE_BOUNCES_MASK = 0xF;
 static const uint PATH_MIRROR_SEGMENT = 0x2000;
 // A chain ended on a specular reflection, so the next hit gives the hit distance of the surface it ended on.
 static const uint PATH_END_HIT_PENDING = 0x8000;
-static const uint PATH_SPLITS_SHIFT = 16; // glass splits so far, 7 bits
-static const uint PATH_SPLITS_MASK = 0x7F;
+static const uint PATH_SPLITS_SHIFT = 16; // glass splits so far, 4 bits (bits 16..19)
+static const uint PATH_SPLITS_MASK = 0xF;
+// The path is inside the solid object the camera sees: it refracted into it at the camera's surface and has only
+// been reflected inside it since. Like the camera's surface itself, it takes no specular antialiasing.
+static const uint PATH_IN_SEEN_OBJECT = 0x400000;
 // Caustic photons (PathTracer/Photons.slang): where the path stands towards them, two bits (14 and 23) of PHOTON_*.
 static const uint PATH_PHOTON_LOW = 0x4000;
 static const uint PATH_PHOTON_HIGH = 0x800000;
@@ -306,16 +309,12 @@ SurfaceShading ShadeSurfaceBegin<let SIMPLE : bool>(HitPayload payload, float3 o
 
     // Blended surfaces were already taken or passed by chance in traversal (AnyHit), so this one is there.
 
-    // Specular antialiasing where the camera sees the surface: how far the vertex normals turn across
-    // the pixel's footprint, stretched by 1 / cos along the slope, and the normal maps' own spread.
-    float2 specularAA = float2(0.0, 0.0);
-    if (visible)
-    {
-        float turn = HitCurvature(hit) * cone.width;
-        float cosView = dot(hit.N, wo);
-        float stretch = 1.0 + 1.0 / max(cosView * cosView, 0.01);
-        specularAA = float2(g_Frame.specularAAVariance * turn * turn * stretch, g_Frame.specularAANormalMapScale);
-    }
+    // Specular antialiasing where the camera sees the surface past mirrors and glass (PSR's chain), never on the
+    // camera's own surface or inside the object it belongs to: how the vertex normals turn across the cone's
+    // footprint, stretched by 1 / cos along the view, and the normal maps' own spread.
+    SpecularAA specularAA = NoSpecularAA();
+    if (chainActive && !fromCamera && (flags & PATH_IN_SEEN_OBJECT) == 0)
+        specularAA = FootprintSpecularAA(hit, wo, cone.width);
     OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments,
                                          SIMPLE, specularAA, diffuseBounces >= g_Frame.reducedMaterialDiffuseBounces);
     if (frontFace && any(hit.emission > 0.0))
@@ -541,6 +540,8 @@ SurfaceOutcome ShadeSurfaceEnd<let SIMPLE : bool>(SurfaceShading shading, LightS
             segmentExtinction = extinction;
         else
             segmentExtinction = opaque || mat.geometryThinWalled ? float3(0.0, 0.0, 0.0) : ExteriorExtinction(hit.materialId);
+        bool intoSolid = !opaque && !mat.geometryThinWalled && dot(bs.wi, hit.Ng) < 0.0;
+        flags = SetFlag(flags, PATH_IN_SEEN_OBJECT, intoSolid && (fromCamera || (flags & PATH_IN_SEEN_OBJECT) != 0));
         dir = bs.wi;
     }
     // Lights the next segment finds come at full weight if this vertex left them to its BSDF sample, or,
@@ -947,7 +948,7 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
         bounce = flags >> DEFERRED_BOUNCE_SHIFT;
         uint deferredFlags = flags & DEFERRED_MASK;
         // Glass splits only where the camera sees, so every bounce before the branch is specular.
-        flags &= ~(DEFERRED_MASK | PATH_HIT_DISTANCE_PENDING | PATH_END_HIT_PENDING |
+        flags &= ~(DEFERRED_MASK | PATH_HIT_DISTANCE_PENDING | PATH_END_HIT_PENDING | PATH_IN_SEEN_OBJECT |
                    (PATH_DIFFUSE_BOUNCES_MASK << PATH_DIFFUSE_BOUNCES_SHIFT));
         // Both branches leave the glass the camera sees by a smooth lobe, so neither is the camera ray any more.
         flags = SetPhotonState(flags, PHOTON_NONE);
@@ -1000,14 +1001,13 @@ float TraceGuideHitDistance(float3 position, float3 N, float3 viewDir, float rou
 // the given transmittance; opacity is how much of it is there (LoadOpacity).
 // The material of a guide ray's hit as ShadeSurface sees it, a ray cone coneWidth wide there: opaque and thin-walled
 // surfaces faced to the viewer, solid glass left as it is, so its context knows the inside from the outside.
-void GuideMaterial(inout HitInfo hit, float3 wo, float coneWidth, out OpenPBRBaseParams mat, out OpenPBRContext ctx)
+// specularAA: as ShadeSurface widens it, past PSR's mirrors and glass but not on the camera's surface or inside its object.
+void GuideMaterial(inout HitInfo hit, float3 wo, float coneWidth, bool specularAA, out OpenPBRBaseParams mat,
+                   out OpenPBRContext ctx)
 {
     bool anisotropic = 0 < g_Frame.anisotropicSegments;
-    float turn = HitCurvature(hit) * coneWidth;
-    float cosView = dot(hit.N, wo);
-    float stretch = 1.0 + 1.0 / max(cosView * cosView, 0.01);
-    float2 specularAA = float2(g_Frame.specularAAVariance * turn * turn * stretch, g_Frame.specularAANormalMapScale);
-    mat = LoadMaterial(hit, coneWidth * g_Frame.textureLodScale, anisotropic, false, specularAA);
+    mat = LoadMaterial(hit, coneWidth * g_Frame.textureLodScale, anisotropic, false,
+                       specularAA ? FootprintSpecularAA(hit, wo, coneWidth) : NoSpecularAA());
 
     bool opaque = mat.transmissionWeight <= 0.0 && !HasDiffuseTransmission(mat);
     if (opaque || mat.geometryThinWalled)
@@ -1033,7 +1033,7 @@ PrimaryGuides SurfaceGuides(HitPayload payload, float3 origin, float3 dir, float
     opacity = LoadOpacity(hit, coneWidth * g_Frame.textureLodScale, 0 < g_Frame.anisotropicSegments);
     OpenPBRBaseParams mat;
     OpenPBRContext ctx;
-    GuideMaterial(hit, wo, coneWidth, mat, ctx);
+    GuideMaterial(hit, wo, coneWidth, false, mat, ctx);
 
     PrimaryGuides g = DefaultGuides(dir);
     g.position = float4(hit.position, 1.0);
@@ -1169,7 +1169,7 @@ PrimaryGuides WalkPsrGuideSample(float3 origin, float3 dir)
     float travelled = hit.t;
     OpenPBRBaseParams mat;
     OpenPBRContext ctx;
-    GuideMaterial(hit, -dir, g_Frame.rayConePixelSpread * travelled, mat, ctx);
+    GuideMaterial(hit, -dir, g_Frame.rayConePixelSpread * travelled, false, mat, ctx);
 
     // The camera's surface, whose own guides these are unless a chain starts here.
     PrimaryGuides own = DefaultGuides(dir);
@@ -1190,6 +1190,7 @@ PrimaryGuides WalkPsrGuideSample(float3 origin, float3 dir)
     float3 extinction = float3(0.0, 0.0, 0.0);
     uint budget = min(g_Frame.maxSpecularBounces, PSR_WALK_MAX_EVENTS);
     PrimaryGuides g = own;
+    bool inSeenObject = true;
     [loop]
     for (uint event = 0;; ++event)
     {
@@ -1226,6 +1227,8 @@ PrimaryGuides WalkPsrGuideSample(float3 origin, float3 dir)
             return g;
         }
 
+        // Still inside the object the camera sees (PATH_IN_SEEN_OBJECT).
+        inSeenObject = inSeenObject && !mat.geometryThinWalled && dot(dirOut, hit.Ng) < 0.0;
         origin = OffsetRay(hit.position, hit.Ng, dirOut);
         dir = dirOut;
         if (!TraceGuideSurface(origin, dir, 0.0, FLT_MAX, uint(INSTANCE_MASK_SOLID), payload))
@@ -1248,7 +1251,7 @@ PrimaryGuides WalkPsrGuideSample(float3 origin, float3 dir)
         hit = UnpackHit(payload, origin, dir);
         travelled += hit.t;
         throughput *= exp(-extinction * hit.t);
-        GuideMaterial(hit, -dir, g_Frame.rayConePixelSpread * travelled, mat, ctx);
+        GuideMaterial(hit, -dir, g_Frame.rayConePixelSpread * travelled, !inSeenObject, mat, ctx);
         float unused;
         if (!WalkPsrEvent(mat, ctx, reflection, unused))
         {
