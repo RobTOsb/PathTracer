@@ -419,12 +419,6 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 							  "on it, its detail then being finer than a pixel");
 		ImGui::EndDisabled();
 		ImGui::Checkbox("Chains into the sky", &settings_.psrSky);
-		ImGui::SliderInt("Deterministic chain guides", &settings_.psrGuideSamples, 0, 8,
-						 settings_.psrGuideSamples <= 0 ? "off" : "%d");
-		ImGui::SetItemTooltip("Pixels that see through mirrors and glass take their guides from chains walked along the "
-							  "ideal reflection and refraction from fixed points of the pixel, not from the path's "
-							  "jittered chain, so wavy glass's guides are the same every frame. 1 walks from the pixel's "
-							  "centre; more average over the pixel at that many times the cost");
 		ImGui::SetItemTooltip("A mirror or glass chain that leaves into the sky puts the sky in the guides' place, "
 							  "moving as the chain turns it, instead of keeping the mirror's or glass's own motion. "
 							  "Off: what such chains show (stars, distant lights through glass) moves with the surface");
@@ -668,6 +662,10 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 				ImGui::SetItemTooltip("How far the sky visibility ray looks for occluders, 0 for all the way to the sky. "
 									  "It is traced only on segments the camera looks along");
 			}
+			ImGui::Checkbox("Fog-aware guides", &atmosphere.fogGuides);
+			ImGui::SetItemTooltip("DLSS-RR's guides fade with the air's transmittance to the surface: towards a white "
+								  "albedo, no reflection and full roughness as haze covers it, so the haze's light is "
+								  "denoised as a smooth signal instead of lighting on the surface behind it");
 			ImGui::SliderFloat("Rayleigh scale", &atmosphere.rayleighScale, 0.0f, 10.0f, "%.2f");
 			ImGui::SliderFloat("Mie scale", &atmosphere.mieScale, 0.0f, 50.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
 			ImGui::SetItemTooltip("Aerosols: haze, and the glow around the sun");

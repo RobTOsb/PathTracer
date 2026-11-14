@@ -185,7 +185,10 @@ struct FrameConstants
 	// PSR: a chain that leaves into the sky puts the sky in the guides' place, with a motion vector from how its
 	// last direction turns as the camera moves (ReplacePrimarySurfaceWithSky). 0: the guides stay the surface's.
 	uint psrSky;
-	uint psrGuideSamples;
+	// DLSS_RR + ATMOSPHERE: the guides fade with the scene air's transmittance T to the guides' surface, as its
+	// in-scattered light takes over the pixel (FogGuides): diffuse albedo T a + (1 - T), specular albedo T a, roughness
+	// towards 1. 0 = off, the guides stay the surface's however much air is in front of it.
+	uint atmosphereFogGuides;
 	uint specularAAGlass; // see specularAAVariance
 	// The vertex normals' covariance widens only by the share the pixel cannot resolve, t^4 / (t^4 + t0^4) per axis for
 	// t its turn per pixel and t0 this (1 / the curvature radius in pixels that stays sharp). 0 = all of it.
@@ -632,7 +635,7 @@ enum PsrOutcome
 	PSR_OUTCOME_REFUSED_NO_DIFFERENTIALS = 5, // differentials lost (grazing hit or refraction, curved off) and curved
 	PSR_OUTCOME_REFUSED_INSIDE = 6, // the chain ended on a surface inside glass
 	PSR_OUTCOME_SKY = 7, // the chain left into the sky: replaced by it (psrSky), else the surface's guides stay
-	PSR_OUTCOME_CUT_SHORT = 8, // the path ended while the chain was open (bounce budget)
+	PSR_OUTCOME_CUT_SHORT = 8, // the path ended while the chain was open (bounce budget or Russian roulette)
 	PSR_OUTCOME_HELD = 9 // the chain broke by chance: last frame's guides and motion vectors stay
 };
 

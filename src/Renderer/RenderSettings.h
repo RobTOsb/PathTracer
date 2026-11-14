@@ -111,6 +111,10 @@ struct AtmosphereSettings
 	// How far the sky visibility ray looks for occluders, metres; 0 for all the way to the sky. Most of what keeps an
 	// enclosed space clear is close by, and a ray through all of a large scene costs as much as a light's shadow ray.
 	float skyVisibilityDistance = 250.0f;
+	// DLSS-RR's guides fade with the air's transmittance to the surface they describe, towards a white albedo (the air's
+	// in-scattered light, which no surface colours) and a rough, reflectionless surface, so thick haze is denoised as the
+	// smooth signal it is rather than as lighting on the surface behind it.
+	bool fogGuides = true;
 
 	// Scales of Earth's atmosphere.
 	float rayleighScale = 1.0f;
@@ -312,9 +316,6 @@ struct RenderSettings
 	float psrMaxMinification = 64.0f;
 	// A chain that leaves into the sky puts the sky in the guides' place (FrameConstants::psrSky).
 	bool psrSky = true;
-	// Pixels that followed a PSR chain take their guides from this many chains walked from fixed points of the pixel,
-	// 1 = the centre alone (FrameConstants::psrGuideSamples). 0 = the path's jittered chain.
-	int psrGuideSamples = 1;
 	// Past the camera's first surface, a chain through smooth glass always takes the lobe it follows, so its guides
 	// never hold last frame's; the other lobe's light (faint internal reflections) is left out.
 	bool psrStrongerLobe = true;

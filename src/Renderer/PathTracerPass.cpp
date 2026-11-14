@@ -693,7 +693,6 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 			settings_.holdSpecularHitDistance ? settings_.holdHitDistanceMaxRoughness : -1.0f;
 	constants.specularMotionMaxRoughness = settings_.specularMotionMaxRoughness;
 	constants.psrSky = settings_.psrSky ? 1u : 0u;
-	constants.psrGuideSamples = static_cast<uint>(std::clamp(settings_.psrGuideSamples, 0, 8));
 	// Only Preset F reads the mask, so no other preset pays for it.
 	if (settings_.rrPreset == DLSSRayReconstructionPreset::PresetF)
 	{
@@ -719,6 +718,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 		constants.atmosphereSkyVisibility = atmosphereSettings.skyVisibility ? 1u : 0u;
 		constants.atmosphereSkyVisibilityDistance =
 				atmosphereSettings.skyVisibilityDistance > 0.0f ? atmosphereSettings.skyVisibilityDistance : FLT_MAX;
+		constants.atmosphereFogGuides = atmosphereSettings.fogGuides ? 1u : 0u;
 		constants.clouds = atmosphere_.GetCloudParameters();
 	}
 	constants.frameIndex = renderContext->GetCurrentFrame();
