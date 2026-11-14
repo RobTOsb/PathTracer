@@ -192,6 +192,7 @@ uint OpacityMicromapRayFlags(uint bounce)
 #endif
 }
 
+[ForceInline]
 RaytracingAccelerationStructure SceneFor(uint rayFlags)
 {
 #ifdef OPACITY_MICROMAPS

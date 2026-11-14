@@ -11,6 +11,9 @@ import PathTracer.Resources;
 static const uint SHADOW_RAY_FLAGS = RAY_FLAG_NONE;
 
 // Visibility of the light from 0 (occluded) to 1 (unoccluded) per channel, in the given TLAS.
+// ForceInline: a resource parameter or return value is not allowed on a DXIL library function, and with
+// opacity micromaps both scenes passed here come from the descriptor heap, which Slang cannot specialise away.
+[ForceInline]
 float3 TraceShadowRayIn(RaytracingAccelerationStructure scene, float3 origin, float3 directionToLight, float tracingDistance)
 {
     RayDesc ray;
@@ -49,6 +52,7 @@ float3 TraceShadowRayIn(RaytracingAccelerationStructure scene, float3 origin, fl
 
 // The TLAS shadow rays trace: with micromaps, the one whose masks read them in 2-state mode (blended surfaces
 // keep 4-state there).
+[ForceInline]
 RaytracingAccelerationStructure ShadowScene()
 {
     return SceneFor(RAY_SCENE_OMM_2_STATE);
