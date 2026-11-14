@@ -52,6 +52,17 @@ static const uint CAMERA_CHAIN_DIFFERENTIALS = 4; // SpecularChain::differential
 static const uint CHAIN_END_REPLACEABLE = 1;
 static const uint CHAIN_END_SKY = 2;
 
+// A half3, then an unused half.
+uint2 PackHalf3(float3 v)
+{
+    return uint2(PackHalf2(v.xy), PackHalf2(float2(v.z, 0.0)));
+}
+
+float3 UnpackHalf3(uint2 p)
+{
+    return float3(UnpackHalf2(p.x), UnpackHalf2(p.y).x);
+}
+
 uint3 PackDifferential(RayDifferential r)
 {
     return uint3(PackHalf2(r.dP.xy), PackHalf2(float2(r.dP.z, r.dD.x)), PackHalf2(r.dD.yz));
@@ -81,7 +92,8 @@ GpuCameraGuides PackGuides(PrimaryGuides g)
     p.flags = (sky ? CAMERA_GUIDES_SKY : 0) | (g.hasMotion ? CAMERA_GUIDES_MOTION : 0) | (g.hold ? CAMERA_GUIDES_HOLD : 0) |
               (g.replaced ? CAMERA_GUIDES_REPLACED : 0) | (g.chainEnd ? CAMERA_GUIDES_CHAIN_END : 0) |
               (uint(round(saturate(g.blendOpacity) * 255.0)) << CAMERA_GUIDES_OPACITY_SHIFT);
-    // A chain's end has no displacement, a surface no motion vector of its own, so they share the space.
+    // Guides with a motion vector of their own come only from a chain RayGen replaces them with, after the path
+    // stores them for the last time, so here a surface's displacement and a motion vector share the space.
     p.motion = g.hasMotion ? asuint(g.motion) : uint2(PackHalf2(g.displacement.xy), PackHalf2(float2(g.displacement.z, 0.0)));
     return p;
 }
@@ -124,6 +136,7 @@ GpuSpecularChain PackChain(SpecularChain c)
     p.pixelU = PackDifferential(c.pixelU);
     p.pixelV = PackDifferential(c.pixelV);
     p.motion = PackDifferential(c.motion);
+    p.displacement = PackHalf3(c.displacement);
     return p;
 }
 
@@ -145,6 +158,7 @@ SpecularChain UnpackChain(GpuSpecularChain p)
     c.pixelU = UnpackDifferential(p.pixelU);
     c.pixelV = UnpackDifferential(p.pixelV);
     c.motion = UnpackDifferential(p.motion);
+    c.displacement = UnpackHalf3(p.displacement);
     return c;
 }
 
@@ -161,6 +175,7 @@ GpuChainEnd PackChainEnd(PsrChainEnd e)
     p.throughputScale = uint2(PackHalf2(e.throughputScale.xy), PackHalf2(float2(e.throughputScale.z, 0.0)));
     p.hitDistance = e.hitDistance;
     p.flags = (e.replaceable ? CHAIN_END_REPLACEABLE : 0) | (e.sky ? CHAIN_END_SKY : 0);
+    p.displacement = PackHalf3(e.displacement);
     return p;
 }
 
@@ -182,6 +197,7 @@ PsrChainEnd UnpackChainEnd(GpuChainEnd p)
     e.hitDistance = p.hitDistance;
     e.replaceable = (p.flags & CHAIN_END_REPLACEABLE) != 0;
     e.sky = (p.flags & CHAIN_END_SKY) != 0;
+    e.displacement = UnpackHalf3(p.displacement);
     return e;
 }
 

@@ -167,6 +167,10 @@ struct SpecularChain
     RayDifferential pixelV;
     RayDifferential motion;
     bool differentialsValid;
+    // Where the virtual point was last frame less where it is, for the events' own moves (moving mirrors and
+    // glass, ChainEventDisplacement); the end surface's move adds to it (ChainEndDisplacement). The camera's
+    // move is the motion differential's.
+    float3 displacement;
 };
 
 float4 QuaternionMultiply(float4 a, float4 b)
@@ -216,6 +220,13 @@ void AddPsrEvent(inout SpecularChain chain, HitInfo hit, float3 normal, bool thi
         TurnDifferential(chain.motion, hit, normal, dirIn, dirOut, reflection, eta);
     }
 
+    // The virtual space maps a point x past the event at E by A (x - E) + E, A the chain's transform there, which
+    // moves with E as far as A differs from the transform before it: (A_before - A_after) d_E. Exact for a moving
+    // object's translation, to first order for its turn.
+    float3 eventDisplacement = hit.motion;
+    bool eventMoved = any(eventDisplacement != 0.0);
+    float3 displacementBefore = eventMoved ? ApplySpecularChain(chain, eventDisplacement) : float3(0.0, 0.0, 0.0);
+
     // How much a turn of the normal turns the path: twice for a reflection (or a thin wall's mirrored
     // transmission), 1 - 1/eta for a refraction.
     float deflection;
@@ -234,6 +245,8 @@ void AddPsrEvent(inout SpecularChain chain, HitInfo hit, float3 normal, bool thi
         deflection = thinWalled ? 2.0 : abs(1.0 - 1.0 / ctxEta);
     }
     chain.pixelDeflection = max(chain.pixelDeflection, deflection * HitCurvature(hit) * pixelFootprint);
+    if (eventMoved)
+        chain.displacement += displacementBefore - ApplySpecularChain(chain, eventDisplacement);
 }
 
 // Starts the chain at the primary surface, hit primaryDistance from the camera along dirIn.
@@ -250,6 +263,7 @@ SpecularChain StartSpecularChain(OpenPBRBaseParams p, OpenPBRContext ctx, HitInf
     chain.length = 0.0;
     chain.pixelDeflection = 0.0;
     chain.throughGlass = !reflection && !p.geometryThinWalled;
+    chain.displacement = float3(0.0, 0.0, 0.0);
 
     // From the camera, through any panes on the way, which leave the direction alone.
     float3 u, v;
@@ -339,6 +353,7 @@ struct PsrChainEnd
     float hitDistance;
     bool replaceable; // not inside glass
     bool sky; // the last ray left into the sky, dir its direction: no surface, t, Ng or normal
+    float3 displacement; // the surface's move since last frame (HitInfo::motion), zero for the sky
 };
 
 // The chain's end where its last ray, along dir, left into the sky: what the guides take for the sky (DefaultGuides).
@@ -358,6 +373,7 @@ PsrChainEnd SkyChainEnd(float3 dir)
     end.hitDistance = SKY_HIT_DISTANCE;
     end.replaceable = true;
     end.sky = true;
+    end.displacement = float3(0.0, 0.0, 0.0);
     return end;
 }
 
@@ -440,15 +456,28 @@ bool ReplacePrimarySurface(SpecularChain chain, PsrChainEnd end, float3 cameraDi
                   : chain.differentialsValid ? PSR_OUTCOME_REFUSED_FOLD : PSR_OUTCOME_REFUSED_NO_DIFFERENTIALS;
         return false;
     }
+    // The virtual point moves with the end surface, seen through the chain, and with the events that moved (a
+    // glass or mirror on a moving object): all of it with a rigid one's chain. A flat chain's guides move by it
+    // like a surface's; a curved chain's motion vector is the camera's move alone, so the objects' is added to it,
+    // as last frame's camera would have seen it.
+    float4 virtualPosition = float4(guides.position.xyz + cameraDir * chain.length, 1.0);
+    float3 displacement = chain.displacement + ApplySpecularChain(chain, end.displacement);
+    if (hasMotion && any(displacement != 0.0))
+    {
+        float4 previousClip = mul(virtualPosition, g_Frame.prevViewProj);
+        float4 movedClip = mul(virtualPosition + float4(displacement, 0.0), g_Frame.prevViewProj);
+        if (previousClip.w > 0.0 && movedClip.w > 0.0)
+            motion += CalculateMotionVector(previousClip, movedClip, float2(DispatchRaysDimensions().xy));
+    }
     guides.hasMotion = hasMotion;
     guides.motion = motion;
-    guides.displacement = float3(0.0, 0.0, 0.0);
+    guides.displacement = displacement;
     guides.replaced = true;
 
     // The chain's transform is a rotation or reflection, which preserves the angle between the view and
     // the normal, so the reflectance seen in virtual space is the real one. What the primary surface shows
     // of the surface comes scaled by the chain's throughput, on top of the primary's own (small) diffuse part.
-    guides.position = float4(guides.position.xyz + cameraDir * chain.length, 1.0);
+    guides.position = virtualPosition;
     guides.normal = normalize(ApplySpecularChain(chain, end.normal));
     guides.roughness = end.roughness;
     guides.diffuseAlbedo += chain.throughput * end.diffuseAlbedo;

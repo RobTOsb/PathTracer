@@ -541,6 +541,7 @@ struct GpuSpecularChain
 	uint3 pixelU;
 	uint3 pixelV;
 	uint3 motion;
+	uint2 displacement; // half: the virtual point's displacement from the events' moves (SpecularChain), then unused
 };
 
 struct GpuPaneReflection
@@ -563,6 +564,7 @@ struct GpuChainEnd
 	uint2 throughputScale; // half: rgb, then unused
 	float hitDistance;
 	uint flags; // CHAIN_END_* in CameraState.slang
+	uint2 displacement; // half: the surface's HitInfo::motion, then unused
 };
 
 struct GpuCameraState
@@ -691,10 +693,10 @@ static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 
 static_assert(sizeof(GpuMaterial) == 152,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,
 			  "GpuVertex must match the structured buffer stride");
-static_assert(sizeof(GpuCameraGuides) == 48 && sizeof(GpuSpecularChain) == 76 && sizeof(GpuChainEnd) == 48 &&
+static_assert(sizeof(GpuCameraGuides) == 48 && sizeof(GpuSpecularChain) == 84 && sizeof(GpuChainEnd) == 56 &&
 				  sizeof(GpuPaneReflection) == 20,
 			  "GpuCameraState parts must match their HLSL layout");
-static_assert(sizeof(GpuCameraState) == 216, "GpuCameraState must match the structured buffer stride");
+static_assert(sizeof(GpuCameraState) == 232, "GpuCameraState must match the structured buffer stride");
 static_assert(sizeof(GpuDeferredBranch) == 44, "GpuDeferredBranch must match the structured buffer stride");
 static_assert(sizeof(TonemapConstants) == 52, "TonemapConstants must fit the root constants");
 static_assert(sizeof(GuideViewConstants) <= 16 * 4, "GuideViewConstants must fit the root constants");

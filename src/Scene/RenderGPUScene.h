@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -371,6 +372,53 @@ public:
 
 	void CollectPhotonCasters(float maxRoughness, std::vector<std::pair<float3, float3>> &bounds) const;
 
+	// The geometry counts the UI shows, from the last build of the BLASes and TLASes (so they follow
+	// SetMergeInstances). Unique counts are over the primitives some instance places.
+	struct GeometryStats
+	{
+		uint64_t uniquePrimitives = 0;
+		uint64_t uniqueTriangles = 0;
+		uint64_t uniqueVertices = 0;
+		uint64_t primitiveInstances = 0; // a primitive of a scene instance's mesh, the TLAS instances unmerged
+		uint64_t instancedTriangles = 0; // the triangles of every primitive instance
+		uint64_t tlasInstances = 0;
+		uint64_t blases = 0; // without the micromap twins
+		uint64_t micromapBlases = 0;
+		uint64_t prototypes = 0; // merged instances' multi-geometry BLASes
+		uint64_t mergedPrimitiveInstances = 0; // primitive instances inside a merged TLAS instance
+	};
+
+	const GeometryStats &GetGeometryStats() const
+	{
+		return geometryStats_;
+	}
+
+	uint32_t GetTextureCount() const
+	{
+		return static_cast<uint32_t>(textures_.size());
+	}
+
+	uint32_t GetOpacityMicromapCount() const
+	{
+		return opacityMicromapCount_;
+	}
+
+	uint32_t GetSceneCameraCount() const
+	{
+		return static_cast<uint32_t>(sceneCameras_.size());
+	}
+
+	// The file the scene was loaded from, for the UI.
+	const std::string &GetName() const
+	{
+		return name_;
+	}
+
+	void SetName(std::string name)
+	{
+		name_ = std::move(name);
+	}
+
 private:
 	// One TLAS instance: a primitive of a scene instance's mesh.
 	struct TLASInstanceRef
@@ -666,4 +714,8 @@ private:
 
 	float3 boundsMin_ = { 0.0f, 0.0f, 0.0f };
 	float3 boundsMax_ = { 0.0f, 0.0f, 0.0f };
+
+	GeometryStats geometryStats_;
+	uint32_t opacityMicromapCount_ = 0; // ommMicromaps_.size() before BuildAccelerationStructures released them
+	std::string name_;
 };

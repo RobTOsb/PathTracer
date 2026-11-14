@@ -173,6 +173,126 @@ namespace
 							"Process: everything, swap chain and pipelines included.");
 	}
 
+	struct CountString
+	{
+		char text[32];
+	};
+
+	// With thousands separators: 2,500,000,000.
+	CountString FormatCount(uint64_t count)
+	{
+		char digits[24];
+		const int length = snprintf(digits, sizeof(digits), "%llu", static_cast<unsigned long long>(count));
+		CountString result;
+		int out = 0;
+		for (int i = 0; i < length; ++i)
+		{
+			if (i > 0 && (length - i) % 3 == 0)
+			{
+				result.text[out++] = ',';
+			}
+			result.text[out++] = digits[i];
+		}
+		result.text[out] = '\0';
+		return result;
+	}
+
+	void BeginStatRow(const char *name, const char *tooltip)
+	{
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn();
+		ImGui::TextUnformatted(name);
+		if (tooltip)
+		{
+			ImGui::SetItemTooltip("%s", tooltip);
+		}
+		ImGui::TableNextColumn();
+	}
+
+	void CountRow(const char *name, uint64_t count, const char *tooltip = nullptr)
+	{
+		BeginStatRow(name, tooltip);
+		ImGui::TextUnformatted(FormatCount(count).text);
+	}
+
+	void SceneUI(const RenderGPUScene &scene)
+	{
+		if (!scene.GetName().empty())
+		{
+			ImGui::TextUnformatted(scene.GetName().c_str());
+		}
+
+		const RenderGPUScene::GeometryStats &stats = scene.GetGeometryStats();
+		constexpr ImGuiTableFlags tableFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp;
+		if (ImGui::BeginTable("SceneStats", 2, tableFlags))
+		{
+			CountRow("Scene instances",
+					 scene.GetInstanceCount(),
+					 "Mesh nodes in the scene, each placing its mesh's primitives");
+			CountRow("Meshes", scene.GetMeshDescCount());
+			CountRow("Unique primitives",
+					 stats.uniquePrimitives,
+					 "Mesh primitives some instance places, each a BLAS of its own unmerged");
+			CountRow("Unique triangles",
+					 stats.uniqueTriangles,
+					 "Triangles stored once per primitive, however many times it is placed");
+			CountRow("Unique vertices", stats.uniqueVertices);
+			CountRow("Primitive instances",
+					 stats.primitiveInstances,
+					 "Every primitive of every scene instance: the TLAS instances without merging");
+			CountRow("Instanced triangles",
+					 stats.instancedTriangles,
+					 "Triangles summed over every placement, what the scene would be if nothing were shared");
+			if (stats.uniqueTriangles > 0)
+			{
+				BeginStatRow("Instancing ratio", "Instanced triangles per unique triangle");
+				ImGui::Text("%.1fx",
+							static_cast<double>(stats.instancedTriangles) / static_cast<double>(stats.uniqueTriangles));
+			}
+			CountRow("TLAS instances", stats.tlasInstances);
+			CountRow("BLASes", stats.blases, "Per primitive placed on its own, plus one per merged prototype");
+			if (stats.prototypes > 0)
+			{
+				CountRow("Merged prototypes",
+						 stats.prototypes,
+						 "Multi-geometry BLASes standing for co-located static parts");
+				CountRow("Merged placements",
+						 stats.mergedPrimitiveInstances,
+						 "Primitive instances inside a merged TLAS instance");
+			}
+			if (stats.micromapBlases > 0)
+			{
+				CountRow("Micromap BLASes",
+						 stats.micromapBlases,
+						 "Twins of the alpha-tested BLASes with their opacity micromaps linked");
+				CountRow("Opacity micromaps", scene.GetOpacityMicromapCount());
+			}
+			CountRow("Materials", scene.GetMaterialCount(), "Including the default material");
+			CountRow("Textures", scene.GetTextureCount());
+			CountRow("Triangle lights", scene.GetTriangleLightCount(), "Emissive triangles, counted per placement");
+			if (scene.GetTriangleLightCount() > scene.GetStaticLightCount())
+			{
+				CountRow("Dynamic triangle lights", scene.GetTriangleLightCount() - scene.GetStaticLightCount());
+			}
+			CountRow("Emissive instances", scene.GetEmissiveInstanceCount());
+			CountRow("Point lights", scene.GetPointLightCount());
+			if (scene.HasAnimation())
+			{
+				CountRow("Animated instances", scene.GetDynamicInstanceCount());
+				BeginStatRow("Animation length", nullptr);
+				ImGui::Text("%.2f s", scene.GetAnimationDuration());
+			}
+			if (scene.GetSceneCameraCount() > 0)
+			{
+				CountRow("Cameras", scene.GetSceneCameraCount());
+			}
+			const float3 size = scene.GetBoundsMax() - scene.GetBoundsMin();
+			BeginStatRow("Bounds", "World-space size of the instanced geometry");
+			ImGui::Text("%.1f x %.1f x %.1f", size.x, size.y, size.z);
+			ImGui::EndTable();
+		}
+	}
+
 	void ProfileRow(RenderContext *renderContext, const char *scope)
 	{
 		if (const GPUProfileScopeStats *stats = renderContext->GetProfileScopeStats(scope))
@@ -279,6 +399,11 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	// Without the approximations the reference ignores the firefly clamp and specular antialiasing settings.
 	const bool reference = settings_.renderMode == RenderMode::Reference;
 	const bool unbiasedReference = reference && !settings_.reference.approximations;
+
+	if (ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		SceneUI(scene_);
+	}
 
 	if (ImGui::CollapsingHeader("Render mode", ImGuiTreeNodeFlags_DefaultOpen))
 	{

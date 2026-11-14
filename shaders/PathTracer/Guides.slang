@@ -27,7 +27,8 @@ struct PrimaryGuides
     float2 motion;
     bool hasMotion;
     // Where the surface's point was last frame less where it is: a moving object's (HitInfo::motion), zero for
-    // a static one and for a chain's end. Without its own motion vector, the guides' point moves by it.
+    // a static one; for PSR's virtual point, that of the chain's end and moving events (ReplacePrimarySurface).
+    // Without its own motion vector, the guides' point moves by it.
     float3 displacement;
     // PSR swapped the primary surface for the one a chain ends on (ReplacePrimarySurface), so position is virtual.
     bool replaced;

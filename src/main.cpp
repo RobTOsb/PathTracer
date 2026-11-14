@@ -74,7 +74,7 @@ static float QueryDisplayPeakNits(void *hwnd)
 //constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\crown\\gltf\\crown_extended.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\TransmissionThinwallTestGrid\\glTF-Binary\\TransmissionThinwallTestGrid.glb";
-//constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
+constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
 //constexpr const char *kDefaultScenePath = "h:\\suntemple.glb";
 //constexpr const char *kDefaultScenePath = "h:\\SanMiguel.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\SubsurfaceScene\\scene.gltf";
@@ -84,7 +84,7 @@ static float QueryDisplayPeakNits(void *hwnd)
 //constexpr const char *kDefaultScenePath = "h:\\modern_apartment.glb";
 //constexpr const char *kDefaultScenePath = "h:\\LucyCheckerboard.glb";
 //constexpr const char *kDefaultScenePath = "h:\\StressTest\\StressTest.glb";
-constexpr const char *kDefaultScenePath = "H:\\PineForest\\PineForest.gltf";
+//constexpr const char *kDefaultScenePath = "H:\\PineForest\\PineForest.gltf";
 
 constexpr uint kFramesInFlight = 2;
 constexpr uint kSwapchainImageCount = 3;
@@ -452,6 +452,7 @@ int Run(const char *scenePath)
 	{
 		return 1;
 	}
+	gpuScene.SetName(std::filesystem::path(scenePath).filename().string());
 
 	// The acceleration structures are built once in their own submission before the first frame.
 	// Animating the scene then only rebuilds the TLASes of the frames that trace it in a new pose.

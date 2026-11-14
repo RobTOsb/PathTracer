@@ -599,6 +599,7 @@ SurfaceOutcome ShadeSurfaceEnd<let SIMPLE : bool>(SurfaceShading shading, LightS
             end.hitDistance = InitialSpecularHitDistance(end.roughness);
             end.replaceable = !ctx.inside;
             end.sky = false;
+            end.displacement = hit.motion;
             StoreChainEnd(end);
             flags = SetFlag(flags, PATH_END_HIT_PENDING, end.replaceable && specularReflection);
         }

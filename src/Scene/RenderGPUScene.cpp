@@ -2775,6 +2775,7 @@ void RenderGPUScene::BuildAccelerationStructures()
 	if (micromaps && !ommMicromaps_.empty())
 	{
 		ommArray_ = renderContext_->CreateOpacityMicromapArray(ommData_, ommMicromaps_);
+		opacityMicromapCount_ = static_cast<uint32_t>(ommMicromaps_.size());
 	}
 	std::vector<uint8_t>().swap(ommData_);
 	std::vector<OpacityMicromap>().swap(ommMicromaps_);
@@ -3109,6 +3110,40 @@ void RenderGPUScene::BuildInstanceStructures()
 		omm2StateTlasInstances.push_back(tlasInstance);
 		tlasRefs.push_back(ref);
 		refOfTlasInstance.push_back(r);
+	}
+
+	// The counts the UI shows.
+	{
+		GeometryStats stats;
+		std::vector<uint8_t> placed(primitiveDescs.size(), 0);
+		for (const TLASInstanceRef &ref: refs)
+		{
+			stats.instancedTriangles += primitiveDescs[ref.primitive].indexCount / 3;
+			placed[ref.primitive] = 1;
+		}
+		for (size_t p = 0; p < primitiveDescs.size(); ++p)
+		{
+			if (placed[p])
+			{
+				++stats.uniquePrimitives;
+				stats.uniqueTriangles += primitiveDescs[p].indexCount / 3;
+				stats.uniqueVertices += primitiveDescs[p].vertexCount;
+			}
+		}
+		auto built = [](const std::vector<AccelerationStructureHandle> &list)
+		{
+			return static_cast<uint64_t>(std::count_if(list.begin(),
+													   list.end(),
+													   [](AccelerationStructureHandle h)
+													   { return h != InvalidAccelerationStructureHandle; }));
+		};
+		stats.primitiveInstances = refs.size();
+		stats.tlasInstances = tlasInstances.size();
+		stats.blases = built(blases_) + built(prototypeBlases_);
+		stats.micromapBlases = built(ommBlases_) + built(prototypeOmmBlases_);
+		stats.prototypes = prototypes.size();
+		stats.mergedPrimitiveInstances = mergedRefs;
+		geometryStats_ = stats;
 	}
 
 	if (tlasInstances.empty())
