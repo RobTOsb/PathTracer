@@ -115,6 +115,12 @@ struct AtmosphereSettings
 	// in-scattered light, which no surface colours) and a rough, reflectionless surface, so thick haze is denoised as the
 	// smooth signal it is rather than as lighting on the surface behind it.
 	bool fogGuides = true;
+	// Next event estimation also samples the sky without the sun disc, in proportion to its luminance (an importance
+	// map rebuilt each frame), and weighs it against BSDF sampling, rather than leaving the sky to BSDF sampling alone.
+	// The sun and the sky split their samples by their estimated irradiance at each vertex (EnvironmentProbabilities),
+	// the sky keeping at least skySampleShare of them (all of them once the sun has set).
+	bool skySampling = true;
+	float skySampleShare = 0.1f;
 
 	// Scales of Earth's atmosphere.
 	float rayleighScale = 1.0f;

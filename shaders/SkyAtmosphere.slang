@@ -22,6 +22,9 @@ static const uint kCloudDetailNoiseSize = CLOUD_DETAIL_NOISE_SIZE;
 static const uint kCloudWeatherMapSize = CLOUD_WEATHER_MAP_SIZE;
 static const uint kCloudShadowMapSize = CLOUD_SHADOW_MAP_SIZE;
 static const uint kCloudPanoramaSize = CLOUD_PANORAMA_SIZE;
+static const uint kSkyImportanceSize = SKY_IMPORTANCE_SIZE;
+static const uint kSkyImportanceLevels = SKY_IMPORTANCE_LEVELS;
+static const uint kSkyImportanceCount = SKY_IMPORTANCE_COUNT;
 
 // Distance from r0 along rd to the nearest intersection with the sphere at s0 of radius sR, or -1
 // if there is none.
@@ -230,4 +233,39 @@ float2 SkyViewLutUvFromDirection(float bottomRadius, float viewHeight, float3 di
 
     bool intersectGround = RaySphereIntersectNearest(float3(0.0, viewHeight, 0.0), dir, float3(0.0, 0.0, 0.0), bottomRadius) >= 0.0;
     return SkyViewLutUv(bottomRadius, viewHeight, intersectGround, dir.y, lightViewCosAngle);
+}
+
+// Equal-area octahedral map (Clarberg 2008) of the directions (+Y up) onto the unit square: the upper hemisphere fills
+// the inner diamond, the lower the four corners, and every texel spans the same solid angle, 4 pi / texels. The sky
+// importance map's parameterisation.
+float2 SkyImportanceUv(float3 dir)
+{
+    float r = sqrt(saturate(1.0 - abs(dir.y)));
+    float phi = atan2(abs(dir.z), abs(dir.x)); // [0, pi / 2]
+    float2 p;
+    p.y = r * phi * (2.0 / kAtmospherePi);
+    p.x = r - p.y;
+    if (dir.y < 0.0)
+        p = 1.0 - p.yx;
+    p *= float2(dir.x >= 0.0 ? 1.0 : -1.0, dir.z >= 0.0 ? 1.0 : -1.0);
+    return p * 0.5 + 0.5;
+}
+
+float3 SkyImportanceDirection(float2 uv)
+{
+    float2 p = uv * 2.0 - 1.0;
+    float d = 1.0 - (abs(p.x) + abs(p.y));
+    float r = 1.0 - abs(d);
+    float phi = r > 0.0 ? ((abs(p.y) - abs(p.x)) / r + 1.0) * (0.25 * kAtmospherePi) : 0.0;
+    float f = r * sqrt(max(2.0 - r * r, 0.0));
+    return float3(f * (p.x >= 0.0 ? 1.0 : -1.0) * cos(phi), (d >= 0.0 ? 1.0 : -1.0) * (1.0 - r * r),
+                  f * (p.y >= 0.0 ? 1.0 : -1.0) * sin(phi));
+}
+
+// Entry of texel in level (0 = the SKY_IMPORTANCE_SIZE^2 texels) of the sky importance pyramid: the levels follow each
+// other row-major, so a level starts after (size^2 - width^2) * 4 / 3 entries for width its side.
+uint SkyImportanceIndex(uint level, uint2 texel)
+{
+    uint width = kSkyImportanceSize >> level;
+    return (kSkyImportanceSize * kSkyImportanceSize - width * width) / 3u * 4u + texel.y * width + texel.x;
 }

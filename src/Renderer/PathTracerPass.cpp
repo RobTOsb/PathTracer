@@ -605,8 +605,9 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.sunRadiance = sunIsDelta ? irradiance : irradiance * (1.0f / solidAngle);
 	constants.sunPdf = sunIsDelta ? 1.0f : 1.0f / solidAngle;
 
-	// Split next event estimation evenly between the sun and the light buffer when both emit,
-	// otherwise give it all to whichever does.
+	// Split next event estimation evenly between the environment (the sun and the sky) and the light buffer when both
+	// emit, otherwise give it all to whichever does. The sky's share of the environment's is its minimum, which each
+	// vertex raises by the sky's and the sun's irradiance there (EnvironmentProbabilities), all of it once the sun has set.
 	const LightSettings &lights = settings_.lights;
 	const bool atmosphere = atmosphere_.IsEnabled();
 	const bool sunActive = std::max({ irradiance.x, irradiance.y, irradiance.z }) > 0.0f &&
@@ -621,7 +622,14 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	constants.lightTreeLeafSize = scene_.GetLightTreeLeafSize();
 	constants.lightTreeOrigin = scene_.GetLightTreeOrigin();
 	constants.lightTreeStep = scene_.GetLightTreeStep();
-	constants.sunSelectProbability = sunActive ? (lightsActive ? 0.5f : 1.0f) : 0.0f;
+	const uint skyImportance = atmosphere ? atmosphere_.GetSkyImportance() : INVALIDDESCRIPTORHANDLE;
+	const bool skyActive = skyImportance != INVALIDDESCRIPTORHANDLE && settings_.atmosphere.skySampleShare > 0.0f &&
+						   std::max({ irradiance.x, irradiance.y, irradiance.z }) > 0.0f;
+	const float environmentProbability = sunActive || skyActive ? (lightsActive ? 0.5f : 1.0f) : 0.0f;
+	const float skyShare = !skyActive ? 0.0f : sunActive ? std::clamp(settings_.atmosphere.skySampleShare, 0.0f, 1.0f) : 1.0f;
+	constants.skyImportance = skyActive ? skyImportance : INVALIDDESCRIPTORHANDLE;
+	constants.skySelectProbability = environmentProbability * skyShare;
+	constants.sunSelectProbability = sunActive ? environmentProbability - constants.skySelectProbability : 0.0f;
 	constants.lightTreeGlossyBounces = static_cast<uint>(std::max(lights.glossyImportanceBounces, 0));
 	constants.lightTreeFarFieldSharpness = lights.farFieldImportance ? lights.farFieldSharpness : FLT_MAX;
 	constants.lightTreeDiffuseOnlyAlpha = lights.diffuseOnlyRoughLobes

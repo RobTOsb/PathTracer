@@ -857,14 +857,19 @@ float3 TracePath(float3 origin, float3 dir, inout uint rng)
                 // A ray inside a medium that finds no way out ends there.
                 if (!inMedium)
                 {
-                    // The sky is never light sampled, so BSDF sampling gets its full contribution. The sun disc is
-                    // also reached by NEE, so weight it against light sampling.
+                    // The sun disc and the sky are also reached by NEE, unless the segment left a vertex that took no
+                    // light sample, so weight each against its light sampling.
                     // The sun through glass after a diffuse bounce from where the photons were read is theirs.
+                    const bool misWeighted = !fromCamera && !smoothSegment;
+                    const float2 environment = misWeighted ? EnvironmentProbabilities(UnpackLightSelectVertex(prevVertex))
+                                                           : float2(0.0, 0.0);
                     float3 Lsun = PhotonState(flags) == PHOTON_COVERED ? float3(0.0, 0.0, 0.0) : SunRadiance(dir);
                     if (any(Lsun > 0.0))
-                        Lsun *= fromCamera || smoothSegment ? 1.0 : PowerHeuristic(prevBsdfPdf, LightPdf(origin, dir, hit));
+                        Lsun *= misWeighted ? PowerHeuristic(prevBsdfPdf, SunLightPdf(environment.x, dir)) : 1.0;
+                    float skyPdf = misWeighted ? SkyLightPdf(environment.y, dir) : 0.0;
+                    float skyWeight = skyPdf > 0.0 ? PowerHeuristic(prevBsdfPdf, skyPdf) : 1.0;
                     bool seen = SeenSegment(flags, fromCamera, chainActive);
-                    float3 sky = SkyRadiance(origin, dir, Lsun, fromCamera || chainActive, seen, rng);
+                    float3 sky = SkyRadiance(origin, dir, Lsun, skyWeight, fromCamera || chainActive, seen, rng);
                     radiance += ClampFirefly(throughput * FireflyFilter(sky, seen, fireflyK), seen,
                                              DirectSegment(flags, fromCamera, chainActive));
                 }

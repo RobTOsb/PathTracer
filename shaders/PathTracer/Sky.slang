@@ -74,13 +74,111 @@ float CloudShadow(float3 position)
 #endif
 }
 
-// Radiance from beyond the scene along a ray from origin that leaves it: the sky and the light of the sun disc
-// already weighted for MIS (sun), with the clouds in front. Rays the camera sees through (view) march the clouds in
+// Solid angle PDF of SampleSkyImportance producing dir: its texel's share of the sky importance pyramid's total over the
+// texel's 4 pi / texels of solid angle. 0 without the pyramid or with a black sky.
+float SkyImportancePdf(float3 dir)
+{
+#ifdef ATMOSPHERE
+    if (g_Frame.skyImportance == INVALIDDESCRIPTORHANDLE)
+        return 0.0;
+    RWStructuredBuffer<float> pyramid = ResourceDescriptorHeap[g_Frame.skyImportance];
+    float total = pyramid[kSkyImportanceCount - 1u];
+    if (!(total > 0.0))
+        return 0.0;
+    uint2 texel = min(uint2(SkyImportanceUv(dir) * float(kSkyImportanceSize)), kSkyImportanceSize - 1u);
+    return pyramid[SkyImportanceIndex(0u, texel)] / total *
+           (float(kSkyImportanceSize * kSkyImportanceSize) / (4.0 * kAtmospherePi));
+#else
+    return 0.0;
+#endif
+}
+
+// The sky's luminance irradiance on a surface open to it, roughly: the pyramid's integral over the sphere
+// (total * 4 pi / texels) times a quarter, which an even sky's cosine-weighted hemisphere would give. 0 without the
+// pyramid.
+float SkyIrradianceEstimate()
+{
+#ifdef ATMOSPHERE
+    if (g_Frame.skyImportance == INVALIDDESCRIPTORHANDLE)
+        return 0.0;
+    RWStructuredBuffer<float> pyramid = ResourceDescriptorHeap[g_Frame.skyImportance];
+    return max(pyramid[kSkyImportanceCount - 1u], 0.0) * (kAtmospherePi / float(kSkyImportanceSize * kSkyImportanceSize));
+#else
+    return 0.0;
+#endif
+}
+
+// A direction towards the sky in proportion to its luminance without the sun disc (hierarchical sample warping):
+// from the pyramid's top, u picks one of the 2 x 2 children of the texel so far by their sums, first the column and
+// then the row, and is stretched back over [0, 1) each time, down to a texel that it then places the direction in.
+// False without the pyramid or with a black sky.
+bool SampleSkyImportance(float2 u, out float3 dir, out float pdf)
+{
+    dir = float3(0.0, 1.0, 0.0);
+    pdf = 0.0;
+#ifdef ATMOSPHERE
+    if (g_Frame.skyImportance == INVALIDDESCRIPTORHANDLE)
+        return false;
+    RWStructuredBuffer<float> pyramid = ResourceDescriptorHeap[g_Frame.skyImportance];
+    float total = pyramid[kSkyImportanceCount - 1u];
+    if (!(total > 0.0))
+        return false;
+    uint2 texel = uint2(0u, 0u);
+    [loop]
+    for (int level = int(kSkyImportanceLevels) - 2; level >= 0; --level)
+    {
+        texel *= 2u;
+        uint corner = SkyImportanceIndex(uint(level), texel);
+        uint width = kSkyImportanceSize >> uint(level);
+        float w00 = pyramid[corner];
+        float w10 = pyramid[corner + 1u];
+        float w01 = pyramid[corner + width];
+        float w11 = pyramid[corner + width + 1u];
+        float left = w00 + w01;
+        float right = w10 + w11;
+        float pLeft = left / max(left + right, 1.0e-30);
+        float pTop;
+        if (u.x < pLeft)
+        {
+            u.x /= pLeft;
+            pTop = w00 / max(left, 1.0e-30);
+        }
+        else
+        {
+            u.x = (u.x - pLeft) / (1.0 - pLeft);
+            texel.x += 1u;
+            pTop = w10 / max(right, 1.0e-30);
+        }
+        if (u.y < pTop)
+        {
+            u.y /= pTop;
+        }
+        else
+        {
+            u.y = (u.y - pTop) / (1.0 - pTop);
+            texel.y += 1u;
+        }
+        u = min(u, 0.99999994);
+    }
+    float w = pyramid[SkyImportanceIndex(0u, texel)];
+    if (!(w > 0.0))
+        return false;
+    dir = normalize(SkyImportanceDirection((float2(texel) + u) / float(kSkyImportanceSize)));
+    pdf = w / total * (float(kSkyImportanceSize * kSkyImportanceSize) / (4.0 * kAtmospherePi));
+    return true;
+#else
+    return false;
+#endif
+}
+
+// Radiance from beyond the scene along a ray from origin that leaves it: the sky times skyWeight (its MIS weight
+// against the sky's light sampling) and the light of the sun disc already weighted for MIS (sun), with the clouds in
+// front. Rays the camera sees through (view) march the clouds in
 // more steps; rays whose sky the camera sees, also in a mirror-like surface (seen), take the clouds' detail noise.
 // The others read the cloud panorama, the cloudy sky as the camera sees it, where there is one: their light only
 // reaches the camera after a scattering that blurs it, which hides that it was seen from elsewhere. The reference
 // marches every ray.
-float3 SkyRadiance(float3 origin, float3 dir, float3 sun, bool view, bool seen, inout uint rng)
+float3 SkyRadiance(float3 origin, float3 dir, float3 sun, float skyWeight, bool view, bool seen, inout uint rng)
 {
 #ifdef ATMOSPHERE
     CloudParameters c = g_Frame.clouds;
@@ -91,16 +189,16 @@ float3 SkyRadiance(float3 origin, float3 dir, float3 sun, bool view, bool seen, 
         {
             Texture2D<float4> panorama = ResourceDescriptorHeap[c.skyPanorama];
             float4 cloudy = panorama.SampleLevel(g_LinearClamp, CloudPanoramaUv(dir), 0.0);
-            return SunIlluminance() * cloudy.rgb + cloudy.a * sun;
+            return skyWeight * SunIlluminance() * cloudy.rgb + cloudy.a * sun;
         }
 #endif
         float4 cloudy = CloudySky(SceneClouds(), EnvironmentRadiance(dir), CloudSpacePosition(c, origin), dir,
                                   view ? c.viewSteps : c.indirectSteps, SunIlluminance(),
                                   EnvironmentRadiance(float3(0.0, 1.0, 0.0)), Rand3(rng), view || seen);
-        return cloudy.rgb + cloudy.a * sun;
+        return skyWeight * cloudy.rgb + cloudy.a * sun;
     }
 #endif
-    return EnvironmentRadiance(dir) + sun;
+    return skyWeight * EnvironmentRadiance(dir) + sun;
 }
 
 // Transmittance of the scene's air over distance (capped at the distance to the sky), 1 without the

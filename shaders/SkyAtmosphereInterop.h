@@ -73,6 +73,14 @@ struct AtmosphereLUTConstants
 #define CLOUD_SHADOW_MAP_SIZE 512u
 #define CLOUD_PANORAMA_SIZE 256u
 
+// Sky importance map of SkyImportance.slang: the luminance of the sky without the sun disc over an equal-area
+// octahedral map of SKY_IMPORTANCE_SIZE^2 texels (SkyImportanceUv in SkyAtmosphere.slang), as a pyramid of sums in
+// one float buffer: level 0 the texels, each level above the sums of 2 x 2 of the one below, up to the total at the
+// last of SKY_IMPORTANCE_COUNT entries (SkyImportanceIndex).
+#define SKY_IMPORTANCE_SIZE 128u
+#define SKY_IMPORTANCE_LEVELS 8u
+#define SKY_IMPORTANCE_COUNT 21845u
+
 // A layer of clouds in the atmosphere (Clouds.slang), in its km with the planet centre at the origin. Written
 // by SkyAtmospherePass for its cloud kernels and carried into the path tracer by FrameConstants::clouds.
 // Textures are descriptor heap indices of SRVs.
@@ -126,12 +134,26 @@ struct CloudPanoramaConstants
 	float pad1;
 };
 
+// Root constants of the sky importance kernels.
+struct SkyImportanceConstants
+{
+	float3 sunDirection;
+	float viewHeight; // km from the planet centre, as AtmosphereLUTConstants::viewHeight
+	float3 sunIlluminance; // at the top of the atmosphere, which the LUT and the panorama are rendered for a unit of
+	float planetRadius; // km
+	uint usePanorama; // the cloud panorama holds the cloudy sky, otherwise the sky-view LUT the clear one
+	uint pad0;
+	uint pad1;
+	uint pad2;
+};
+
 #ifdef __cplusplus
 static_assert(sizeof(AtmosphereParameters) % 16 == 0, "AtmosphereParameters must match the HLSL cbuffer layout");
 static_assert(sizeof(AtmosphereParameters) == 128, "AtmosphereParameters must match the HLSL cbuffer layout");
 static_assert(sizeof(AtmosphereLUTConstants) == 16, "AtmosphereLUTConstants must fit the root constants");
 static_assert(sizeof(CloudParameters) == 112, "CloudParameters must match the HLSL cbuffer layout");
 static_assert(sizeof(CloudPanoramaConstants) == 32, "CloudPanoramaConstants must fit the root constants");
+static_assert(sizeof(SkyImportanceConstants) == 48, "SkyImportanceConstants must fit the root constants");
 #endif
 
 #endif // SKY_ATMOSPHERE_INTEROP_H

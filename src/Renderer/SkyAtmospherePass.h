@@ -55,6 +55,10 @@ public:
 		return cloudParameters_;
 	}
 
+	// Descriptor index of the sky importance pyramid's UAV (SkyImportance.slang) built by the last Execute, or
+	// INVALIDDESCRIPTORHANDLE when sky sampling is off.
+	uint GetSkyImportance() const;
+
 	// False once the planet hides the sun's centre from the camera's altitude.
 	bool IsSunAboveHorizon() const;
 
@@ -99,6 +103,8 @@ private:
 	PipelineHandle weatherMapPipeline_ = InvalidPipelineHandle;
 	PipelineHandle cloudShadowPipeline_ = InvalidPipelineHandle;
 	PipelineHandle cloudPanoramaPipeline_ = InvalidPipelineHandle;
+	PipelineHandle skyImportanceTexelsPipeline_ = InvalidPipelineHandle;
+	PipelineHandle skyImportanceReducePipeline_ = InvalidPipelineHandle;
 
 	ResourceHandle transmittanceLUT_ = InvalidResourceHandle;
 	ResourceHandle transmittanceSRV_ = InvalidResourceHandle;
@@ -130,6 +136,9 @@ private:
 	CloudParameters panoramaParameters_ = {}; // what the panorama holds, the wind offset left out
 	bool panoramaValid_ = false;
 	uint32_t panoramaFrame_ = 0;
+	// Built every frame while AtmosphereSettings::skySampling is on.
+	ResourceHandle skyImportance_ = InvalidResourceHandle;
+	bool skyImportanceValid_ = false;
 
 	AtmosphereParameters parameters_ = {};
 	AtmosphereParameters lutParameters_ = {}; // what the transmittance and multiple scattering LUTs hold

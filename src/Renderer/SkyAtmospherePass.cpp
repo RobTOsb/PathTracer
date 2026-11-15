@@ -51,6 +51,8 @@ SkyAtmospherePass::SkyAtmospherePass(RenderContext *renderContext,
 	weatherMapPipeline_ = CreatePipeline("CloudTextures.slang", "WeatherMap");
 	cloudShadowPipeline_ = CreatePipeline("CloudTextures.slang", "ShadowMap");
 	cloudPanoramaPipeline_ = CreatePipeline("CloudTextures.slang", "CloudPanorama");
+	skyImportanceTexelsPipeline_ = CreatePipeline("SkyImportance.slang", "SkyImportanceTexels");
+	skyImportanceReducePipeline_ = CreatePipeline("SkyImportance.slang", "SkyImportanceReduce");
 
 	transmittanceLUT_ =
 			CreateLUT(TRANSMITTANCE_LUT_WIDTH, TRANSMITTANCE_LUT_HEIGHT, "SkyAtmosphere_Transmittance", transmittanceSRV_);
@@ -92,6 +94,13 @@ SkyAtmospherePass::SkyAtmospherePass(RenderContext *renderContext,
 	lightingDesc.debugName = "SkyAtmosphere_SceneLighting";
 	sceneLighting_ = renderContext->CreateBuffer(lightingDesc, ResourceViewType::UnorderedAccess);
 
+	BufferDesc importanceDesc = {};
+	importanceDesc.sizeInBytes = SKY_IMPORTANCE_COUNT * sizeof(float);
+	importanceDesc.structureByteStride = sizeof(float);
+	importanceDesc.usageFlags = ResourceUsageFlags::UnorderedAccess;
+	importanceDesc.debugName = "SkyAtmosphere_SkyImportance";
+	skyImportance_ = renderContext->CreateBuffer(importanceDesc, ResourceViewType::UnorderedAccess);
+
 	parameterBuffers_.resize(renderContext->GetFramesInFlight());
 	for (ResourceHandle &buffer: parameterBuffers_)
 	{
@@ -125,7 +134,8 @@ SkyAtmospherePass::~SkyAtmospherePass()
 									weatherMap_,
 									cloudShadowMap_,
 									cloudPanorama_,
-									sceneLighting_ })
+									sceneLighting_,
+									skyImportance_ })
 	{
 		if (resource != InvalidResourceHandle)
 		{
@@ -299,6 +309,12 @@ bool SkyAtmospherePass::IsSunAboveHorizon() const
 	return sunDirection_.y >= -sqrtf(std::max(0.0f, 1.0f - ratio * ratio));
 }
 
+uint SkyAtmospherePass::GetSkyImportance() const
+{
+	return skyImportanceValid_ ? renderContext_->GetResourceViewInfo(skyImportance_).descriptorIndex
+							   : INVALIDDESCRIPTORHANDLE;
+}
+
 SkyAtmospherePass::SceneAir SkyAtmospherePass::GetSceneAir() const
 {
 	// As SampleAtmosphereMedium in SkyAtmosphere.slang.
@@ -323,6 +339,7 @@ SkyAtmospherePass::SceneAir SkyAtmospherePass::GetSceneAir() const
 
 void SkyAtmospherePass::Execute(RenderContext *renderContext)
 {
+	skyImportanceValid_ = false;
 	if (!IsEnabled())
 	{
 		return;
@@ -480,15 +497,53 @@ void SkyAtmospherePass::Execute(RenderContext *renderContext)
 			renderContext->SetComputeSRVByName("g_SkyViewLUT", skyViewSRV_);
 			renderContext->SetComputeUAVByName("g_PanoramaOutput", cloudPanorama_);
 			renderContext->Dispatch(GroupCount(CLOUD_PANORAMA_SIZE), GroupCount(CLOUD_PANORAMA_SIZE), 1);
+			// Also read by the sky importance map.
 			renderContext->TransitionResource(cloudPanorama_,
 											  ResourceLayout::ShaderResource,
-											  ResourceSync::Raytracing,
+											  ResourceSync::AllShading,
 											  ResourceAccess::ShaderResource);
 		}
 		else
 		{
 			panoramaValid_ = false;
 		}
+	}
+
+	if (settings.skySampling)
+	{
+		// The sky as the path tracer's indirect rays see it: through the clouds of the panorama where there is one,
+		// otherwise the clear sky (also with clouds marched per ray, which it only approximates).
+		SkyImportanceConstants importance = {};
+		importance.sunDirection = sunDirection_;
+		importance.viewHeight = viewHeight_;
+		importance.sunIlluminance = settings_.sun.colour * settings_.sun.intensity;
+		importance.planetRadius = parameters_.bottomRadius;
+		importance.usePanorama = cloudParameters_.enabled != 0 && cloudParameters_.skyPanorama != INVALIDDESCRIPTORHANDLE ? 1u : 0u;
+
+		// Last frame's path tracer read it.
+		renderContext->TransitionResource(skyImportance_,
+										  ResourceLayout::UnorderedAccess,
+										  ResourceSync::ComputeShading,
+										  ResourceAccess::UnorderedAccess);
+		renderContext->SetComputePipeline(skyImportanceTexelsPipeline_);
+		renderContext->SetCompute32BitConstants(&importance, sizeof(importance) / sizeof(uint32_t));
+		renderContext->SetComputeSRVByName("g_SkyViewLUT", skyViewSRV_);
+		renderContext->SetComputeSRVByName("g_Panorama", cloudPanoramaSRV_);
+		renderContext->SetComputeUAVByName("g_ImportanceOutput", skyImportance_);
+		renderContext->Dispatch(SKY_IMPORTANCE_SIZE / 16, SKY_IMPORTANCE_SIZE / 16, 1);
+		renderContext->TransitionResource(skyImportance_,
+										  ResourceLayout::UnorderedAccess,
+										  ResourceSync::ComputeShading,
+										  ResourceAccess::UnorderedAccess);
+		// The reduction reflects only the pyramid, and SetCompute32BitConstants throws on a pipeline without constants.
+		renderContext->SetComputePipeline(skyImportanceReducePipeline_);
+		renderContext->SetComputeUAVByName("g_ImportanceOutput", skyImportance_);
+		renderContext->Dispatch(1, 1, 1);
+		renderContext->TransitionResource(skyImportance_,
+										  ResourceLayout::UnorderedAccess,
+										  ResourceSync::AllShading,
+										  ResourceAccess::UnorderedAccess);
+		skyImportanceValid_ = true;
 	}
 
 	renderContext->EndProfileScope();

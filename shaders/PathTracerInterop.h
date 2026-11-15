@@ -35,8 +35,8 @@ struct FrameConstants
 	uint sunIsDelta; // zero angular radius, cannot be hit by BSDF sampling
 	float2 jitter;
 
-	// Next event estimation picks the sun with sunSelectProbability, otherwise one of the
-	// lightCount lights in the light buffer. lightCount is 0 while the lights are switched off.
+	// Next event estimation picks the sun with sunSelectProbability, the sky with skySelectProbability, otherwise one
+	// of the lightCount lights in the light buffer. lightCount is 0 while the lights are switched off.
 	uint lightCount;
 	uint lightSampling; // LightSamplingMode
 	uint materialOverrides; // MaterialOverrideFlags
@@ -193,7 +193,12 @@ struct FrameConstants
 	// The vertex normals' covariance widens only by the share the pixel cannot resolve, t^4 / (t^4 + t0^4) per axis for
 	// t its turn per pixel and t0 this (1 / the curvature radius in pixels that stays sharp). 0 = all of it.
 	float specularAAResolvedTurn;
-	uint2 specularAAPad;
+	// ATMOSPHERE: next event estimation samples the sky without the sun disc with skySelectProbability (after the sun's
+	// sunSelectProbability, before the light buffer's rest), in proportion to the luminance in the sky importance
+	// pyramid (SkyImportance.slang), a float buffer's UAV. INVALIDDESCRIPTORHANDLE and 0 = off: only BSDF sampling
+	// reaches the sky.
+	uint skyImportance;
+	float skySelectProbability;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of

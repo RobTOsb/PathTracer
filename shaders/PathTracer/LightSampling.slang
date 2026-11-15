@@ -1,4 +1,4 @@
-// Next event estimation: light selection (light tree or uniform), sun and emissive triangle sampling.
+// Next event estimation: light selection (light tree or uniform), sun, sky and emissive triangle sampling.
 import LightTree;
 import OpenPBRBSDF;
 import PathTracer.Math;
@@ -56,6 +56,17 @@ LightSample SampleSun(float3 position, float2 u)
     ls.pdf = g_Frame.sunPdf;
     ls.lightSamplingOnly = SunIsDelta();
     ls.direction = SunIsDelta() ? g_Frame.sunDirection : SampleUniformCone(g_Frame.sunDirection, g_Frame.sunOneMinusCosMax, u);
+    return ls;
+}
+
+// The sky without the sun disc, towards a direction drawn in proportion to its luminance (SampleSkyImportance), with
+// the radiance a ray leaving the scene from position whose sky the camera does not see would find there.
+LightSample SampleSkyLight(float3 position, float2 u, inout uint rng)
+{
+    LightSample ls = (LightSample)0;
+    ls.distance = FLT_MAX;
+    if (SampleSkyImportance(u, ls.direction, ls.pdf))
+        ls.radiance = SkyRadiance(position, ls.direction, float3(0.0, 0.0, 0.0), 1.0, false, false, rng);
     return ls;
 }
 
@@ -262,7 +273,7 @@ float LightSelectPmf(LightSelectVertex v, uint lightIndex)
         pmf = g_LightPower[lightIndex].pmf;
     else
         pmf = 1.0 / g_Frame.lightCount;
-    return pmf * (1.0 - g_Frame.sunSelectProbability);
+    return pmf * (1.0 - g_Frame.sunSelectProbability - g_Frame.skySelectProbability);
 }
 
 // Solid angle PDF of SampleLight at v producing position on the emissive triangle lightIndex,
@@ -307,15 +318,44 @@ bool SamplePowerLight(float uSelect, float uLow, out uint lightIndex, out float 
     return entry.cdfEnd > target;
 }
 
-// Picks the sun with sunSelectProbability, otherwise a light from the light buffer, and samples it.
-// The PDF includes the selection probability and is 0 when there is nothing to sample.
-LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
+// The probabilities of SampleLight at v picking the sun (.x) and the sky (.y). Together always the frame's
+// sunSelectProbability + skySelectProbability, so the light buffer's share stays the same; with both on, they split it
+// by their estimated irradiance at v (the sun's through the clouds' shadow, by its cosine with a 5% floor for surfaces
+// facing away from it and for those that transmit), the sky keeping at least the frame's share
+// skySelectProbability / (sunSelectProbability + skySelectProbability).
+float2 EnvironmentProbabilities(LightSelectVertex v)
 {
     float pSun = g_Frame.sunSelectProbability;
+    float pSky = g_Frame.skySelectProbability;
+    if (!(pSun > 0.0 && pSky > 0.0))
+        return float2(pSun, pSky);
+    float pEnvironment = pSun + pSky;
+    float sun = dot(SunIlluminance() * SunTransmittance(), float3(0.2126, 0.7152, 0.0722)) * CloudShadow(v.position) *
+                max(dot(v.normal, g_Frame.sunDirection), 0.05);
+    float sky = SkyIrradianceEstimate();
+    float skyShare = clamp(sky / max(sun + sky, 1.0e-30), pSky / pEnvironment, 1.0);
+    return float2(pEnvironment * (1.0 - skyShare), pEnvironment * skyShare);
+}
+
+// Picks the sun, the sky (EnvironmentProbabilities), otherwise a light from the light buffer, and samples it. The PDF
+// includes the selection probability and is 0 when there is nothing to sample.
+LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
+{
+    float2 environment = EnvironmentProbabilities(v);
+    float pSun = environment.x;
     if (u.x < pSun)
     {
         LightSample ls = SampleSun(v.position, float2(u.x / pSun, u.y));
         ls.pdf *= pSun;
+        return ls;
+    }
+    float pSky = environment.y;
+    float pEnvironment = pSun + pSky;
+    if (u.x < pEnvironment)
+    {
+        // Fresh numbers, since the descent stretches u by the share of each child it picks.
+        LightSample ls = SampleSkyLight(v.position, Rand3(rng).xy, rng);
+        ls.pdf *= pSky;
         return ls;
     }
 
@@ -323,7 +363,7 @@ LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
     if (g_Frame.lightCount == 0)
         return ls;
 
-    float uSelect = min((u.x - pSun) / (1.0 - pSun), 0.99999994);
+    float uSelect = min((u.x - pEnvironment) / (1.0 - pEnvironment), 0.99999994);
     uint lightIndex;
     float pmf;
     if (v.selection == LIGHT_SELECT_TREE)
@@ -377,14 +417,23 @@ LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
 
     ls = SampleBufferLight(g_Lights[lightIndex], v.position, Rand3(rng).xy);
     ls.radiance *= LightEmissionScale(lightIndex);
-    ls.pdf *= pmf * (1.0 - pSun);
+    ls.pdf *= pmf * (1.0 - pEnvironment);
     return ls;
 }
 
-// Solid angle PDF of SampleLight producing dir towards the sky, which only the sun disc can.
-float LightPdf(float3 origin, float3 dir, HitInfo hit)
+// Solid angle PDF of SampleLight producing dir towards the sun disc, by picking the sun with probability pSun
+// (EnvironmentProbabilities(v).x at the vertex the ray left).
+float SunLightPdf(float pSun, float3 dir)
 {
-    if (hit.hit || SunIsDelta())
+    if (SunIsDelta())
         return 0.0;
-    return InSunDisc(dir) ? g_Frame.sunPdf * g_Frame.sunSelectProbability : 0.0;
+    return InSunDisc(dir) ? g_Frame.sunPdf * pSun : 0.0;
+}
+
+// Solid angle PDF of SampleLight producing dir towards the sky, by picking the sky with probability pSky
+// (EnvironmentProbabilities(v).y). The sun and the sky are separate lights, each weighed against BSDF sampling on its
+// own.
+float SkyLightPdf(float pSky, float3 dir)
+{
+    return pSky > 0.0 ? pSky * SkyImportancePdf(dir) : 0.0;
 }

@@ -791,6 +791,17 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 			ImGui::SetItemTooltip("DLSS-RR's guides fade with the air's transmittance to the surface: towards a white "
 								  "albedo, no reflection and full roughness as haze covers it, so the haze's light is "
 								  "denoised as a smooth signal instead of lighting on the surface behind it");
+			ImGui::Checkbox("Sky sampling", &atmosphere.skySampling);
+			ImGui::SetItemTooltip("Light samples also go to the sky without the sun, in proportion to its brightness "
+								  "(an importance map rebuilt each frame), weighed against BSDF sampling. Off leaves the "
+								  "sky to BSDF sampling alone");
+			if (atmosphere.skySampling)
+			{
+				ImGui::SliderFloat("Min sky sample share", &atmosphere.skySampleShare, 0.0f, 1.0f, "%.2f");
+				ImGui::SetItemTooltip("The sun and the sky split their light samples by how much light each gives the "
+									  "surface (the sun by its angle and the clouds' shadow); the sky keeps at least this "
+									  "part, and all of them once the sun has set");
+			}
 			ImGui::SliderFloat("Rayleigh scale", &atmosphere.rayleighScale, 0.0f, 10.0f, "%.2f");
 			ImGui::SliderFloat("Mie scale", &atmosphere.mieScale, 0.0f, 50.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
 			ImGui::SetItemTooltip("Aerosols: haze, and the glow around the sun");
