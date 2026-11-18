@@ -309,12 +309,13 @@ SurfaceShading ShadeSurfaceBegin<let SIMPLE : bool>(HitPayload payload, float3 o
 
     // Blended surfaces were already taken or passed by chance in traversal (AnyHit), so this one is there.
 
-    // Specular antialiasing where the camera sees the surface past mirrors and glass (PSR's chain), never on the
-    // camera's own surface or inside the object it belongs to: how the vertex normals turn across the cone's
-    // footprint, stretched by 1 / cos along the view, and the normal maps' own spread.
+    // Specular antialiasing where the camera sees the surface, directly or past mirrors and glass (PSR's chain): how
+    // the vertex normals turn across the cone's footprint, stretched by 1 / cos along the view, and the normal maps'
+    // own spread. On the camera's own surface and inside the object it belongs to, only lobes that are already rough
+    // widen, so mirrors and smooth glass seen directly stay sharp.
     SpecularAA specularAA = NoSpecularAA();
-    if (chainActive && !fromCamera && (flags & PATH_IN_SEEN_OBJECT) == 0)
-        specularAA = FootprintSpecularAA(hit, wo, cone.width);
+    if (fromCamera || chainActive)
+        specularAA = FootprintSpecularAA(hit, wo, cone.width, fromCamera || (flags & PATH_IN_SEEN_OBJECT) != 0);
     OpenPBRBaseParams mat = LoadMaterial(hit, cone.width * g_Frame.textureLodScale, bounce < g_Frame.anisotropicSegments,
                                          SIMPLE, specularAA, diffuseBounces >= g_Frame.reducedMaterialDiffuseBounces);
     if (frontFace && any(hit.emission > 0.0))
@@ -1008,13 +1009,13 @@ float TraceGuideHitDistance(float3 position, float3 N, float3 viewDir, float rou
 // the given transmittance; opacity is how much of it is there (LoadOpacity).
 // The material of a guide ray's hit as ShadeSurface sees it, a ray cone coneWidth wide there: opaque and thin-walled
 // surfaces faced to the viewer, solid glass left as it is, so its context knows the inside from the outside.
-// specularAA: as ShadeSurface widens it, past PSR's mirrors and glass but not on the camera's surface or inside its object.
+// specularAA: as ShadeSurface widens the camera's own surface, its lobes that are already rough only.
 void GuideMaterial(inout HitInfo hit, float3 wo, float coneWidth, bool specularAA, out OpenPBRBaseParams mat,
                    out OpenPBRContext ctx)
 {
     bool anisotropic = 0 < g_Frame.anisotropicSegments;
     mat = LoadMaterial(hit, coneWidth * g_Frame.textureLodScale, anisotropic, false,
-                       specularAA ? FootprintSpecularAA(hit, wo, coneWidth) : NoSpecularAA());
+                       specularAA ? FootprintSpecularAA(hit, wo, coneWidth, true) : NoSpecularAA());
 
     bool opaque = mat.transmissionWeight <= 0.0 && !HasDiffuseTransmission(mat);
     if (opaque || mat.geometryThinWalled)
@@ -1040,7 +1041,7 @@ PrimaryGuides SurfaceGuides(HitPayload payload, float3 origin, float3 dir, float
     opacity = LoadOpacity(hit, coneWidth * g_Frame.textureLodScale, 0 < g_Frame.anisotropicSegments);
     OpenPBRBaseParams mat;
     OpenPBRContext ctx;
-    GuideMaterial(hit, wo, coneWidth, false, mat, ctx);
+    GuideMaterial(hit, wo, coneWidth, true, mat, ctx);
 
     PrimaryGuides g = DefaultGuides(dir);
     g.position = float4(hit.position, 1.0);

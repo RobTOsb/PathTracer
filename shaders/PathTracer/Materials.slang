@@ -183,20 +183,29 @@ struct SpecularAA
     // (FrameConstants::specularAAVariance): xx, xy, yy in the hit's shape frame (T, cross(N, T)).
     float3 normalCovariance;
     float normalMapScale; // times the normal maps' variance from their mips (Toksvig)
+    // Lobes whose own roughness is 0 (below SPECULAR_AA_SMOOTH_ROUGHNESS) stay as they are: mirrors and smooth glass
+    // keep their sharp reflections and refractions, and only lobes that are already rough widen.
+    bool roughOnly;
 };
+
+// Below half an 8-bit step, so a 0 in a BC7-compressed roughness map still counts as 0.
+static const float SPECULAR_AA_SMOOTH_ROUGHNESS = 0.5 / 255.0;
 
 SpecularAA NoSpecularAA()
 {
     SpecularAA aa;
     aa.normalCovariance = float3(0.0, 0.0, 0.0);
     aa.normalMapScale = 0.0;
+    aa.roughOnly = false;
     return aa;
 }
 
-SpecularAA FootprintSpecularAA(HitInfo hit, float3 wo, float coneWidth)
+// roughOnly: see SpecularAA::roughOnly.
+SpecularAA FootprintSpecularAA(HitInfo hit, float3 wo, float coneWidth, bool roughOnly)
 {
     SpecularAA aa;
     aa.normalMapScale = g_Frame.specularAANormalMapScale;
+    aa.roughOnly = roughOnly;
     float3 B = cross(hit.N, hit.T);
     float cosView = max(abs(dot(hit.N, wo)), 0.1);
     float2 u = float2(dot(wo, hit.T), dot(wo, B)) / cosView;
@@ -343,7 +352,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     bool widen = (lambda1 > 0.0 || normalVariance > 0.0 || coatNormalVariance > 0.0) &&
                  (transmission <= 0.0 || (g_Frame.specularAAGlass != 0 && !IsPassThrough(material)));
     // The coat's lobe is isotropic, so it takes the covariance's larger axis.
-    if (widen)
+    if (widen && !(specularAA.roughOnly && coatRoughness < SPECULAR_AA_SMOOTH_ROUGHNESS))
         coatRoughness = WidenRoughness(coatRoughness, min(lambda1 + coatNormalVariance, g_Frame.specularAAMaxVariance));
 
     float anisotropyStrength = 0.0;
@@ -388,7 +397,7 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     SetGltfSpecular(p, specularWeight, specularColour);
     if (anisotropyStrength > 0.0)
         SetGltfAnisotropy(p, saturate(anisotropyStrength));
-    if (widen)
+    if (widen && !(specularAA.roughOnly && p.specularRoughness < SPECULAR_AA_SMOOTH_ROUGHNESS))
         WidenSpecular(p, hit, simple, lambda1, lambda2, major, normalVariance);
     SetDiffuseRoughness(p);
     if (!simple && any(material.sheenColour > 0.0))

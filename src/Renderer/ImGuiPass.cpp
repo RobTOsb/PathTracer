@@ -735,10 +735,10 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		SpecularAASettings &specularAA = settings_.specularAA;
 		ImGui::BeginDisabled(unbiasedReference);
 		ImGui::Checkbox("Enabled##SpecularAA", &specularAA.enabled);
-		ImGui::SetItemTooltip("Widens the glossy lobes of surfaces seen in mirrors and through glass (never the surface "
-							  "the camera sees directly, nor inside its object) along each axis by how much their normals "
-							  "turn across the pixel's footprint (DLSS-RR builds only), so sub-pixel detail in "
-							  "reflections and refractions stops speckling");
+		ImGui::SetItemTooltip("Widens the glossy lobes of the surfaces the camera sees, directly and in mirrors and "
+							  "through glass, along each axis by how much their normals turn across the pixel's footprint "
+							  "(DLSS-RR builds only), so sub-pixel detail stops speckling. Seen directly (and inside the "
+							  "object seen), lobes with roughness 0 are left alone, so mirrors and smooth glass stay sharp");
 		ImGui::BeginDisabled(!specularAA.enabled);
 		ImGui::SliderFloat("Strength##SpecularAA", &specularAA.strength, 0.0f, 4.0f, "%.2f");
 		ImGui::Checkbox("Normal map variance", &specularAA.normalMaps);
