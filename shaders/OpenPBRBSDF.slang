@@ -39,10 +39,11 @@
 //   out, and its sample (LOBE_SUBSURFACE) is the diffuse transmission into the medium, weighted by the
 //   interface's (1 - E(wo)) and scaled by 1 / its probability, for the integrator to carry on through
 //   the medium. Its pdf is that of the direction, only for ray cones.
-//   Thin-walled transmission mirrors the specular reflection lobe through the tangent plane, so it
-//   samples like the reflection. At zero roughness it is a delta lobe straight through
-//   (LOBE_DELTA_TRANSMISSION), which Eval and Pdf leave out; the sample's pdf is then the discrete
-//   probability of picking it, and its weight ThinDeltaTransmittance / pdf.
+//   Thin-walled transmission is a delta lobe straight through (LOBE_DELTA_TRANSMISSION) at any roughness,
+//   which only the reflection keeps: a pane's two rough faces would blur what is behind it, left out so
+//   that shadow rays can pass it straight (ShadowAnyHit) without counting its light twice. Eval and Pdf
+//   leave it out; the sample's pdf is the discrete probability of picking it, and its weight
+//   ThinDeltaTransmittance / pdf.
 //   The u.x shares are, in order: specular reflection, specular transmission, diffuse, coat, fuzz. The
 //   splits in PathTracer that aim u.x at the specular lobes rely on the first two coming first.
 //   Fuzz samples its LTC exactly (SampleFuzz), see the Fuzz section.
@@ -141,7 +142,7 @@ struct BSDFSample
 struct OpenPBRContext
 {
     bool inside;
-    bool deltaTransmission; // thin-walled and smooth, see LOBE_DELTA_TRANSMISSION
+    bool deltaTransmission; // thin-walled, see LOBE_DELTA_TRANSMISSION
     float3 wo;
     float2 alpha;
     float eta;        // IOR ratio across the interface, for the refraction direction
@@ -231,10 +232,10 @@ float CoatedSpecularRoughness(OpenPBRBaseParams p)
     return lerp(p.specularRoughness, roughened, p.coatWeight);
 }
 
-// A thin wall that transmits as a delta lobe.
+// A thin wall that transmits, which it does as a delta lobe.
 bool HasDeltaTransmission(OpenPBRBaseParams p)
 {
-    return p.geometryThinWalled && CoatedSpecularRoughness(p) <= 0.0 && p.transmissionWeight > 0.0;
+    return p.geometryThinWalled && p.transmissionWeight > 0.0;
 }
 
 // A thin wall whose subsurface transmits diffusely to the other side.
@@ -658,20 +659,7 @@ float EvalPdfGGXTransmission(float3 wi, OpenPBRContext c, out float pdf)
     return abs(wiDotH * woDotH) / abs(wi.z * wo.z) * (1.0 - F) * GGXG2(wi, c.lambdaO, c.alpha) * ndf * invDenom2;
 }
 
-// Thin-walled transmission: the reflection lobe at the mirror image of wi through the tangent plane,
-// with 1 - F in place of F. pdf is that of sampling the reflection lobe towards the mirror image.
-float EvalPdfGGXThinTransmission(float3 wi, OpenPBRContext c, out float pdf)
-{
-    float3 wr = float3(wi.xy, -wi.z);
-    float3 wo = c.wo;
-    float3 h = normalize(wr + wo);
-    float ndf = GGXD(h, c.alpha);
-    pdf = ndf * c.reflPdfScale;
-    float F = FresnelDielectric(saturate(dot(wo, h)), c.fresnelEta);
-    return (1.0 - F) * ndf * GGXG2(wr, c.lambdaO, c.alpha) / (4.0 * wr.z * wo.z);
-}
-
-// What a smooth thin wall lets through straight along -wo, cosTheta from its normal: the delta
+// What a thin wall lets through straight along -wo, cosTheta from its normal: the delta
 // lobe's integral, so its sample weight times the probability of picking it. The coat is taken at
 // the same angle.
 float3 ThinDeltaTransmittance(OpenPBRBaseParams p, float cosTheta)
@@ -691,7 +679,7 @@ OpenPBRContext OpenPBRSetup(OpenPBRBaseParams p, float3 woWorld)
     float roughness = CoatedSpecularRoughness(p);
     OpenPBRContext c;
     c.inside = wo.z < 0.0 && !p.geometryThinWalled;
-    c.deltaTransmission = p.geometryThinWalled && roughness <= 0.0;
+    c.deltaTransmission = p.geometryThinWalled;
     c.wo = c.inside ? -wo : wo;
     c.alpha = GGXAlpha(roughness, p.specularRoughnessAnisotropy);
 
@@ -830,8 +818,7 @@ float3 OpenPBREvalPdfLocal(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out
         if (c.deltaTransmission)
             return fuzzThroughput * coatScale * fDiffuseT + fCoat;
         float transmissionPdf;
-        float fT = (p.geometryThinWalled ? EvalPdfGGXThinTransmission(wi, c, transmissionPdf)
-                                        : EvalPdfGGXTransmission(wi, c, transmissionPdf)) * abs(wi.z);
+        float fT = EvalPdfGGXTransmission(wi, c, transmissionPdf) * abs(wi.z);
         pdf += c.probSpecT * transmissionPdf;
         if (c.inside)
             return fT.xxx;
@@ -906,14 +893,6 @@ BSDFSample OpenPBRSample(OpenPBRBaseParams p, OpenPBRContext c, float3 u)
         s.weight = ThinDeltaTransmittance(p, wo.z) / c.probSpecT;
         s.lobe = LOBE_DELTA_TRANSMISSION;
         return s;
-    }
-    else if (u.x < c.probSpecR + c.probSpecT && p.geometryThinWalled)
-    {
-        wi = SampleGGXReflectionBounded(wo, c.alpha, c.boundedB, u.yz);
-        if (wi.z <= 0.0)
-            return s;
-        wi.z = -wi.z;
-        lobe = LOBE_SPECULAR_TRANSMISSION;
     }
     else if (u.x < c.probSpecR + c.probSpecT)
     {

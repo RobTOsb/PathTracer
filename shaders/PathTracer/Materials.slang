@@ -339,11 +339,9 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     if (!simple && transmission > 0.0 && material.transmissionTexture != INVALIDDESCRIPTORHANDLE)
         transmission *= SampleTextureGrad(material.transmissionTexture, uv, ddx, ddy, anisotropic).r;
     bool thinWalled = (material.transmissionFlags & TRANSMISSION_THIN_WALLED) != 0;
-    if (thinWalled && material.transmission > 0.0 && (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) == 0)
-        roughness = max(roughness, 1.0e-4);
-    // A pass-through wall has no lobe to widen. Glass widens only if asked: its PSR depends on its roughness.
+    // A pass-through wall's reflection stays as it is. Glass widens only if asked: its PSR depends on its roughness.
     bool widen = (lambda1 > 0.0 || normalVariance > 0.0 || coatNormalVariance > 0.0) &&
-                 (transmission <= 0.0 || (g_Frame.specularAAGlass != 0 && (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) == 0));
+                 (transmission <= 0.0 || (g_Frame.specularAAGlass != 0 && !IsPassThrough(material)));
     // The coat's lobe is isotropic, so it takes the covariance's larger axis.
     if (widen)
         coatRoughness = WidenRoughness(coatRoughness, min(lambda1 + coatNormalVariance, g_Frame.specularAAMaxVariance));
@@ -632,11 +630,17 @@ float3 PassThroughTransmittance(MaterialData material, float2 uv, float3 baseCol
             sheenRoughness *= SampleTexture(material.sheenRoughnessTexture, uv).a;
         SetGltfSheen(p, sheen, sheenRoughness);
     }
-    // And so does the coat. A pass-through surface's coat is smooth, so only its weight matters.
+    // And so does the coat, by its albedo at the wall's angle, which its roughness changes.
     float coatWeight = material.coatWeight;
-    if (coatWeight > 0.0 && material.coatWeightTexture != INVALIDDESCRIPTORHANDLE)
-        coatWeight *= SampleTexture(material.coatWeightTexture, uv).r;
-    SetGltfClearcoat(p, coatWeight, 0.0, p.geometryNormal);
+    float coatRoughness = material.coatRoughness;
+    if (coatWeight > 0.0)
+    {
+        if (material.coatWeightTexture != INVALIDDESCRIPTORHANDLE)
+            coatWeight *= SampleTexture(material.coatWeightTexture, uv).r;
+        if (material.coatRoughnessTexture != INVALIDDESCRIPTORHANDLE)
+            coatRoughness *= SampleTexture(material.coatRoughnessTexture, uv).g;
+    }
+    SetGltfClearcoat(p, coatWeight, coatRoughness, p.geometryNormal);
     ApplyMaterialOverrides(p);
     return ThinDeltaTransmittance(p, faceCosine);
 }
@@ -656,7 +660,7 @@ bool ShadowCandidateTransmittance(PrimitiveDesc prim, uint primitiveIndex, float
     if (!CandidateThere(material, albedo.a, u))
         return false;
 
-    if ((material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
+    if (IsPassThrough(material))
         transmitted = PassThroughTransmittance(material, uv, albedo.rgb, FaceCosine(tri, linearToWorld, dir));
     return true;
 }

@@ -141,6 +141,13 @@ bool IsSimpleMaterial(uint index)
     return (g_Materials[index].emissiveFlags.y & GPU_MATERIAL_SIMPLE) != 0;
 }
 
+// A thin wall that transmits: light goes straight through it, shadow rays too (GpuTransmissionFlags).
+// IsPassThroughMaterial in PathTracerInterop.h is the CPU side.
+bool IsPassThrough(MaterialData material)
+{
+    return (material.transmissionFlags & TRANSMISSION_THIN_WALLED) != 0 && material.transmission > 0.0;
+}
+
 // TEMPORARY test: every blended material is read as a mask cut at 0.5, the cut its micromaps' unknown
 // micro-triangles already lean by (kBlendShadowOpacity), so the baked scene cache is unchanged.
 static const bool FORCE_BLEND_AS_MASK = false;

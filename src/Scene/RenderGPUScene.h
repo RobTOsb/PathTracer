@@ -29,7 +29,7 @@ struct MaterialGeometryFlags
 {
 	explicit MaterialGeometryFlags(const MaterialData &material)
 	{
-		const bool passThrough = (material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0;
+		passThrough = IsPassThroughMaterial(material);
 		isOpaque = material.alphaMode == ALPHA_MODE_OPAQUE && !passThrough;
 		// Shadow rays multiply in what these let through, once per triangle.
 		noDuplicateAnyHit = passThrough || material.alphaMode == ALPHA_MODE_BLEND;
@@ -40,6 +40,7 @@ struct MaterialGeometryFlags
 		instanceMask = material.alphaMode == ALPHA_MODE_BLEND ? INSTANCE_MASK_BLENDED : INSTANCE_MASK_SOLID;
 	}
 
+	bool passThrough; // IsPassThroughMaterial: shadow rays need its any-hit for every triangle, so no micromaps
 	bool isOpaque;
 	bool noDuplicateAnyHit;
 	bool opacityMicromap2State;

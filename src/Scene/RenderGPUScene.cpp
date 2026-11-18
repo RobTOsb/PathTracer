@@ -2086,15 +2086,11 @@ void RenderGPUScene::BuildMaterials(const Scene::GLTFScene &scene,
 												  "Material_ClearcoatNormal",
 												  batch);
 		}
-		// Only the file makes a material thin-walled (EXT_materials_thin_wall). Anisotropy stretches the
-		// lobe even at roughness 0, and a rough coat roughens the base, so such a wall is never a delta
-		// pass-through.
+		// Only the file makes a material thin-walled (EXT_materials_thin_wall). A transmissive one is then a
+		// pass-through surface whatever its roughness (IsPassThroughMaterial).
 		if (material.IsThinWalled())
 		{
 			gpu.transmissionFlags |= TRANSMISSION_THIN_WALLED;
-			if (gpu.transmission > 0.0f && gpu.roughness <= 0.0f && anisotropyStrength <= 0.0f &&
-				(gpu.coatWeight <= 0.0f || gpu.coatRoughness <= 0.0f))
-				gpu.transmissionFlags |= TRANSMISSION_PASS_THROUGH;
 		}
 		// KHR_materials_specular. The colour may exceed 1 (SetGltfSpecular moves the excess into the weight).
 		const float *specularColour = material.GetSpecularColour();
@@ -2566,7 +2562,7 @@ void RenderGPUScene::BakeOpacityMicromaps(const Scene::GLTFScene &scene, const s
 		// Pass-through surfaces always need the shadow any-hit shader for what they let through.
 		const bool blended = material.alphaMode == ALPHA_MODE_BLEND;
 		if ((material.alphaMode != ALPHA_MODE_MASK && !blended) ||
-			(material.transmissionFlags & TRANSMISSION_PASS_THROUGH) != 0)
+			IsPassThroughMaterial(material))
 		{
 			continue;
 		}
@@ -2852,10 +2848,13 @@ void RenderGPUScene::BuildInstanceStructures()
 	hasBlendedInstances_ = false;
 	const ResourceHandle indexBuffer = streamBuffers_[(uint32_t) GPUStream::Index];
 	const bool micromaps = renderContext_->SupportsOpacityMicromaps() && ommIndexBuffer_ != InvalidResourceHandle;
-	auto hasMicromaps = [&](uint32_t primitive)
-	{ return micromaps && ommIndexOffsets_[primitive] != kNoOpacityMicromaps; };
 	auto geometryFlags = [&](uint32_t primitive) -> const MaterialGeometryFlags &
 	{ return materialGeometry_[primitiveDescs[primitive].materialIndex]; };
+	// Older scene caches baked micromaps for alpha-tested thin walls that are pass-through now.
+	auto hasMicromaps = [&](uint32_t primitive)
+	{
+		return micromaps && ommIndexOffsets_[primitive] != kNoOpacityMicromaps && !geometryFlags(primitive).passThrough;
+	};
 	auto geometryOf = [&](uint32_t primitive, bool linkMicromaps)
 	{
 		const PrimitiveGPUDesc &desc = primitiveDescs[primitive];

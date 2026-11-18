@@ -637,7 +637,7 @@ SurfaceOutcome ShadeSurfaceEnd<let SIMPLE : bool>(SurfaceShading shading, LightS
             PrimaryGuides seen;
             ReflectanceGuides(mat, ctx, wo, seen);
             if (AddPaneReflection(camera.panes, camera.transmittance * seen.specularAlbedo, camera.distance,
-                                  ViewedCurvature(hit, wo)) &&
+                                  GuideRoughness(mat, ctx), ViewedCurvature(hit, wo)) &&
                 continuePath)
                 flags |= PATH_PANE_HIT_PENDING;
             // The reflection branch leaves the camera's transmittance and distance alone, so they take on
@@ -647,7 +647,8 @@ SurfaceOutcome ShadeSurfaceEnd<let SIMPLE : bool>(SurfaceShading shading, LightS
         else if (reflectionDeferred)
         {
             // The guides' specular albedo is the glass's reflection, which moves to the panes.
-            if (AddPaneReflection(camera.panes, camera.guides.specularAlbedo, camera.distance, ViewedCurvature(hit, wo)))
+            if (AddPaneReflection(camera.panes, camera.guides.specularAlbedo, camera.distance, camera.guides.roughness,
+                                  ViewedCurvature(hit, wo)))
                 flags |= DEFERRED_BRIGHTEST_PANE;
             camera.guides.specularAlbedo = float3(0.0, 0.0, 0.0);
         }

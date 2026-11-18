@@ -7,11 +7,12 @@ struct PaneReflection
     float3 albedo; // the split panes' directional reflectance, through the panes in front of them
     float luminance; // the brightest pane's share of albedo, 0 until a pane splits
     float distance; // camera to that pane
+    float roughness; // its reflection's (GuideRoughness)
     float curvature; // its curvature as the camera sees it
     float hitDistance; // length of its reflection ray, SKY_HIT_DISTANCE for the sky
 };
 
-bool AddPaneReflection(inout PaneReflection panes, float3 albedo, float distance, float curvature)
+bool AddPaneReflection(inout PaneReflection panes, float3 albedo, float distance, float roughness, float curvature)
 {
     panes.albedo += albedo;
     float luminance = Luminance(albedo);
@@ -19,6 +20,7 @@ bool AddPaneReflection(inout PaneReflection panes, float3 albedo, float distance
         return false;
     panes.luminance = luminance;
     panes.distance = distance;
+    panes.roughness = roughness;
     panes.curvature = curvature;
     panes.hitDistance = 0.0;
     return true;

@@ -206,7 +206,7 @@ GpuPaneReflection PackPanes(PaneReflection r)
     GpuPaneReflection p;
     p.albedoLuminance = uint2(PackHalf2(r.albedo.xy), PackHalf2(float2(r.albedo.z, r.luminance)));
     p.distance = r.distance;
-    p.curvature = r.curvature;
+    p.roughnessCurvature = PackHalf2(float2(r.roughness, r.curvature));
     p.hitDistance = r.hitDistance;
     return p;
 }
@@ -219,7 +219,9 @@ PaneReflection UnpackPanes(GpuPaneReflection p)
     r.albedo = float3(albedo0, albedo1.x);
     r.luminance = albedo1.y;
     r.distance = p.distance;
-    r.curvature = p.curvature;
+    float2 roughnessCurvature = UnpackHalf2(p.roughnessCurvature);
+    r.roughness = roughnessCurvature.x;
+    r.curvature = roughnessCurvature.y;
     r.hitDistance = p.hitDistance;
     return r;
 }
@@ -358,9 +360,9 @@ PrimaryGuides FinishGuides(CameraState s, float3 cameraOrigin)
         if (paneReflects)
         {
             guides.reflector = float4(cameraOrigin + s.cameraDir * s.panes.distance, 1.0);
-            guides.reflectorRoughness = 0.0;
+            guides.reflectorRoughness = s.panes.roughness;
             guides.reflectorIsPane = true;
-            guides.roughness = 0.0;
+            guides.roughness = s.panes.roughness;
             guides.curvature = s.panes.curvature;
             guides.specularHitDistance = s.panes.hitDistance;
         }

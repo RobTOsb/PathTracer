@@ -254,12 +254,11 @@ UnscopedEnum
 enum GpuTransmissionFlags
 {
 	// Material::IsThinWalled (EXT_materials_thin_wall): both sides are outside, light crosses without
-	// refracting and without entering a medium.
+	// refracting and without entering a medium. Its transmission, at any roughness, is a delta lobe
+	// straight through, so a transmissive one is a pass-through surface (IsPassThroughMaterial): shadow
+	// rays pass it in ShadowAnyHit, tinted, and its geometry is non-opaque in the BLAS. Bit 2 was the
+	// baked pass-through flag of older scene caches, which nothing reads.
 	TRANSMISSION_THIN_WALLED = 1,
-	// Thin-walled, transmissive and smooth (roughness factor 0, so every texel is too), which makes
-	// its transmission a delta lobe straight through. Shadow rays pass such surfaces in
-	// ShadowAnyHit, so their geometry is non-opaque in the BLAS.
-	TRANSMISSION_PASS_THROUGH = 2,
 };
 
 // A glTF material as the CPU builds it and the shaders read it, unpacked from its GpuMaterial row.
@@ -510,6 +509,13 @@ inline bool IsSimpleMaterial(const GpuMaterial &p)
 		   m.specularColour.y == 1.0f && m.specularColour.z == 1.0f &&
 		   m.specularTexture == INVALIDDESCRIPTORHANDLE && m.specularColourTexture == INVALIDDESCRIPTORHANDLE;
 }
+
+// A thin wall that transmits: light goes straight through it, shadow rays too (GpuTransmissionFlags).
+// IsPassThrough in PathTracer/Resources.slang is the shader side.
+inline bool IsPassThroughMaterial(const MaterialData &m)
+{
+	return (m.transmissionFlags & TRANSMISSION_THIN_WALLED) != 0 && m.transmission > 0.0f;
+}
 #endif
 
 struct GpuVertex
@@ -553,7 +559,7 @@ struct GpuPaneReflection
 {
 	uint2 albedoLuminance; // half: albedo rgb, luminance
 	float distance;
-	float curvature;
+	uint roughnessCurvature; // half2: the brightest pane's reflection roughness, its curvature
 	float hitDistance;
 };
 

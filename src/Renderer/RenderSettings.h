@@ -168,7 +168,7 @@ enum class RenderMode
 // world-space hash grid, read at the first diffuse surface of camera paths.
 struct PhotonSettings
 {
-	bool enabled = true;
+	bool enabled = false;
 	int photonsPerFrame = 262144;
 	// A photon's footprint is this many times the area it stands for across (two standard deviations of its Gaussian):
 	// higher is smoother and blurrier.
