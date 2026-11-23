@@ -97,8 +97,9 @@ float VmfSharpness(float averageDirectionLength)
     return (3.0 * len - len * len * len) / (1.0 - len * len);
 }
 
-// Octahedral encoding of a unit vector as snorm8x2, x in the low byte. LightTreeAxis decodes it. The emission lobes
-// are broad (a one-sided emitter's sharpness is at most about 1.8), so 8 bits a component are plenty.
+// Octahedral encoding of a unit vector as snorm8x2, x in the low byte. LightTreeAxis decodes it. A one-sided
+// emitter's lobe is broad (sharpness at most about 1.8), so 8 bits a component are plenty for triangles. A spot
+// light's axis is off by up to about a degree, which a cone narrower than a few degrees feels as under-weighting.
 uint PackOctahedralSnorm8x2(float3 v)
 {
     float2 e = v.xy / (abs(v.x) + abs(v.y) + abs(v.z));
@@ -124,20 +125,41 @@ uint Bfloat16(float x)
     return x > 0.0 ? max(rounded, 1u) : rounded;
 }
 
-// A one-sided Lambertian triangle, Phi = pi L A, or an isotropic point light, Phi = 4 pi I, times fluxScale.
-// Anything else, and a light that emits nothing, gets zero flux, which leaves it without a leaf.
+// A one-sided Lambertian triangle, Phi = pi L A, an isotropic point light, Phi = 4 pi I, or a spot light, I times
+// the solid angle its falloff weights, all times fluxScale. Anything else, and a light that emits nothing, gets zero
+// flux, which leaves it without a leaf.
 GpuLightTreeCluster MakeLightCluster(GpuLight light, float fluxScale)
 {
     GpuLightTreeCluster c = (GpuLightTreeCluster)0;
     GpuLightType type = light.GetLightType();
-    if (type == kLight_Point)
+    if (type == kLight_Point || type == kLight_Spot)
     {
-        float flux = 4.0 * LIGHT_TREE_BUILD_PI * LightTreeLuminance(light.radiance.xyz) * fluxScale;
+        float solidAngle = 4.0 * LIGHT_TREE_BUILD_PI;
+        float meanCos = 0.0;
+        if (type == kLight_Spot)
+        {
+            // The falloff saturate((cos - a) / w)^2, with a = cos(outer) = -offset / scale and w = 1 / scale, rises
+            // from a to b = min(a + w, 1) and is 1 above. Over cos it integrates to (1 - b) + (b - a)^3 / (3 w^2),
+            // and cos times it to (1 - b^2) / 2 + ((b - a)^4 / 4 + a (b - a)^3 / 3) / w^2.
+            float w = 1.0 / light.v3.x;
+            float a = -light.v3.y * w;
+            float b = min(a + w, 1.0);
+            float t = b - a;
+            float t3 = t * t * t / (w * w);
+            float weight = (1.0 - b) + t3 / 3.0;
+            float moment = 0.5 * (1.0 - b * b) + t3 * (0.25 * t + a / 3.0);
+            solidAngle = 2.0 * LIGHT_TREE_BUILD_PI * weight;
+            // The mean cosine to the axis, the length of the average emitted direction, sets the vMF's sharpness.
+            meanCos = weight > 0.0 ? saturate(moment / weight) : 1.0;
+        }
+        float flux = solidAngle * LightTreeLuminance(light.radiance.xyz) * fluxScale;
         if (!(flux > 0.0) || isinf(flux))
             return c;
-        // No average direction, so the vMF is flat (sharpness 0), and no extent.
+        // No extent. A point light has no average direction, so its vMF is flat (sharpness 0); a spot light's points
+        // down its axis.
         c.mean = light.v1.xyz;
         c.flux = flux;
+        c.averageDirection = light.v2.xyz * meanCos;
         return c;
     }
     if (type != kLight_Area)

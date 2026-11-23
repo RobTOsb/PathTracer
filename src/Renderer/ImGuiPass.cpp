@@ -280,7 +280,7 @@ namespace
 				CountRow("Dynamic triangle lights", scene.GetTriangleLightCount() - scene.GetStaticLightCount());
 			}
 			CountRow("Emissive instances", scene.GetEmissiveInstanceCount());
-			CountRow("Point lights", scene.GetPointLightCount());
+			CountRow("Point / spot lights", scene.GetPunctualLightCount());
 			if (scene.HasAnimation())
 			{
 				CountRow("Animated instances", scene.GetDynamicInstanceCount());
@@ -732,7 +732,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::Text("%u emissive triangle(s), %u of them dynamic",
 					scene_.GetTriangleLightCount(),
 					scene_.GetTriangleLightCount() - scene_.GetStaticLightCount());
-		ImGui::Text("%u point light(s)", scene_.GetPointLightCount());
+		ImGui::Text("%u point / spot light(s)", scene_.GetPunctualLightCount());
 		ImGui::Text("Tree depth: %u (4-wide), rebuilt on the GPU every frame", scene_.GetLightTreeDepth());
 		if (lights.bunnyCount > 0)
 		{
@@ -959,9 +959,9 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 							  "saving it around a TraceRay");
 
 		ImGui::Checkbox("Async compute", &settings_.asyncCompute);
-		ImGui::SetItemTooltip("The acceleration structure, light tree, sky and path tracing passes on the async compute "
-							  "queue, and the denoiser and everything after it on the graphics queue. Off: every pass "
-							  "on the graphics queue");
+		ImGui::SetItemTooltip("The sky and cloud passes on the async compute queue, overlapping the acceleration "
+							  "structure update and light tree build on the graphics queue, where the path tracing and "
+							  "everything after it then run. Off: every pass on the graphics queue");
 
 		ImGui::Checkbox("Merge co-located instances", &settings_.mergeInstances);
 		ImGui::SetItemTooltip("Static primitives with the same world matrix (the parts of one tree, say) as one TLAS "

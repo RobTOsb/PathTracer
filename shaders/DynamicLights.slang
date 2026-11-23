@@ -14,15 +14,15 @@ void TransformDynamicLights(uint3 dispatchThread : SV_DispatchThreadID)
 {
     uint i = g_PushConstants.firstThread + dispatchThread.x;
     uint dynamicLights = g_PushConstants.dynamicLightCount;
-    if (i >= dynamicLights + g_PushConstants.pointLightCount)
+    if (i >= dynamicLights + g_PushConstants.punctualLightCount)
         return;
 
     RWStructuredBuffer<GpuLight> lights = ResourceDescriptorHeap[g_PushConstants.lightsHandle];
     uint target = g_PushConstants.staticLightCount + i;
     if (i >= dynamicLights)
     {
-        StructuredBuffer<GpuLight> pointLights = ResourceDescriptorHeap[g_PushConstants.pointLightsHandle];
-        lights[target] = pointLights[i - dynamicLights];
+        StructuredBuffer<GpuLight> punctualLights = ResourceDescriptorHeap[g_PushConstants.punctualLightsHandle];
+        lights[target] = punctualLights[i - dynamicLights];
         return;
     }
 

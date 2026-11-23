@@ -220,11 +220,11 @@ struct GpuLight
 	//};
 	// struct SpotLight
 	//{
-	//    float3 intensity; /**< The light luminous intensity (lm/sr) in xyz */
-	//    float4 position; /**< The light world space direction in xyz with w=range */
-	//    float3 direction; /**< The light world space direction to the light */
-	//    float2 angles; /**< x=angle cutoff scale, y=angle cutoff offset */
-	//    /**< The cutoff angles are the cosine of the light cutoff angle from center of light (radians) */
+	//    float3 intensity; /**< The light luminous intensity (lm/sr) on the axis, in xyz */
+	//    float4 position; /**< v1: the light world space position in xyz with w=range */
+	//    float4 axis; /**< v2: the world space direction the cone points in xyz, w=cos(outer cone angle) */
+	//    float3 angles; /**< v3: x=angle cutoff scale, y=angle cutoff offset, z=cos(inner cone angle) */
+	//    /**< KHR_lights_punctual falloff: saturate(dot(axis, -toLight) * scale + offset)^2 */
 	//};
 	// struct DirectionLight
 	//{
@@ -333,13 +333,13 @@ inline GpuLight MakePointLight(float3 const intensity, float3 const position, fl
 }
 
 /**
- * Make a light type from a spot light.
- * @param intensity      Colour and intensity of light.
+ * Make a light type from a KHR_lights_punctual spot light.
+ * @param intensity      Colour and intensity of light on its axis.
  * @param position       Position of the light.
- * @param range          Maximum distance from the light where lighting has an effect.
- * @param direction      The direction to the light along cones view axis.
- * @param outerConeAngle The maximum angle from the cones view axis to the outside of the cone.
- * @param innerConeAngle The angle from the cones view axis to the inside of the cones penumbra region.
+ * @param range          Maximum distance from the light where lighting has an effect, 0 for no limit.
+ * @param direction      The direction the cone points in (the light shines along it).
+ * @param outerConeAngle The angle from the cone's axis outside which there is no light, at most pi/2.
+ * @param innerConeAngle The angle from the cone's axis inside which the light has its full intensity.
  * @return A light with the correctly set internal values.
  */
 inline GpuLight MakeSpotLight(float3 const intensity,
@@ -349,16 +349,16 @@ inline GpuLight MakeSpotLight(float3 const intensity,
 							  float const outerConeAngle,
 							  float const innerConeAngle)
 {
-	float const cosOuter = -cosf(outerConeAngle);
-	float const lightAngleScale = 1.0f / (std::max) (0.001f, cosf(innerConeAngle) + cosOuter);
-	float const lightAngleOffset = cosOuter * lightAngleScale;
-	float const sinAngle = sinf(outerConeAngle);
-	float const tanAngle = tanf(outerConeAngle);
+	// The extension's falloff, saturate((cos - cosOuter) / (cosInner - cosOuter))^2, as one multiply-add.
+	float const cosOuter = cosf(outerConeAngle);
+	float const cosInner = cosf(innerConeAngle);
+	float const lightAngleScale = 1.0f / (std::max) (0.001f, cosInner - cosOuter);
+	float const lightAngleOffset = -cosOuter * lightAngleScale;
 	GpuLight light = {};
 	light.radiance = MakeFloat4(intensity, AsFloatBits(UINT_MAX));
 	light.v1 = MakeFloat4(position, range);
-	light.v2 = MakeFloat4(NormaliseFloat3Copy(direction), sinAngle);
-	light.v3 = float4(lightAngleScale, lightAngleOffset, tanAngle, AsFloatBits(static_cast<uint32_t>(kLight_Spot)));
+	light.v2 = MakeFloat4(NormaliseFloat3Copy(direction), cosOuter);
+	light.v3 = float4(lightAngleScale, lightAngleOffset, cosInner, AsFloatBits(static_cast<uint32_t>(kLight_Spot)));
 	return light;
 }
 

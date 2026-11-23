@@ -21,8 +21,8 @@ public:
 	// The swapchain image this frame presents.
 	rg::ResourceId backBuffer;
 
-	// The queue AddPass puts passes on: the main loop sets it to the compute queue for the work before DLSS-RR when
-	// async compute is on, with a Submit() before it goes back to graphics.
+	// The queue AddPass puts passes on: the main loop sets it to the compute queue for the sky and clouds when async
+	// compute is on, then back to graphics for the rest, with a Submit() after the TLAS and light tree.
 	QueueType queue = QueueType::Graphics;
 
 	rg::PassId AddPass(rg::Pass pass)

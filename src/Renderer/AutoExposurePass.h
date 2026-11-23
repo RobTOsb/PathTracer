@@ -22,8 +22,8 @@ public:
 	}
 
 	// Copies of the exposure for the path tracer, by frame parity: frame f's copy pass writes [f & 1], which the
-	// path tracer reads before it in frame f + 2. So the path tracer, on the async compute queue, never waits for
-	// this frame's or the last frame's graphics work to know the exposure.
+	// path tracer reads before it in frame f + 2. So the path tracer never waits for this frame's or the last frame's
+	// post passes to know the exposure.
 	ResourceHandle GetTracingExposure(uint32_t parity) const
 	{
 		return tracingExposure_[parity & 1];

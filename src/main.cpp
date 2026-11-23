@@ -87,9 +87,10 @@ static float QueryDisplayPeakNits(void *hwnd)
 //constexpr const char *kDefaultScenePath = "h:\\LucyCheckerboard.glb";
 //constexpr const char *kDefaultScenePath = "h:\\StressTest\\StressTest.glb";
 //constexpr const char *kDefaultScenePath = "h:\\TheMetro.glb";
-constexpr const char *kDefaultScenePath = "h:\\AncientCathedral.glb";
+//constexpr const char *kDefaultScenePath = "h:\\AncientCathedral.glb";
 //constexpr const char *kDefaultScenePath = "h:\\DarkFantasyChurch.glb";
 //constexpr const char *kDefaultScenePath = "h:\\SubwayStation.glb";
+constexpr const char *kDefaultScenePath = "h:\\VintageBar.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PineForest\\PineForest.gltf";
 
 constexpr uint kFramesInFlight = 2;
@@ -188,9 +189,9 @@ struct BuiltPasses
 {
 	// The UI's pass, which builds the UI at the start of each frame.
 	ImGuiPass *ui = nullptr;
-	// The passes at the front of the list that run before DLSS-RR (the sky and the path tracer), on the async compute
-	// queue when it is on.
-	size_t beforeDenoiser = 0;
+	// The passes at the front of the list (the sky and clouds) that run on the async compute queue when it is on,
+	// alongside the acceleration structure and light tree on graphics.
+	size_t onAsyncCompute = 0;
 };
 
 // Makes the passes in the order they add their graph passes.
@@ -268,7 +269,7 @@ BuiltPasses BuildPasses(RenderContext *renderContext,
 			settings, camera, ngx.IsRayReconstructionSupported(), gpuScene, pathTracerPass, graph);
 	BuiltPasses built;
 	built.ui = imgui.get();
-	built.beforeDenoiser = 2;
+	built.onAsyncCompute = 1;
 	passes.push_back(std::move(imgui));
 	return built;
 }
@@ -713,23 +714,29 @@ int Run(const char *scenePath)
 				 std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
 		}
 		// The frame as a graph. The passes' AddPasses do the CPU work and declare the GPU work, which the graph
-		// schedules, places the barriers and queue syncs between and runs. With async compute, everything before
-		// DLSS-RR (the TLAS, lights, sky and path tracing) goes on the compute queue, and a submit hands its results to
-		// the graphics queue for the denoiser and the rest; without, everything is on graphics.
+		// schedules, places the barriers and queue syncs between and runs. With async compute, the sky and clouds go on
+		// the compute queue while the graphics queue updates the TLAS and builds the light tree, which share nothing
+		// with them, so the two overlap; a submit then hands the sky to graphics, where the path tracer, the denoiser
+		// and the rest run. Without, everything is on graphics. A section can't use a resource on both queues, even
+		// only to read it, so nothing that reads the scene or sky can overlap the path tracer.
 		graph.Reset();
 		FrameGraph frame(graph, *renderContext);
 		frame.backBuffer = frame.ImportTexture(renderContext->GetCurrentBackBufferHandle(), "BackBuffer");
 		frame.queue = settings.asyncCompute ? QueueType::Compute : QueueType::Graphics;
+		for (size_t i = 0; i < built.onAsyncCompute; ++i)
+		{
+			passes[i]->AddPasses(frame);
+		}
+		frame.queue = QueueType::Graphics;
 		gpuScene.AddAccelerationStructurePasses(frame);
 		// Every light, static and dynamic, into a new tree on the GPU each frame.
 		gpuScene.AddLightPasses(frame, static_cast<uint32_t>(settings.lights.maxLeafLights));
-		for (size_t i = 0; i < passes.size(); ++i)
+		if (settings.asyncCompute)
 		{
-			if (i == built.beforeDenoiser && frame.queue == QueueType::Compute)
-			{
-				graph.Submit();
-				frame.queue = QueueType::Graphics;
-			}
+			graph.Submit();
+		}
+		for (size_t i = built.onAsyncCompute; i < passes.size(); ++i)
+		{
 			passes[i]->AddPasses(frame);
 		}
 		if (!graph.Compile(*renderContext))

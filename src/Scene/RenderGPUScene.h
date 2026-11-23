@@ -164,13 +164,13 @@ public:
 		return previousTransforms_.empty() ? InvalidResourceHandle : previousTransforms_[previousTransformFrame_];
 	}
 
-	// Writes the current frame's uploads: the dynamic instances' transforms if they moved, the point lights and the
+	// Writes the current frame's uploads: the dynamic instances' transforms if they moved, the punctual (point and spot) lights and the
 	// emission scales. After a scene load it also makes the light buffer and the light tree builder's buffers, which
 	// waits for the GPU. Call after BeginFrame, which frees the current frame's buffers, and before
 	// BeginGraphicsCommandList.
 	void UpdateLights();
 
-	// Adds the move of the dynamic lights and the point lights into the light buffer (Lights/Dynamic lights,
+	// Adds the move of the dynamic lights and the punctual lights into the light buffer (Lights/Dynamic lights,
 	// TransformDynamicLights in DynamicLights.slang), then the build of the light tree over every light, static and
 	// dynamic alike (LightTreeBuilder::AddPasses). Call every frame after UpdateLights, before any pass that traces.
 	void AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights);
@@ -335,7 +335,7 @@ public:
 		return lightCount_;
 	}
 
-	// The light buffer holds the emissive triangles, then the point lights. Triangle lights before
+	// The light buffer holds the emissive triangles, then the punctual (point and spot) lights. Triangle lights before
 	// GetStaticLightCount() are static emitters, those from it on dynamic ones.
 	uint32_t GetTriangleLightCount() const
 	{
@@ -347,9 +347,9 @@ public:
 		return staticLightCount_;
 	}
 
-	uint32_t GetPointLightCount() const
+	uint32_t GetPunctualLightCount() const
 	{
-		return static_cast<uint32_t>(pointLights_.size());
+		return static_cast<uint32_t>(punctualLights_.size());
 	}
 
 	// Levels of node groups every light is under in the last tree.
@@ -542,13 +542,13 @@ private:
 	void ComputeBounds(const Scene::GLTFScene &scene);
 	// Returns each node's scene instance, UINT32_MAX for those without a mesh.
 	std::vector<uint32_t> FillInstances(const Scene::GLTFScene &scene);
-	// Fills the animation tables from the glTF's animations, and the cameras and point lights, which may move.
+	// Fills the animation tables from the glTF's animations, and the cameras and punctual lights, which may move.
 	void BuildAnimation(const Scene::GLTFScene &scene, const std::vector<uint32_t> &instanceOfNode);
 	// From the animation tables, their duration and the dynamic instances. Call before PartitionDynamicLights.
 	void PrepareAnimation();
 	void DestroyLights();
 	// The light buffer and the dynamic lights' object-space tables. Only while the GPU is idle.
-	void CreateLightBuffers(std::span<const GpuLight> pointLights);
+	void CreateLightBuffers(std::span<const GpuLight> punctualLights);
 	void DestroyLightBuffers();
 
 	RenderContext *renderContext_ = nullptr;
@@ -587,15 +587,15 @@ private:
 	{
 		ResourceHandle transforms =
 				InvalidResourceHandle; // DynamicLightTransform per dynamic instance, when they moved
-		ResourceHandle pointLights = InvalidResourceHandle; // GpuLight, written whole every frame
+		ResourceHandle punctualLights = InvalidResourceHandle; // GpuLight, written whole every frame
 		ResourceHandle emissionScales = InvalidResourceHandle; // written whole every frame
 		size_t transformCapacity = 0;
-		size_t pointLightCapacity = 0;
+		size_t punctualLightCapacity = 0;
 		size_t emissionScaleCapacity = 0;
 	};
 
 	// Every light, in video memory: the static triangle lights, uploaded once per builder reset, then the dynamic
-	// ones and the point lights, which TransformDynamicLights writes on the GPU. One buffer for all frames in flight,
+	// ones and the punctual lights, which TransformDynamicLights writes on the GPU. One buffer for all frames in flight,
 	// as the GPU writes it in queue order. Only a UAV descriptor, which the tree build reads through; tracing binds
 	// it as a root SRV.
 	ResourceHandle lights_ = InvalidResourceHandle;
@@ -621,29 +621,33 @@ private:
 	float3 dynamicLightBoundsMin_ = {};
 	float3 dynamicLightBoundsMax_ = {};
 
-	// Per emissive instance, its scene instance and SetEmissionScale's factor. The point lights have the slots
+	// Per emissive instance, its scene instance and SetEmissionScale's factor. The punctual lights have the slots
 	// after the emissive instances', at 1.
 	std::vector<uint32_t> emissiveInstances_;
 	std::vector<float> emissionScales_;
 	std::vector<uint32_t> lightEmitters_; // per light, its emission scale slot
-	// Gives the point lights their emission scale slots after the emissive instances' ones. Call after
+	// Gives the punctual lights their emission scale slots after the emissive instances' ones. Call after
 	// PartitionDynamicLights, before UploadEmitters.
-	void AppendPointLightEmitters();
-	// The point lights as GpuLights, where they are now.
-	std::vector<GpuLight> MakePointLights() const;
+	void AppendPunctualLightEmitters();
+	// The punctual lights as GpuLights, where they are now.
+	std::vector<GpuLight> MakePunctualLights() const;
 
-	// The KHR_lights_punctual point lights, kept in the scene cache. They follow the triangle lights in the
-	// light buffer. Spot and directional lights are left out for now.
-	struct PointLight
+	// The KHR_lights_punctual point and spot lights, kept in the scene cache. They follow the triangle lights in the
+	// light buffer. Directional lights are left out for now.
+	struct PunctualLight
 	{
 		float3 intensity; // candela, colour times intensity
 		float range; // 0 = infinite
 		float3 position; // world space, at rest, then as Animate last posed it
 		uint32_t animatedNode; // into animatedNodes_, or UINT32_MAX for a light that does not move
+		float3 direction; // spot only: world space, the way the cone points (the node's -Z), posed like position
+		uint32_t spot; // 1 for a spot light, 0 for a point light
+		float innerConeAngle; // spot only, radians from the axis: full intensity inside
+		float outerConeAngle; // spot only: no light outside
 	};
-	std::vector<PointLight> pointLights_;
-	float3 pointLightBoundsMin_ = {};
-	float3 pointLightBoundsMax_ = {};
+	std::vector<PunctualLight> punctualLights_;
+	float3 punctualLightBoundsMin_ = {};
+	float3 punctualLightBoundsMax_ = {};
 
 	// The animations, kept in the scene cache.
 	std::vector<AnimatedNode> animatedNodes_;

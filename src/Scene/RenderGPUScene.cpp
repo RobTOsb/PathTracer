@@ -338,11 +338,11 @@ namespace
 		return { std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z) };
 	}
 
-	// Where the light tree build puts the light (MakeLightCluster): a triangle's centroid, a point light's position.
+	// Where the light tree build puts the light (MakeLightCluster): a triangle's centroid, a punctual light's position.
 	float3 LightCentroid(const GpuLight &light)
 	{
 		GpuLight copy = light; // GetLightType is not const
-		if (copy.GetLightType() == kLight_Point)
+		if (copy.GetLightType() != kLight_Area)
 		{
 			return float3(light.v1.x, light.v1.y, light.v1.z);
 		}
@@ -428,7 +428,7 @@ void RenderGPUScene::DestroyLights()
 {
 	for (LightFrameBuffers &frame: lightFrames_)
 	{
-		for (ResourceHandle buffer: { frame.transforms, frame.pointLights, frame.emissionScales })
+		for (ResourceHandle buffer: { frame.transforms, frame.punctualLights, frame.emissionScales })
 		{
 			if (buffer != InvalidResourceHandle)
 			{
@@ -455,13 +455,13 @@ void RenderGPUScene::DestroyLightBuffers()
 	lightsPose_ = UINT32_MAX;
 }
 
-void RenderGPUScene::CreateLightBuffers(std::span<const GpuLight> pointLights)
+void RenderGPUScene::CreateLightBuffers(std::span<const GpuLight> punctualLights)
 {
 	DestroyLightBuffers();
 	// At least one element each, so the bindings stay valid without lights. The dynamic lights start at rest,
 	// and the first BuildLightTree moves them.
 	std::vector<GpuLight> lights(emissiveLights_.begin(), emissiveLights_.end());
-	lights.insert(lights.end(), pointLights.begin(), pointLights.end());
+	lights.insert(lights.end(), punctualLights.begin(), punctualLights.end());
 	lights.resize(std::max<size_t>(lights.size(), 1), GpuLight{});
 	std::vector<GpuLight> objectLights = dynamicObjectLights_;
 	objectLights.resize(std::max<size_t>(objectLights.size(), 1), GpuLight{});
@@ -495,16 +495,16 @@ void RenderGPUScene::CreateLightBuffers(std::span<const GpuLight> pointLights)
 void RenderGPUScene::UpdateLights()
 {
 	const std::span<const GpuLight> lights = emissiveLights_;
-	const std::vector<GpuLight> pointLights = MakePointLights();
+	const std::vector<GpuLight> punctualLights = MakePunctualLights();
 	if (!lightTreeBuilt_)
 	{
-		// The point lights have no texture to average, so their flux scale is 1.
+		// The punctual lights have no texture to average, so their flux scale is 1.
 		std::vector<float> fluxScales = emissiveFluxScales_;
-		fluxScales.resize(lights.size() + pointLights.size(), 1.0f);
+		fluxScales.resize(lights.size() + punctualLights.size(), 1.0f);
 		// Waits for the GPU, so the old light buffers can go.
 		lightTreeBuilder_->Reset(fluxScales, lightEmitterBuffer_);
 		lightTreeBuilt_ = true;
-		CreateLightBuffers(pointLights);
+		CreateLightBuffers(punctualLights);
 		CentroidBounds(lights.first(staticLightCount_), staticLightBoundsMin_, staticLightBoundsMax_);
 		// The dynamic lights where the scene loaded them, until they first move.
 		CentroidBounds(lights.subspan(staticLightCount_), dynamicLightBoundsMin_, dynamicLightBoundsMax_);
@@ -515,8 +515,8 @@ void RenderGPUScene::UpdateLights()
 		++dynamicLightPose_;
 		dynamicLightsMoved_ = false;
 	}
-	CentroidBounds(pointLights, pointLightBoundsMin_, pointLightBoundsMax_);
-	lightCount_ = static_cast<uint32_t>(lights.size() + pointLights.size());
+	CentroidBounds(punctualLights, punctualLightBoundsMin_, punctualLightBoundsMax_);
+	lightCount_ = static_cast<uint32_t>(lights.size() + punctualLights.size());
 
 	// BeginFrame has waited for the frame that last read this slot, so it can be overwritten. The dynamic
 	// instances' transforms are only needed while the light buffer does not hold their pose yet; the point
@@ -545,11 +545,11 @@ void RenderGPUScene::UpdateLights()
 		transformsWritten_ = true;
 	}
 	ReserveLightBuffer<GpuLight>(renderContext_,
-								 frame.pointLights,
-								 frame.pointLightCapacity,
-								 pointLights.size(),
-								 "Scene_PointLights");
-	WriteLightRange<GpuLight>(renderContext_, frame.pointLights, 0, pointLights);
+								 frame.punctualLights,
+								 frame.punctualLightCapacity,
+								 punctualLights.size(),
+								 "Scene_PunctualLights");
+	WriteLightRange<GpuLight>(renderContext_, frame.punctualLights, 0, punctualLights);
 	ReserveLightBuffer<float>(renderContext_,
 							  frame.emissionScales,
 							  frame.emissionScaleCapacity,
@@ -570,25 +570,25 @@ void RenderGPUScene::AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights)
 	// Read and written through its UAV, by the move and by the tree build's keys.
 	const rg::ResourceId lights = frame.ImportBuffer(lights_, "Scene_Lights");
 	const uint32_t dynamicLightCount = static_cast<uint32_t>(dynamicObjectLights_.size());
-	const uint32_t pointLightCount = static_cast<uint32_t>(pointLights_.size());
+	const uint32_t punctualLightCount = static_cast<uint32_t>(punctualLights_.size());
 	const uint32_t firstThread = transformsWritten_ ? 0u : dynamicLightCount;
 	// There in every frame of a scene with lights to write, even one with none to write now, so that the dynamic
 	// lights moving or stopping does not change the graph.
-	if (dynamicLightCount + pointLightCount > 0)
+	if (dynamicLightCount + punctualLightCount > 0)
 	{
 		DynamicLightConstants constants = {};
 		constants.firstThread = firstThread;
 		constants.dynamicLightCount = dynamicLightCount;
-		constants.pointLightCount = pointLightCount;
+		constants.punctualLightCount = punctualLightCount;
 		constants.staticLightCount = staticLightCount_;
 		constants.objectLightsHandle = frame.DescriptorIndex(dynamicObjectLightBuffer_);
 		constants.lightInstancesHandle = frame.DescriptorIndex(dynamicLightInstanceBuffer_);
-		// Not read when only the point lights are written, so any valid buffer then.
+		// Not read when only the punctual lights are written, so any valid buffer then.
 		constants.transformsHandle =
 				frame.DescriptorIndex(transformsWritten_ ? lightFrame.transforms : dynamicObjectLightBuffer_);
-		constants.pointLightsHandle = frame.DescriptorIndex(lightFrame.pointLights);
+		constants.punctualLightsHandle = frame.DescriptorIndex(lightFrame.punctualLights);
 		constants.lightsHandle = frame.DescriptorIndex(lights_);
-		const uint32_t threads = dynamicLightCount + pointLightCount - firstThread;
+		const uint32_t threads = dynamicLightCount + punctualLightCount - firstThread;
 		const PipelineHandle pipeline = dynamicLightsPipeline_;
 
 		frame.AddPass(rg::Pass::Compute("Lights/Dynamic lights")
@@ -624,7 +624,7 @@ void RenderGPUScene::AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights)
 	const uint32_t triangleLights = static_cast<uint32_t>(emissiveLights_.size());
 	const Part parts[] = { { staticLightCount_, staticLightBoundsMin_, staticLightBoundsMax_ },
 						   { triangleLights - staticLightCount_, dynamicLightBoundsMin_, dynamicLightBoundsMax_ },
-						   { static_cast<uint32_t>(pointLights_.size()), pointLightBoundsMin_, pointLightBoundsMax_ } };
+						   { static_cast<uint32_t>(punctualLights_.size()), punctualLightBoundsMin_, punctualLightBoundsMax_ } };
 	inputs.boundsMin = float3(FLT_MAX, FLT_MAX, FLT_MAX);
 	inputs.boundsMax = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
 	for (const Part &part: parts)
@@ -746,13 +746,15 @@ void RenderGPUScene::Animate(float seconds)
 			std::copy(world.begin(), world.end(), camera.worldMatrix);
 		}
 	}
-	// UpdateLights writes the point lights every frame.
-	for (PointLight &light: pointLights_)
+	// UpdateLights writes the punctual lights every frame.
+	for (PunctualLight &light: punctualLights_)
 	{
 		if (light.animatedNode != UINT32_MAX)
 		{
 			const std::array<float, 12> &world = worlds[light.animatedNode];
 			light.position = float3(world[3], world[7], world[11]);
+			light.direction = float3(-world[8], -world[9], -world[10]);
+			NormaliseFloat3(light.direction);
 		}
 	}
 
@@ -1111,18 +1113,18 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 	lightTreeBuilt_ = false;
 }
 
-void RenderGPUScene::AppendPointLightEmitters()
+void RenderGPUScene::AppendPunctualLightEmitters()
 {
 	const uint32_t firstSlot = static_cast<uint32_t>(emissionScales_.size());
-	for (uint32_t i = 0; i < static_cast<uint32_t>(pointLights_.size()); ++i)
+	for (uint32_t i = 0; i < static_cast<uint32_t>(punctualLights_.size()); ++i)
 	{
 		lightEmitters_.push_back(firstSlot + i);
 	}
-	emissionScales_.resize(firstSlot + pointLights_.size(), 1.0f);
+	emissionScales_.resize(firstSlot + punctualLights_.size(), 1.0f);
 	lightTreeBuilt_ = false;
 }
 
-std::vector<GpuLight> RenderGPUScene::MakePointLights() const
+std::vector<GpuLight> RenderGPUScene::MakePunctualLights() const
 {
 	// KHR_lights_punctual intensities are photometric (candela), but emissive strengths and the sun are used as
 	// radiometric values (W/m^2/sr, W/m^2), as Blender writes them. Blender's exporter in its default "Standard"
@@ -1130,13 +1132,19 @@ std::vector<GpuLight> RenderGPUScene::MakePointLights() const
 	// to the emissive meshes. Dividing by the same luminous efficacy brings them back to the radiometric scale.
 	constexpr float kLumensPerWatt = 683.0f;
 	std::vector<GpuLight> lights;
-	lights.reserve(pointLights_.size());
-	for (const PointLight &light: pointLights_)
+	lights.reserve(punctualLights_.size());
+	for (const PunctualLight &light: punctualLights_)
 	{
 		const float3 radiantIntensity(light.intensity.x / kLumensPerWatt,
 									  light.intensity.y / kLumensPerWatt,
 									  light.intensity.z / kLumensPerWatt);
-		lights.push_back(MakePointLight(radiantIntensity, light.position, light.range));
+		lights.push_back(light.spot != 0 ? MakeSpotLight(radiantIntensity,
+														light.position,
+														light.range,
+														light.direction,
+														light.outerConeAngle,
+														light.innerConeAngle)
+										 : MakePointLight(radiantIntensity, light.position, light.range));
 	}
 	return lights;
 }
@@ -1263,7 +1271,7 @@ void RenderGPUScene::BuildGPUScene(const Scene::GLTFScene &scene, const std::fil
 	UploadMaterials(materials, batch);
 	std::vector<uint32_t> emitters = CollectEmitters(scene, materials);
 	PartitionDynamicLights(emitters);
-	AppendPointLightEmitters();
+	AppendPunctualLightEmitters();
 	UploadEmitters(emitters, batch);
 	BakeOpacityMicromaps(scene, materials);
 	UploadOpacityMicromapIndices(batch);
@@ -1352,7 +1360,7 @@ void RenderGPUScene::SerialiseTables(Archive &archive,
 	archive.Table(animationTimes_);
 	archive.Table(animationValues_);
 	archive.Table(sceneCameras_);
-	archive.Table(pointLights_);
+	archive.Table(punctualLights_);
 	archive.Value(boundsMin_);
 	archive.Value(boundsMax_);
 }
@@ -1479,7 +1487,7 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 			return false;
 		}
 	}
-	for (const PointLight &light: pointLights_)
+	for (const PunctualLight &light: punctualLights_)
 	{
 		if (light.animatedNode != UINT32_MAX && light.animatedNode >= animatedNodes_.size())
 		{
@@ -1530,7 +1538,7 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 		animationTimes_.clear();
 		animationValues_.clear();
 		sceneCameras_.clear();
-		pointLights_.clear();
+		punctualLights_.clear();
 		ReleaseStaging();
 		return false;
 	}
@@ -1592,7 +1600,7 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 	UploadMaterials(materials, batch);
 	PrepareAnimation();
 	PartitionDynamicLights(emitters);
-	AppendPointLightEmitters();
+	AppendPunctualLightEmitters();
 	UploadEmitters(emitters, batch);
 	UploadOpacityMicromapIndices(batch);
 	lightTreeBuilt_ = false;
@@ -1600,7 +1608,7 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 	renderContext_->EndUpload(batch);
 
 	logi("GPUScene: loaded '{}': {} mesh(es), {} primitive(s), {} instance(s), {} vertices, {} triangles, "
-		 "{} texture(s), {} emissive triangle light(s), {} point light(s)",
+		 "{} texture(s), {} emissive triangle light(s), {} punctual light(s)",
 		 cachePath.string(),
 		 meshDescs.size(),
 		 primitiveDescs.size(),
@@ -1609,7 +1617,7 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 		 indices_.size() / 3,
 		 textures_.size(),
 		 emissiveLights_.size(),
-		 pointLights_.size());
+		 punctualLights_.size());
 
 	ReleaseStaging();
 	return true;
@@ -1726,9 +1734,11 @@ void RenderGPUScene::BuildAnimation(const Scene::GLTFScene &scene, const std::ve
 			 entry.animatedNode != UINT32_MAX ? "animated" : "still");
 	}
 
-	// The KHR_lights_punctual point lights at their nodes' origins; the nodes' rotation and scale do not change them.
-	pointLights_.clear();
+	// The KHR_lights_punctual point and spot lights at their nodes' origins. A spot light shines down its node's -Z;
+	// otherwise the nodes' rotation and scale do not change them.
+	punctualLights_.clear();
 	uint32_t otherLights = 0;
+	uint32_t spotLights = 0;
 	uint32_t animatedLights = 0;
 	for (uint32_t n = 0; n < static_cast<uint32_t>(nodeCount); ++n)
 	{
@@ -1739,9 +1749,16 @@ void RenderGPUScene::BuildAnimation(const Scene::GLTFScene &scene, const std::ve
 			continue;
 		}
 		const Scene::PunctualLight &light = scene.GetLight(lightIndex);
-		if (light.type != Scene::PunctualLightType::Point)
+		const bool spot = light.type == Scene::PunctualLightType::Spot;
+		if (light.type != Scene::PunctualLightType::Point && !spot)
 		{
 			++otherLights;
+			continue;
+		}
+		// The extension allows an outer angle in (0, pi/2] and an inner one in [0, outer).
+		const float outerConeAngle = std::min(light.outerConeAngle, 0.5f * Pi);
+		if (spot && !(outerConeAngle > 0.0f))
+		{
 			continue;
 		}
 		const float3 intensity = float3(light.colour[0] * light.intensity,
@@ -1752,21 +1769,38 @@ void RenderGPUScene::BuildAnimation(const Scene::GLTFScene &scene, const std::ve
 		{
 			continue;
 		}
-		PointLight &entry = pointLights_.emplace_back();
+		PunctualLight &entry = punctualLights_.emplace_back();
 		entry.intensity = intensity;
 		entry.range = light.range > 0.0f && std::isfinite(light.range) ? light.range : 0.0f;
 		const float *m = source.GetWorldMatrix();
 		entry.position = float3(m[3], m[7], m[11]);
 		entry.animatedNode = animatedOfNode[n];
+		entry.spot = spot ? 1u : 0u;
+		entry.direction = float3(0.0f, 0.0f, -1.0f);
+		if (spot)
+		{
+			const float3 axis(-m[8], -m[9], -m[10]);
+			if (Dot(axis, axis) > 0.0f)
+			{
+				entry.direction = axis;
+				NormaliseFloat3(entry.direction);
+			}
+			entry.outerConeAngle = outerConeAngle;
+			entry.innerConeAngle = std::clamp(light.innerConeAngle, 0.0f, outerConeAngle);
+			++spotLights;
+		}
 		animatedLights += entry.animatedNode != UINT32_MAX ? 1 : 0;
 	}
-	if (!pointLights_.empty())
+	if (!punctualLights_.empty())
 	{
-		logi("GPUScene: {} point light(s), {} of them animated", pointLights_.size(), animatedLights);
+		logi("GPUScene: {} punctual light(s), {} of them spot lights, {} animated",
+			 punctualLights_.size(),
+			 spotLights,
+			 animatedLights);
 	}
 	if (otherLights > 0)
 	{
-		logw("GPUScene: {} spot or directional light(s) left out, only point lights are rendered for now", otherLights);
+		logw("GPUScene: {} directional light(s) left out, only point and spot lights are rendered for now", otherLights);
 	}
 
 	for (size_t a = 0; a < scene.GetAnimationCount(); ++a)

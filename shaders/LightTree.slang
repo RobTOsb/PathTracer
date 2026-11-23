@@ -204,7 +204,8 @@ float LightTreeConeCosine(float cosAxis, float sinCone, float cosCone)
 // The light the node's cluster sends to the shading point's lobes: the node's vMF emission lobe at its strongest over
 // the cone of directions to its bounding sphere, over the squared distance (at least the radius), times the diffuse
 // lobes as cosine / pi at their strongest over the cone, and the glossy lobe weighed by the cluster as an SG light.
-// The emission lobe is left as it is: a one-sided emitter's sharpness is at most about 1.8, already broad.
+// The emission lobe is left as it is: a one-sided emitter's sharpness is at most about 1.8, already broad; a spot
+// light's is sharper, but its cone is a hard bound that a wider lobe would only spill past.
 float LightTreeNodeImportance(LightTreeNode node, LightTreeShadingContext ctx)
 {
     // Nothing for the empty nodes that pad a group, and for a bounding sphere entirely below the tangent plane,

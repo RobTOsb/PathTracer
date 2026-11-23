@@ -898,6 +898,7 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 		key.previousScene = 0;
 		key.samplesPerFrame = 0; // the reference's own, set below
 		key.photons.rects = 0; // a buffer per frame in flight
+		key.exposureBuffer = 0; // the exposure copy of the frame before last, by frame parity
 		const ReferenceSettings &reference = settings_.reference;
 		if (accumulatedSamples_ == 0 || std::memcmp(&key, &accumulationKey_, sizeof(key)) != 0 ||
 			std::memcmp(&atmosphere_.GetParameters(), &accumulationAtmosphere_, sizeof(AtmosphereParameters)) != 0 ||

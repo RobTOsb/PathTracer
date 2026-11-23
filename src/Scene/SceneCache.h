@@ -38,7 +38,8 @@
 // 25: blended surfaces cut below alpha 16/255 instead of 1/255 (kBlendMinOpacity).
 // 26: every perspective glTF camera (RenderGPUScene::sceneCameras_), the still ones as views to choose from.
 // 27: the medium outside an interface (pbrt's medium_interface) in GpuMaterial, 152 bytes.
-constexpr uint32_t kSceneCacheVersion = 27;
+// 28: spot lights in RenderGPUScene::punctualLights_ (direction, cone angles).
+constexpr uint32_t kSceneCacheVersion = 28;
 
 struct SceneCacheTexture
 {

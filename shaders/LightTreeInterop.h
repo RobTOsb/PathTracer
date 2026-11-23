@@ -112,17 +112,17 @@ struct DynamicLightTransform
 #define DYNAMIC_LIGHTS_GROUP_SIZE 256u
 
 // Root constants of TransformDynamicLights. Thread i writes light staticLightCount + firstThread + i: the dynamic
-// triangle lights moved by their instance's transform, then the point lights copied from this frame's upload.
+// triangle lights moved by their instance's transform, then the punctual lights copied from this frame's upload.
 struct DynamicLightConstants
 {
-	uint firstThread; // 0 to move the dynamic lights too, dynamicLightCount to write only the point lights
+	uint firstThread; // 0 to move the dynamic lights too, dynamicLightCount to write only the punctual lights
 	uint dynamicLightCount;
-	uint pointLightCount;
+	uint punctualLightCount;
 	uint staticLightCount; // where the dynamic lights start in the light buffer
 	uint objectLightsHandle; // StructuredBuffer<GpuLight>, per dynamic light, its triangle in object space
 	uint lightInstancesHandle; // StructuredBuffer<uint>, per dynamic light, its dynamic instance
 	uint transformsHandle; // StructuredBuffer<DynamicLightTransform>, per dynamic instance
-	uint pointLightsHandle; // StructuredBuffer<GpuLight>
+	uint punctualLightsHandle; // StructuredBuffer<GpuLight>
 	uint lightsHandle; // RWStructuredBuffer<GpuLight>, the light buffer
 };
 

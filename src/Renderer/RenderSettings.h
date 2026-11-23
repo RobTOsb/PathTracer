@@ -248,8 +248,8 @@ struct RenderSettings
 	bool shaderExecutionReordering = true;
 	// Shadow rays as inline ray queries (INLINE_SHADOWS) instead of TraceRay with the shadow hit group.
 	bool inlineShadowRays = true;
-	// The scene, sky and path tracing passes (everything before DLSS-RR) on the async compute queue, with the
-	// denoiser and the passes after it on the graphics queue once they are done. Off: everything on graphics.
+	// The sky and cloud passes on the async compute queue, overlapping the TLAS update and light tree build on the
+	// graphics queue, where the path tracer and everything after it then run. Off: everything on graphics.
 	bool asyncCompute = false;
 	bool opacityMicromaps = true;
 	int opacityMicromap2StateBounce = 1;
