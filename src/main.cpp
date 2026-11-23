@@ -8,6 +8,7 @@
 #include "Renderer/AutoExposurePass.h"
 #include "Renderer/BloomPass.h"
 #include "Renderer/DLSSPass.h"
+#include "Renderer/FrameGraph.h"
 #include "Renderer/GuideViewPass.h"
 #include "Renderer/ImGuiPass.h"
 #include "Renderer/PathTracerPass.h"
@@ -28,6 +29,7 @@
 #include <iomanip>
 #include <math.h>
 #include <memory>
+#include <stdexcept>
 #include <stdio.h>
 #include <string>
 #include <vector>
@@ -181,12 +183,24 @@ bool LoadCameraBookmark(const std::filesystem::path &path, Camera &camera, Rende
 	return true;
 }
 
-void BuildPasses(RenderContext *renderContext,
-				 NGXContext &ngx,
-				 const RenderGPUScene &gpuScene,
-				 const Camera &camera,
-				 RenderSettings &settings,
-				 std::vector<std::unique_ptr<RenderPass>> &passes)
+// What BuildPasses made, besides the passes.
+struct BuiltPasses
+{
+	// The UI's pass, which builds the UI at the start of each frame.
+	ImGuiPass *ui = nullptr;
+	// The passes at the front of the list that run before DLSS-RR (the sky and the path tracer), on the async compute
+	// queue when it is on.
+	size_t beforeDenoiser = 0;
+};
+
+// Makes the passes in the order they add their graph passes.
+BuiltPasses BuildPasses(RenderContext *renderContext,
+					   NGXContext &ngx,
+					   const RenderGPUScene &gpuScene,
+					   const Camera &camera,
+					   RenderSettings &settings,
+					   const rg::RenderGraph &graph,
+					   std::vector<std::unique_ptr<RenderPass>> &passes)
 {
 	passes.clear();
 
@@ -223,12 +237,13 @@ void BuildPasses(RenderContext *renderContext,
 	auto pathTracer = std::make_unique<PathTracerPass>(
 			renderContext, gpuScene, camera, settings, *atmosphere, rayReconstruction, reference);
 	PathTracerPass &pathTracerPass = *pathTracer;
-	ResourceHandle radiance = pathTracer->GetOutput();
+	// The HDR image the post passes read: DLSS-RR's output, or the path tracer's, both transients of each frame's graph.
+	HdrSource radiance = [&pathTracerPass] { return pathTracerPass.GetOutput(); };
 	passes.push_back(std::move(atmosphere));
 	if (rayReconstruction)
 	{
 		auto dlss = std::make_unique<DLSSPass>(renderContext, ngx, *pathTracer, camera, settings);
-		radiance = dlss->GetOutput();
+		radiance = [&dlssPass = *dlss] { return dlssPass.GetOutput(); };
 		passes.push_back(std::move(pathTracer));
 		passes.push_back(std::move(dlss));
 	}
@@ -238,19 +253,24 @@ void BuildPasses(RenderContext *renderContext,
 	}
 	auto autoExposure = std::make_unique<AutoExposurePass>(renderContext, radiance, settings);
 	const ResourceHandle exposure = autoExposure->GetExposure();
-	// The firefly filter's threshold follows last frame's exposure.
-	pathTracerPass.SetExposureBuffer(exposure);
+	// The firefly filter's threshold follows the exposure of the frame before last.
+	pathTracerPass.SetExposureBuffers(autoExposure->GetTracingExposure(0), autoExposure->GetTracingExposure(1));
 	passes.push_back(std::move(autoExposure));
 	auto bloom = std::make_unique<BloomPass>(renderContext, radiance, exposure, camera, settings);
-	radiance = bloom->GetOutput();
+	const BloomPass &bloomPass = *bloom;
 	passes.push_back(std::move(bloom));
-	passes.push_back(std::make_unique<TonemapPass>(renderContext, radiance, exposure, settings));
+	passes.push_back(std::make_unique<TonemapPass>(renderContext, bloomPass, exposure, settings));
 	if (rayReconstruction)
 	{
 		passes.push_back(std::make_unique<GuideViewPass>(renderContext, pathTracerPass, settings));
 	}
-	passes.push_back(
-			std::make_unique<ImGuiPass>(settings, camera, ngx.IsRayReconstructionSupported(), gpuScene, pathTracerPass));
+	auto imgui = std::make_unique<ImGuiPass>(
+			settings, camera, ngx.IsRayReconstructionSupported(), gpuScene, pathTracerPass, graph);
+	BuiltPasses built;
+	built.ui = imgui.get();
+	built.beforeDenoiser = 2;
+	passes.push_back(std::move(imgui));
+	return built;
 }
 
 // A glTF loads from the .scene file beside it when that is at least as new, and otherwise is
@@ -451,6 +471,10 @@ int Run(const char *scenePath)
 	renderContext->CreatePerFrameResources();
 	renderContext->InitialiseImgui(window.GetNativeWindow());
 
+	// Every frame's GPU work, recorded into it each frame. Declared after the context, so its GPU objects go first.
+	rg::RenderGraph graph;
+	graph.SetProfilePasses(true);
+
 	RenderGPUScene gpuScene(renderContext.get());
 	if (!LoadScene(scenePath, gpuScene))
 	{
@@ -499,7 +523,7 @@ int Run(const char *scenePath)
 	ngx.Initialise(static_cast<D3D12RenderContext *>(renderContext.get())->GetDevice());
 
 	std::vector<std::unique_ptr<RenderPass>> passes;
-	BuildPasses(renderContext.get(), ngx, gpuScene, camera, settings, passes);
+	BuiltPasses built = BuildPasses(renderContext.get(), ngx, gpuScene, camera, settings, graph, passes);
 	RenderMode builtRenderMode = settings.renderMode;
 	DLSSMode builtMode = settings.dlssMode;
 	DLSSRayReconstructionPreset builtPreset = settings.rrPreset;
@@ -530,12 +554,14 @@ int Run(const char *scenePath)
 		const float deltaSeconds = std::chrono::duration<float>(now - lastTime).count();
 		lastTime = now;
 
-		// The UI changes these while the previous frame is recorded, so they apply from here.
+		// The UI first, so that the settings it changes hold still while the frame is recorded and while the graph
+		// runs the passes' callbacks.
+		built.ui->BuildUI(renderContext.get());
 		if (settings.renderMode != builtRenderMode || settings.dlssMode != builtMode || settings.rrPreset != builtPreset)
 		{
 			renderContext->WaitForGPUIdle();
 			ngx.ReleaseFeature();
-			BuildPasses(renderContext.get(), ngx, gpuScene, camera, settings, passes);
+			built = BuildPasses(renderContext.get(), ngx, gpuScene, camera, settings, graph, passes);
 			builtRenderMode = settings.renderMode;
 			builtMode = settings.dlssMode;
 			builtPreset = settings.rrPreset;
@@ -686,14 +712,43 @@ int Run(const char *scenePath)
 				 settings.mergeInstances ? "with" : "without",
 				 std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
 		}
-		gpuScene.UpdateAccelerationStructures();
+		// The frame as a graph. The passes' AddPasses do the CPU work and declare the GPU work, which the graph
+		// schedules, places the barriers and queue syncs between and runs. With async compute, everything before
+		// DLSS-RR (the TLAS, lights, sky and path tracing) goes on the compute queue, and a submit hands its results to
+		// the graphics queue for the denoiser and the rest; without, everything is on graphics.
+		graph.Reset();
+		FrameGraph frame(graph, *renderContext);
+		frame.backBuffer = frame.ImportTexture(renderContext->GetCurrentBackBufferHandle(), "BackBuffer");
+		frame.queue = settings.asyncCompute ? QueueType::Compute : QueueType::Graphics;
+		gpuScene.AddAccelerationStructurePasses(frame);
 		// Every light, static and dynamic, into a new tree on the GPU each frame.
-		gpuScene.BuildLightTree(static_cast<uint32_t>(settings.lights.maxLeafLights));
-
-		for (const std::unique_ptr<RenderPass> &pass: passes)
+		gpuScene.AddLightPasses(frame, static_cast<uint32_t>(settings.lights.maxLeafLights));
+		for (size_t i = 0; i < passes.size(); ++i)
 		{
-			pass->Execute(renderContext.get());
+			if (i == built.beforeDenoiser && frame.queue == QueueType::Compute)
+			{
+				graph.Submit();
+				frame.queue = QueueType::Graphics;
+			}
+			passes[i]->AddPasses(frame);
 		}
+		if (!graph.Compile(*renderContext))
+		{
+			throw std::runtime_error("Render graph: " + graph.GetError());
+		}
+		// A new compile (the first frame, or a frame whose passes differ from the last compile's) replaces the page of
+		// the graph: its passes, batches, barriers and transient memory.
+		if (!graph.WasLastCompileReused())
+		{
+			std::ofstream("RenderGraph.html") << graph.DumpHtml("PathTracer frame");
+			logi("Render graph compiled: {} batches, {:.1f} MB of transients, written to RenderGraph.html",
+				 graph.GetTotalBatchCount(),
+				 static_cast<double>(graph.GetTransientMemorySize()) / (1024.0 * 1024.0));
+		}
+
+		renderContext->BeginProfileScope(kGpuFrameScope);
+		graph.Execute(*renderContext);
+		renderContext->EndProfileScope();
 
 		renderContext->TransitionResource(renderContext->GetCurrentBackBufferHandle(),
 										  ResourceLayout::Present,
@@ -708,6 +763,7 @@ int Run(const char *scenePath)
 	}
 
 	renderContext->WaitForGPUIdle();
+	graph.ReleaseResources();
 	return 0;
 }
 

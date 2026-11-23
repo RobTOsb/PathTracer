@@ -3,6 +3,7 @@
 #include "RenderPass.h"
 
 #include "RenderContext.h"
+#include "RenderGraph.h"
 
 #include "Maths.h"
 #include "PathTracerInterop.h"
@@ -10,6 +11,7 @@
 #include "SkyAtmosphereInterop.h"
 
 #include <chrono>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -17,23 +19,25 @@ class Camera;
 class SkyAtmospherePass;
 struct RenderSettings;
 
-// Render-resolution guide buffers written alongside the radiance for DLSS Ray Reconstruction.
+// Render-resolution guides written alongside the radiance for DLSS Ray Reconstruction, as this frame's graph resources.
+// The paths write all of them in full every frame, so they are transients, but for the specular hit distance and PSR
+// outcome, which the paths read back the next frame.
 struct PathTracerGuides
 {
-	ResourceHandle diffuseAlbedo = InvalidResourceHandle; // RGBA8
-	ResourceHandle specularAlbedo = InvalidResourceHandle; // RGBA16F
-	ResourceHandle normalRoughness = InvalidResourceHandle; // RGBA16F, world-space normal + linear roughness in .w
-	ResourceHandle motionVectors = InvalidResourceHandle; // RG16F, render pixels
-	ResourceHandle depth = InvalidResourceHandle; // R32F, reversed-Z hardware depth
-	ResourceHandle specularHitDistance = InvalidResourceHandle;
-	ResourceHandle specularMotionVectors = InvalidResourceHandle; // RG16F
+	rg::ResourceId diffuseAlbedo; // RGBA8
+	rg::ResourceId specularAlbedo; // RGBA16F
+	rg::ResourceId normalRoughness; // RGBA16F, world-space normal + linear roughness in .w
+	rg::ResourceId motionVectors; // RG16F, render pixels
+	rg::ResourceId depth; // R32F, reversed-Z hardware depth
+	rg::ResourceId specularHitDistance; // R16F, imported
+	rg::ResourceId specularMotionVectors; // RG16F
 	// R8, 1 where a moving object's shadow changed the light since last frame: DLSS-RR's bias current colour mask.
-	ResourceHandle shadowChanges = InvalidResourceHandle;
+	rg::ResourceId shadowChanges;
 	// R16F, -1..1: DLSS-RR's responsivity mask (Preset F only), positive on smooth reflectors so their reflections keep
 	// less history (FrameConstants::reflectionResponsivity).
-	ResourceHandle responsivity = InvalidResourceHandle;
-	// R16F, PsrOutcome per pixel: what became of its PSR chain, for GUIDE_VIEW_PSR_OUTCOME only.
-	ResourceHandle psrOutcome = InvalidResourceHandle;
+	rg::ResourceId responsivity;
+	// R16F, PsrOutcome per pixel: what became of its PSR chain, for GUIDE_VIEW_PSR_OUTCOME only. Imported.
+	rg::ResourceId psrOutcome;
 };
 
 // Traces one path per pixel into an HDR radiance target (RGBA16F) using the DXR pipeline in
@@ -53,7 +57,12 @@ struct PathTracerGuides
 // With RenderSettings::photons on and a sun (not in the reference), it first adapts the photon map and traces caustic
 // photons from it (PhotonRayGen, PathTracer/Photons.slang), then after the paths splats them onto the surfaces the
 // camera sees and adds them to the output (PhotonMap.slang): Adaptive Anisotropic Photon Scattering.
-// Leaves the output and the guides in the UnorderedAccess layout.
+// Its graph passes: Photons/Map update, Photons/Scan blocks, Photons/Scan totals and Photons/Trace before the paths
+// (with photons), PathTracer/Paths, then Photons/Splat and Photons/Composite (with photons).
+// What a frame builds and nothing reads the next frame is a graph transient: the radiance, the guides but for two, the
+// deferred glass branches, and the photons' prefix sums, records, receivers and splatted sums. The descriptors of those
+// the constants name are only known once the graph has placed them, so the first of the frame's passes to run writes
+// the frame constants.
 class PathTracerPass final : public RenderPass
 {
 public:
@@ -66,21 +75,26 @@ public:
 				   bool reference);
 	~PathTracerPass() override;
 
-	void Execute(RenderContext *renderContext) override;
+	void AddPasses(FrameGraph &frame) override;
 
-	ResourceHandle GetOutput() const
+	// This frame's radiance (RGBA16F), a graph transient: valid from AddPasses until the frame's graph has run.
+	rg::ResourceId GetOutput() const
 	{
 		return output_;
 	}
 
-	void SetExposureBuffer(ResourceHandle exposure)
-	{
-		exposure_ = exposure;
-	}
-
+	// This frame's guides, DLSS-RR only.
 	const PathTracerGuides &GetGuides() const
 	{
 		return guides_;
+	}
+
+	// The exposure the firefly filter follows: one copy per frame parity, so the paths read the copy the frame before
+	// last wrote (AutoExposurePass::GetTracingExposure).
+	void SetExposureBuffers(ResourceHandle even, ResourceHandle odd)
+	{
+		exposure_[0] = even;
+		exposure_[1] = odd;
 	}
 
 	// The sub-pixel offset of this frame's camera rays from the pixel centre, in render pixels
@@ -138,18 +152,25 @@ private:
 	};
 
 	const Pipeline *SelectPipeline();
+	// Binds the root arguments every DispatchRays of the pipeline takes, from a pass that read the scene and the sky
+	// (RenderGPUScene::UseForTracing, SkyAtmospherePass::UseForTracing).
+	void BindRaytracing(rg::PassContext &ctx, const Pipeline &pipeline, ResourceHandle constantBuffer, bool atmosphere) const;
+	// The real handle of one of this frame's graph resources, or none.
+	ResourceHandle Handle(rg::ResourceId resource) const
+	{
+		return resource.IsValid() ? graph_->GetHandle(resource) : InvalidResourceHandle;
+	}
+	uint DescriptorIndex(rg::ResourceId resource) const;
 	const Pipeline *GetPipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps,
 								bool psr, bool sgLightTree);
 	Pipeline CreatePipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps,
 							bool psr, bool sgLightTree) const;
 	ResourceHandle CreateTarget(Format format, const char *debugName) const;
+	// A render-resolution target of this frame's graph.
+	rg::ResourceId CreateTransientTarget(FrameGraph &frame, Format format, const char *debugName) const;
 	// Fills constants.photons for this frame (the photon map over the casters), enabled or not, and says whether the
 	// photon map starts over.
 	void PreparePhotons(FrameConstants &constants, bool sunActive, float sunAngularRadius);
-	// PhotonMap.slang's passes before the photons, and after the paths.
-	void DispatchPhotonMap(RenderContext *renderContext, ResourceHandle constantBuffer);
-	void DispatchPhotonSplat(RenderContext *renderContext, ResourceHandle constantBuffer);
-	PhotonPassConstants PhotonPassConstantsForFrame() const;
 
 	RenderContext *renderContext_ = nullptr;
 	const RenderGPUScene &scene_;
@@ -164,11 +185,16 @@ private:
 	bool serSupported_ = false;
 	bool serFailed_ = false; // the SER pipeline did not compile, so stay on the plain one
 	bool ommFailed_ = false; // the opacity micromap pipeline did not compile, so trace without them
-	ResourceHandle output_ = InvalidResourceHandle;
+	// This frame's graph, its radiance, guides and deferred glass branches (GpuDeferredBranch per pixel).
+	const rg::RenderGraph *graph_ = nullptr;
+	rg::ResourceId output_;
 	PathTracerGuides guides_;
+	rg::ResourceId deferredBranches_;
+	// The guides the paths read back the next frame, DLSS-RR only.
+	ResourceHandle specularHitDistance_ = InvalidResourceHandle;
+	ResourceHandle psrOutcome_ = InvalidResourceHandle;
 	ResourceHandle cameraState_ = InvalidResourceHandle; // GpuCameraState per pixel, DLSS-RR only
-	ResourceHandle deferredBranches_ = InvalidResourceHandle; // GpuDeferredBranch per pixel
-	ResourceHandle exposure_ = InvalidResourceHandle;
+	ResourceHandle exposure_[2] = { InvalidResourceHandle, InvalidResourceHandle };
 
 	// Caustic photons (created on first use): the photon map's shares (two, last frame's and this one's), running sums,
 	// feedback and coverage (and its sums, two), the photon records, and per pixel the receivers and the splatted
@@ -183,16 +209,27 @@ private:
 		PhotonPassCount
 	};
 	PipelineHandle photonPipelines_[PhotonPassCount] = {};
+	PhotonPassConstants PhotonPassConstantsForFrame() const;
+	// Binds a photon map pass, with this frame's transients' descriptors in its constants.
+	void BindPhotonPass(RenderContext &rc, PhotonPass pass, ResourceHandle constantBuffer,
+						const PhotonPassConstants &constants) const;
+	// PhotonMap.slang's passes before the photons are traced: the map adapted, then scanned.
+	// writeConstants writes the frame constants if no pass has yet.
+	void AddPhotonMapPasses(FrameGraph &frame, ResourceHandle constantBuffer, const PhotonPassConstants &constants,
+							const std::function<void(RenderContext &)> &writeConstants);
+	// Kept from frame to frame: the shares, the block sums (whose total the next update reads), the feedback and the
+	// coverage.
 	ResourceHandle photonDensity_[2] = { InvalidResourceHandle, InvalidResourceHandle };
-	ResourceHandle photonTexelPrefix_ = InvalidResourceHandle;
 	ResourceHandle photonBlockPrefix_ = InvalidResourceHandle;
 	ResourceHandle photonFeedback_ = InvalidResourceHandle;
-	ResourceHandle photonRecords_ = InvalidResourceHandle;
-	ResourceHandle photonRecordCount_ = InvalidResourceHandle;
-	ResourceHandle photonReceivers_ = InvalidResourceHandle;
-	ResourceHandle photonCaustics_ = InvalidResourceHandle;
 	ResourceHandle photonCoverage_ = InvalidResourceHandle;
 	ResourceHandle photonCoverageSums_ = InvalidResourceHandle;
+	// This frame's transients, while photons run.
+	rg::ResourceId photonTexelPrefix_;
+	rg::ResourceId photonRecords_;
+	rg::ResourceId photonRecordCount_;
+	rg::ResourceId photonReceivers_;
+	rg::ResourceId photonCaustics_;
 	std::vector<ResourceHandle> photonRects_;
 	std::vector<RenderGPUScene::PhotonCaster> photonCasters_;
 	std::vector<GpuPhotonRect> photonRectData_;

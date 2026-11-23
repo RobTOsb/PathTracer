@@ -18,6 +18,13 @@
 #include <utility>
 #include <vector>
 
+class FrameGraph;
+
+namespace rg
+{
+	struct Pass;
+}
+
 namespace Scene
 {
 	class Texture;
@@ -145,10 +152,10 @@ public:
 
 	void SetEmissionScale(uint32_t emissiveInstance, float scale);
 
-	// Picks the current frame's set of TLASes and rebuilds it if the dynamic instances have moved since it was
-	// last built, and keeps last frame's transforms for the motion vectors. Records on the current frame's
-	// graphics command list, so call it once per frame after BeginGraphicsCommandList and before any tracing.
-	void UpdateAccelerationStructures();
+	// Picks the current frame's set of TLASes and keeps last frame's transforms for the motion vectors, and adds the
+	// Scene/TLAS update pass, which rebuilds the set, if the dynamic instances have moved since it was last built.
+	// Call once per frame while recording the graph, before any pass that traces.
+	void AddAccelerationStructurePasses(FrameGraph &frame);
 
 	// Per TLAS instance (InstanceIndex()), last frame's object-to-world transform as three float4 rows of
 	// the float3x4 that ObjectToWorld3x4() gives, for the motion vectors of moving geometry.
@@ -163,10 +170,15 @@ public:
 	// BeginGraphicsCommandList.
 	void UpdateLights();
 
-	// Records the move of the dynamic lights and the point lights into the light buffer (TransformDynamicLights in
-	// DynamicLights.slang), then the build of the light tree over every light, static and dynamic alike. Call every
-	// frame after UpdateLights and SetDescriptorHeaps, before any tracing.
-	void BuildLightTree(uint32_t maxLeafLights);
+	// Adds the move of the dynamic lights and the point lights into the light buffer (Lights/Dynamic lights,
+	// TransformDynamicLights in DynamicLights.slang), then the build of the light tree over every light, static and
+	// dynamic alike (LightTreeBuilder::AddPasses). Call every frame after UpdateLights, before any pass that traces.
+	void AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights);
+
+	// Attaches to a ray tracing pass what the GPU writes of the scene that rays read: the current frame's TLAS (the
+	// micromap one with opacityMicromaps) and its 2-state twin, last frame's shadow TLAS with previousShadows, and the
+	// lights and their tree. The rest of the scene is uploaded once and stays out of the graph.
+	void UseForTracing(rg::Pass &pass, FrameGraph &frame, bool opacityMicromaps, bool previousShadows) const;
 
 	bool HasGeometry() const
 	{
@@ -267,24 +279,25 @@ public:
 		return lights_;
 	}
 
-	ResourceHandle GetLightTreeNodeBuffer() const
+	// The light tree's outputs this frame, graph resources once AddLightPasses has run.
+	rg::ResourceId GetLightTreeNodeBuffer() const
 	{
 		return lightTreeBuilder_->GetNodes();
 	}
 
 	// GpuLightTreeLeafEntry per light: its leaf position and its PMF within it, for the shader's PMF walk.
-	ResourceHandle GetLightLeafBuffer() const
+	rg::ResourceId GetLightLeafBuffer() const
 	{
 		return lightTreeBuilder_->GetLeafOfLight();
 	}
 
-	ResourceHandle GetLightTreeLeafLightBuffer() const
+	rg::ResourceId GetLightTreeLeafLightBuffer() const
 	{
 		return lightTreeBuilder_->GetLeafLights();
 	}
 
 	// GpuLightPowerEntry per light, for power light selection.
-	ResourceHandle GetLightPowerBuffer() const
+	rg::ResourceId GetLightPowerBuffer() const
 	{
 		return lightTreeBuilder_->GetPower();
 	}

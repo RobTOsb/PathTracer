@@ -2,7 +2,11 @@
 
 #include "RenderPass.h"
 
+#include <utility>
+#include <vector>
+
 #include "RenderContext.h"
+#include "RenderGraph.h"
 #include "RenderSettings.h"
 
 class Camera;
@@ -12,21 +16,22 @@ struct BloomConstants;
 // chain of half-resolution levels, the levels are summed back up into the first, and their mean
 // replaces RenderSettings::bloomStrength of the image in a copy the size of the window. With bloom off
 // it only copies the image. Without RenderSettings::bloomSun the first level leaves out the pixels that
-// look at the sun disc.
+// look at the sun disc. The levels and the output are graph transients, one graph pass per dispatch.
 class BloomPass final : public RenderPass
 {
 public:
 	// exposure: AutoExposurePass's exposure buffer.
 	BloomPass(RenderContext *renderContext,
-			  ResourceHandle hdrInput,
+			  HdrSource hdrInput,
 			  ResourceHandle exposure,
 			  const Camera &camera,
 			  const RenderSettings &settings);
 	~BloomPass() override;
 
-	void Execute(RenderContext *renderContext) override;
+	void AddPasses(FrameGraph &frame) override;
 
-	ResourceHandle GetOutput() const
+	// This frame's output (RGBA16F, the window's size), once AddPasses has run.
+	rg::ResourceId GetOutput() const
 	{
 		return output_;
 	}
@@ -34,19 +39,15 @@ public:
 private:
 	struct Level
 	{
-		ResourceHandle texture = InvalidResourceHandle; // RGBA16F, written as a UAV
-		ResourceHandle srv = InvalidResourceHandle;
 		uint width = 0;
 		uint height = 0;
 	};
 
 	PipelineHandle CreatePipeline(const char *entryPoint) const;
-	void Dispatch(RenderContext *renderContext, const BloomConstants &constants) const;
 	void SetSunMask(BloomConstants &constants) const;
 
 	RenderContext *renderContext_ = nullptr;
-	ResourceHandle hdrInput_ = InvalidResourceHandle;
-	ResourceHandle hdrInputSRV_ = InvalidResourceHandle;
+	HdrSource hdrInput_;
 	ResourceHandle exposure_ = InvalidResourceHandle;
 	const Camera &camera_;
 	const RenderSettings &settings_;
@@ -56,8 +57,8 @@ private:
 	PipelineHandle compositePipeline_ = InvalidPipelineHandle;
 
 	Level levels_[kMaxBloomLevels];
-	int levelCount_ = 0; // levels allocated, fewer than kMaxBloomLevels for a small window
-	ResourceHandle output_ = InvalidResourceHandle; // RGBA16F, the window's size
+	int levelCount_ = 0; // levels that fit, fewer than kMaxBloomLevels for a small window
+	rg::ResourceId output_;
 	uint width_ = 0;
 	uint height_ = 0;
 };

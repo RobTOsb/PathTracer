@@ -1,6 +1,7 @@
 #include "BloomPass.h"
 
 #include "Camera.h"
+#include "FrameGraph.h"
 #include "PathTracerInterop.h"
 
 #include <algorithm>
@@ -19,80 +20,37 @@ namespace
 	{
 		return (size + kGroupSize - 1) / kGroupSize;
 	}
-
-	void TransitionToUAV(RenderContext *renderContext, ResourceHandle texture)
-	{
-		renderContext->TransitionResource(texture,
-										  ResourceLayout::UnorderedAccess,
-										  ResourceSync::ComputeShading,
-										  ResourceAccess::UnorderedAccess);
-	}
-
-	void TransitionToSRV(RenderContext *renderContext, ResourceHandle texture)
-	{
-		renderContext->TransitionResource(texture,
-										  ResourceLayout::ShaderResource,
-										  ResourceSync::ComputeShading,
-										  ResourceAccess::ShaderResource);
-	}
 }
 
 BloomPass::BloomPass(RenderContext *renderContext,
-					 ResourceHandle hdrInput,
+					 HdrSource hdrInput,
 					 ResourceHandle exposure,
 					 const Camera &camera,
 					 const RenderSettings &settings) :
-	renderContext_(renderContext), hdrInput_(hdrInput), exposure_(exposure), camera_(camera), settings_(settings)
+	renderContext_(renderContext), hdrInput_(std::move(hdrInput)), exposure_(exposure), camera_(camera), settings_(settings)
 {
 	downsamplePipeline_ = CreatePipeline("Downsample");
 	upsamplePipeline_ = CreatePipeline("Upsample");
 	compositePipeline_ = CreatePipeline("Composite");
 
-	TextureViewDesc srvDesc = {};
-	srvDesc.viewType = ResourceViewType::ShaderResource;
-	hdrInputSRV_ = renderContext->CreateTextureView(hdrInput_, srvDesc);
-
 	width_ = renderContext->GetWindowWidth();
 	height_ = renderContext->GetWindowHeight();
 
-	TextureDesc desc = {};
-	desc.width = width_;
-	desc.height = height_;
-	desc.format = Format::R16G16B16A16_FLOAT;
-	desc.usageFlags = ResourceUsageFlags::UnorderedAccess;
-	desc.debugName = "Bloom_Output";
-	output_ = renderContext->CreateTexture(desc, ResourceViewType::UnorderedAccess);
-
-	// Separate textures rather than the mips of one, so each level is transitioned on its own.
+	// Separate textures rather than the mips of one, each level half the one above rounded up.
 	uint levelWidth = width_;
 	uint levelHeight = height_;
 	while (levelCount_ < kMaxBloomLevels && levelWidth > 1 && levelHeight > 1)
 	{
 		levelWidth = (levelWidth + 1) / 2;
 		levelHeight = (levelHeight + 1) / 2;
-
-		Level &level = levels_[levelCount_];
-		level.width = levelWidth;
-		level.height = levelHeight;
-		desc.width = levelWidth;
-		desc.height = levelHeight;
-		desc.debugName = "Bloom_Level" + std::to_string(levelCount_);
-		level.texture = renderContext->CreateTexture(desc, ResourceViewType::UnorderedAccess);
-		level.srv = renderContext->CreateTextureView(level.texture, srvDesc);
+		levels_[levelCount_].width = levelWidth;
+		levels_[levelCount_].height = levelHeight;
 		++levelCount_;
 	}
 }
 
 BloomPass::~BloomPass()
 {
-	// Views before the textures they view.
-	for (int i = 0; i < levelCount_; ++i)
-	{
-		renderContext_->DestroyResource(levels_[i].srv);
-		renderContext_->DestroyResource(levels_[i].texture);
-	}
-	renderContext_->DestroyResource(hdrInputSRV_);
-	renderContext_->DestroyResource(output_);
 }
 
 PipelineHandle BloomPass::CreatePipeline(const char *entryPoint) const
@@ -104,12 +62,6 @@ PipelineHandle BloomPass::CreatePipeline(const char *entryPoint) const
 								 " (see the shader log above).");
 	}
 	return pipeline;
-}
-
-void BloomPass::Dispatch(RenderContext *renderContext, const BloomConstants &constants) const
-{
-	renderContext->SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
-	renderContext->Dispatch(GroupCount(constants.width), GroupCount(constants.height), 1);
 }
 
 void BloomPass::SetSunMask(BloomConstants &constants) const
@@ -140,17 +92,36 @@ void BloomPass::SetSunMask(BloomConstants &constants) const
 	constants.sunMaskOneMinusCos = 2.0f * sinf(halfRadius) * sinf(halfRadius);
 }
 
-void BloomPass::Execute(RenderContext *renderContext)
+void BloomPass::AddPasses(FrameGraph &frame)
 {
-	renderContext->BeginEvent("Bloom");
-	renderContext->BeginProfileScope("Bloom");
-
-	TransitionToSRV(renderContext, hdrInput_);
-
 	const int levelCount = settings_.bloom ? std::clamp(settings_.bloomLevels, 1, levelCount_) : 0;
 
-	// Down the chain, each level filtered from the one above it.
-	renderContext->SetComputePipeline(downsamplePipeline_);
+	const rg::ResourceId input = hdrInput_();
+	const rg::ResourceId exposure = frame.ImportBuffer(exposure_, "AutoExposure_Exposure");
+	TextureDesc desc = {};
+	desc.format = Format::R16G16B16A16_FLOAT;
+	rg::ResourceId levels[kMaxBloomLevels];
+	for (int i = 0; i < levelCount; ++i)
+	{
+		desc.width = levels_[i].width;
+		desc.height = levels_[i].height;
+		desc.debugName = "Bloom_Level" + std::to_string(i);
+		levels[i] = frame.graph.CreateTexture(desc);
+	}
+	desc.width = width_;
+	desc.height = height_;
+	desc.debugName = "Bloom_Output";
+	output_ = frame.graph.CreateTexture(desc);
+
+	// The graph binds a transient's SRV or UAV as each pass uses it, the input's too.
+	auto dispatch = [](rg::PassContext &ctx, const BloomConstants &constants)
+	{
+		ctx.rc.SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
+		ctx.rc.Dispatch(GroupCount(constants.width), GroupCount(constants.height), 1);
+	};
+
+	// Down the chain, each level filtered from the one above it. The first also reads the exposure for its
+	// firefly weights; every level binds it, since setting the pipeline resets the bindings.
 	for (int i = 0; i < levelCount; ++i)
 	{
 		const Level &level = levels_[i];
@@ -168,19 +139,24 @@ void BloomPass::Execute(RenderContext *renderContext)
 			SetSunMask(constants);
 		}
 
-		TransitionToUAV(renderContext, level.texture);
-		renderContext->SetComputeSRVByName("g_Input", i == 0 ? hdrInputSRV_ : levels_[i - 1].srv);
-		renderContext->SetComputeUAVByName("g_Output", level.texture);
-		if (i == 0)
-		{
-			renderContext->SetComputeUAVByName("g_Exposure", exposure_);
-		}
-		Dispatch(renderContext, constants);
-		TransitionToSRV(renderContext, level.texture);
+		const rg::ResourceId source = i == 0 ? input : levels[i - 1];
+		const rg::ResourceId target = levels[i];
+		frame.AddPass(rg::Pass::Compute("Bloom/Down " + std::to_string(i))
+									.Reads(source)
+									.Use(exposure, rg::Access::ComputeShaderReadWrite)
+									.Writes(target)
+									.Executes(
+											[this, dispatch, constants, i, source, target, exposure](rg::PassContext &ctx)
+											{
+												ctx.rc.SetComputePipeline(downsamplePipeline_);
+												ctx.rc.SetComputeSRVByName("g_Input", ctx.Get(source));
+												ctx.rc.SetComputeUAVByName("g_Output", ctx.Get(target));
+												ctx.rc.SetComputeUAVByName("g_Exposure", ctx.Get(exposure));
+												dispatch(ctx, constants);
+											}));
 	}
 
 	// Back up, each level adding the sum of the ones below it.
-	renderContext->SetComputePipeline(upsamplePipeline_);
 	for (int i = levelCount - 1; i > 0; --i)
 	{
 		const Level &below = levels_[i];
@@ -192,11 +168,19 @@ void BloomPass::Execute(RenderContext *renderContext)
 		constants.width = level.width;
 		constants.height = level.height;
 
-		TransitionToUAV(renderContext, level.texture);
-		renderContext->SetComputeSRVByName("g_Input", below.srv);
-		renderContext->SetComputeUAVByName("g_Output", level.texture);
-		Dispatch(renderContext, constants);
-		TransitionToSRV(renderContext, level.texture);
+		const rg::ResourceId source = levels[i];
+		const rg::ResourceId target = levels[i - 1];
+		frame.AddPass(rg::Pass::Compute("Bloom/Up " + std::to_string(i - 1))
+									.Reads(source)
+									.Use(target, rg::Access::ComputeShaderReadWrite)
+									.Executes(
+											[this, dispatch, constants, source, target](rg::PassContext &ctx)
+											{
+												ctx.rc.SetComputePipeline(upsamplePipeline_);
+												ctx.rc.SetComputeSRVByName("g_Input", ctx.Get(source));
+												ctx.rc.SetComputeUAVByName("g_Output", ctx.Get(target));
+												dispatch(ctx, constants);
+											}));
 	}
 
 	BloomConstants constants = {};
@@ -207,13 +191,23 @@ void BloomPass::Execute(RenderContext *renderContext)
 	constants.strength = levelCount > 0 ? std::clamp(settings_.bloomStrength, 0.0f, 1.0f) : 0.0f;
 	constants.levelCount = static_cast<float>(std::max(levelCount, 1));
 
-	TransitionToUAV(renderContext, output_);
-	renderContext->SetComputePipeline(compositePipeline_);
-	renderContext->SetComputeSRVByName("g_Input", hdrInputSRV_);
-	renderContext->SetComputeSRVByName("g_Bloom", levels_[0].srv);
-	renderContext->SetComputeUAVByName("g_Output", output_);
-	Dispatch(renderContext, constants);
-
-	renderContext->EndProfileScope();
-	renderContext->EndEvent();
+	// With bloom off nothing has written a level, and the strength of 0 leaves the image as it is, so the image
+	// stands in for the bloom it would have blended in.
+	const rg::ResourceId bloom = levelCount > 0 ? levels[0] : rg::ResourceId{};
+	const rg::ResourceId output = output_;
+	rg::Pass composite = rg::Pass::Compute("Bloom/Composite");
+	composite.Reads(input);
+	if (bloom.IsValid())
+	{
+		composite.Reads(bloom);
+	}
+	frame.AddPass(std::move(composite.Writes(output).Executes(
+			[this, dispatch, constants, input, bloom, output](rg::PassContext &ctx)
+			{
+				ctx.rc.SetComputePipeline(compositePipeline_);
+				ctx.rc.SetComputeSRVByName("g_Input", ctx.Get(input));
+				ctx.rc.SetComputeSRVByName("g_Bloom", bloom.IsValid() ? ctx.Get(bloom) : ctx.Get(input));
+				ctx.rc.SetComputeUAVByName("g_Output", ctx.Get(output));
+				dispatch(ctx, constants);
+			})));
 }

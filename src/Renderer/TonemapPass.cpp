@@ -1,5 +1,8 @@
 #include "TonemapPass.h"
 
+#include "BloomPass.h"
+#include "FrameGraph.h"
+#include "PathTracerInterop.h"
 #include "RenderSettings.h"
 
 #include <chrono>
@@ -12,10 +15,10 @@ namespace
 }
 
 TonemapPass::TonemapPass(RenderContext *renderContext,
-						 ResourceHandle hdrInput,
+						 const BloomPass &bloom,
 						 ResourceHandle exposure,
 						 const RenderSettings &settings) :
-	renderContext_(renderContext), hdrInput_(hdrInput), exposure_(exposure), settings_(settings)
+	bloom_(bloom), exposure_(exposure), settings_(settings)
 {
 	pipeline_ = renderContext->CreateComputePipeline(PATHTRACER_SHADER_DIR "Tonemap.slang", "main");
 	if (pipeline_ == InvalidPipelineHandle)
@@ -23,44 +26,18 @@ TonemapPass::TonemapPass(RenderContext *renderContext,
 		throw std::runtime_error("Failed to create the tonemap pipeline (see the shader log above).");
 	}
 
-	// Same size and format as the back buffer so it can be copied over directly (swapchain
-	// buffers cannot be bound as UAVs).
 	width_ = renderContext->GetWindowWidth();
 	height_ = renderContext->GetWindowHeight();
-
-	TextureDesc desc = {};
-	desc.width = width_;
-	desc.height = height_;
-	desc.format = renderContext->GetBackBufferFormat();
-	desc.usageFlags = ResourceUsageFlags::UnorderedAccess;
-	desc.debugName = "Tonemap_LDR";
-	ldrOutput_ = renderContext->CreateTexture(desc, ResourceViewType::UnorderedAccess);
+	format_ = renderContext->GetBackBufferFormat();
 }
 
-TonemapPass::~TonemapPass()
+void TonemapPass::AddPasses(FrameGraph &frame)
 {
-	renderContext_->DestroyResource(ldrOutput_);
-}
-
-void TonemapPass::Execute(RenderContext *renderContext)
-{
-	renderContext->BeginEvent("Tonemap");
-	renderContext->BeginProfileScope("Tonemap");
-
-	renderContext->TransitionResource(hdrInput_,
-									  ResourceLayout::UnorderedAccess,
-									  ResourceSync::ComputeShading,
-									  ResourceAccess::UnorderedAccess);
-	renderContext->TransitionResource(ldrOutput_,
-									  ResourceLayout::UnorderedAccess,
-									  ResourceSync::ComputeShading,
-									  ResourceAccess::UnorderedAccess);
-
 	TonemapConstants constants = {};
 	constants.toneMapOperator = static_cast<uint>(settings_.toneMapOperator);
 	constants.width = width_;
 	constants.height = height_;
-	constants.hdr10 = renderContext->GetUseHDR() ? 1u : 0u;
+	constants.hdr10 = frame.rc.GetUseHDR() ? 1u : 0u;
 	constants.paperWhiteNits = settings_.paperWhiteNits;
 	constants.peakNits = settings_.peakNits;
 	constants.whiteClip = settings_.whiteClip;
@@ -76,18 +53,37 @@ void TonemapPass::Execute(RenderContext *renderContext)
 		constants.grainSeed = static_cast<uint>(static_cast<uint64_t>(seconds * settings_.filmGrainFps));
 	}
 
-	renderContext->SetComputePipeline(pipeline_);
-	renderContext->SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
-	renderContext->SetComputeUAV(0, hdrInput_);
-	renderContext->SetComputeUAV(1, ldrOutput_);
-	renderContext->SetComputeUAV(2, exposure_);
-	renderContext->Dispatch((width_ + kGroupSize - 1) / kGroupSize, (height_ + kGroupSize - 1) / kGroupSize, 1);
+	TextureDesc desc = {};
+	desc.width = width_;
+	desc.height = height_;
+	desc.format = format_;
+	desc.debugName = "Tonemap_LDR";
+	const rg::ResourceId ldr = frame.graph.CreateTexture(desc);
+	const rg::ResourceId hdr = bloom_.GetOutput();
+	const rg::ResourceId exposure = frame.ImportBuffer(exposure_, "AutoExposure_Exposure");
 
-	const ResourceHandle backBuffer = renderContext->GetCurrentBackBufferHandle();
-	renderContext->TransitionResource(ldrOutput_, ResourceLayout::CopySource, ResourceSync::Copy, ResourceAccess::CopySource);
-	renderContext->TransitionResource(backBuffer, ResourceLayout::CopyDest, ResourceSync::Copy, ResourceAccess::CopyDest);
-	renderContext->CopyTexture(backBuffer, ldrOutput_);
+	// The shader reads its input through a UAV.
+	frame.AddPass(rg::Pass::Compute("Tonemap")
+								.Use(hdr, rg::Access::ComputeShaderReadWrite)
+								.Use(exposure, rg::Access::ComputeShaderReadWrite)
+								.Writes(ldr)
+								.Executes(
+										[this, constants, hdr, ldr, exposure](rg::PassContext &ctx)
+										{
+											ctx.rc.SetComputePipeline(pipeline_);
+											ctx.rc.SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
+											ctx.rc.SetComputeUAV(0, ctx.Get(hdr));
+											ctx.rc.SetComputeUAV(1, ctx.Get(ldr));
+											ctx.rc.SetComputeUAV(2, ctx.Get(exposure));
+											ctx.rc.Dispatch((width_ + kGroupSize - 1) / kGroupSize,
+															(height_ + kGroupSize - 1) / kGroupSize,
+															1);
+										}));
 
-	renderContext->EndProfileScope();
-	renderContext->EndEvent();
+	const rg::ResourceId backBuffer = frame.backBuffer;
+	frame.AddPass(rg::Pass::Copy("Tonemap/Copy to back buffer")
+								.Reads(ldr)
+								.Writes(backBuffer)
+								.Executes([ldr, backBuffer](rg::PassContext &ctx)
+										  { ctx.rc.CopyTexture(ctx.Get(backBuffer), ctx.Get(ldr)); }));
 }

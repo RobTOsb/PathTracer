@@ -13,14 +13,15 @@ struct RenderSettings;
 // Debug view of the DLSS-RR guides: while RenderSettings::guideView picks one, draws it over the back buffer
 // after TonemapPass, nearest-upscaled from render resolution, or with RenderSettings::guideViewChange how much it
 // changed since last frame at the point the motion vectors lead to. Keeps the guide in a history at render
-// resolution for that. Does nothing while guideView is off. Leaves the back buffer in the CopyDest layout.
+// resolution for that. Does nothing while guideView is off. Draws into a graph transient of the back buffer's
+// format, since swapchain buffers cannot be bound as UAVs, and copies that onto the back buffer.
 class GuideViewPass final : public RenderPass
 {
 public:
 	GuideViewPass(RenderContext *renderContext, const PathTracerPass &pathTracer, const RenderSettings &settings);
 	~GuideViewPass() override;
 
-	void Execute(RenderContext *renderContext) override;
+	void AddPasses(FrameGraph &frame) override;
 
 private:
 	RenderContext *renderContext_ = nullptr;
@@ -29,7 +30,7 @@ private:
 
 	PipelineHandle pipeline_ = InvalidPipelineHandle;
 	ResourceHandle history_[2] = { InvalidResourceHandle, InvalidResourceHandle }; // RGBA16F, alternate frames
-	ResourceHandle output_ = InvalidResourceHandle; // back buffer format, copied onto it
+	Format outputFormat_ = Format::Unknown; // the back buffer's
 	uint historyIndex_ = 0; // the one written this frame
 	uint width_ = 0;
 	uint height_ = 0;

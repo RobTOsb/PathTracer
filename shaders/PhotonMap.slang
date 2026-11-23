@@ -503,8 +503,8 @@ void SplatPhotons(uint3 id : SV_DispatchThreadID)
     }
 }
 
-// Per pixel: the splatted irradiance times the receiver's reflectance into the radiance, the sums emptied for the next
-// frame. Also empties last frame's coverage sum, which UpdatePhotonMap has read, for the next frame to add to.
+// Per pixel: the splatted irradiance times the receiver's reflectance into the radiance. Also empties last frame's
+// coverage sum, which UpdatePhotonMap has read, for the next frame to add to.
 [shader("compute")]
 [numthreads(PHOTON_SCREEN_GROUP_SIZE, PHOTON_SCREEN_GROUP_SIZE, 1)]
 void CompositeCaustics(uint3 id : SV_DispatchThreadID)
@@ -522,7 +522,6 @@ void CompositeCaustics(uint3 id : SV_DispatchThreadID)
     RWStructuredBuffer<uint4> receivers = ResourceDescriptorHeap[ph.receivers];
 
     uint4 sum = caustics[pixel];
-    caustics[pixel] = uint4(0u, 0u, 0u, 0u);
     uint4 receiver = receivers[pixel];
     if (receiver.w != PHOTON_NO_RECEIVER)
     {

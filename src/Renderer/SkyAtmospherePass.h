@@ -3,10 +3,16 @@
 #include "RenderPass.h"
 
 #include "RenderContext.h"
+#include "RenderGraph.h"
 
 #include "SkyAtmosphereInterop.h"
 
 #include <vector>
+
+namespace rg
+{
+	struct Pass;
+}
 
 class Camera;
 class RenderGPUScene;
@@ -22,7 +28,13 @@ public:
 					  const RenderSettings &settings);
 	~SkyAtmospherePass() override;
 
-	void Execute(RenderContext *renderContext) override;
+	// The LUTs that changed, the sky-view LUT and scene lighting, the clouds' textures and the sky importance
+	// pyramid, one graph pass per dispatch.
+	void AddPasses(FrameGraph &frame) override;
+
+	// Attaches what a ray tracing pass reads of this frame's sky: the LUTs and scene lighting while the sky is on,
+	// the clouds' textures while they are, and the sky importance pyramid while it is built.
+	void UseForTracing(rg::Pass &pass, FrameGraph &frame) const;
 
 	bool IsEnabled() const;
 
@@ -37,14 +49,14 @@ public:
 		return viewHeight_;
 	}
 
-	// SRV of the sky-view LUT.
-	ResourceHandle GetSkyViewLUT() const
+	// This frame's sky-view LUT, a graph transient (a pass that reads it gets its SRV), once AddPasses has run.
+	rg::ResourceId GetSkyViewLUT() const
 	{
-		return skyViewSRV_;
+		return skyView_;
 	}
 
-	// ATMOSPHERE_LIGHTING_ROWS float4s.
-	ResourceHandle GetSceneLighting() const
+	// ATMOSPHERE_LIGHTING_ROWS float4s, a graph transient.
+	rg::ResourceId GetSceneLighting() const
 	{
 		return sceneLighting_;
 	}
@@ -55,9 +67,12 @@ public:
 		return cloudParameters_;
 	}
 
-	// Descriptor index of the sky importance pyramid's UAV (SkyImportance.slang) built by the last Execute, or
-	// INVALIDDESCRIPTORHANDLE when sky sampling is off.
-	uint GetSkyImportance() const;
+	// The sky importance pyramid (SkyImportance.slang) this frame builds, a graph transient read through its UAV, or
+	// invalid when sky sampling is off.
+	rg::ResourceId GetSkyImportance() const
+	{
+		return skyImportance_;
+	}
 
 	// False once the planet hides the sun's centre from the camera's altitude.
 	bool IsSunAboveHorizon() const;
@@ -86,8 +101,8 @@ private:
 							 Format format = Format::R16G16B16A16_FLOAT,
 							 uint depth = 1) const;
 	CloudParameters MakeCloudParameters() const;
-	void RenderCloudNoise(RenderContext *renderContext, PipelineHandle pipeline, ResourceHandle texture, const char *output,
-						  uint groupsX, uint groupsY, uint groupsZ);
+	void AddCloudNoisePass(FrameGraph &frame, const char *name, PipelineHandle pipeline, ResourceHandle texture,
+						   const char *debugName, const char *output, uint groupsX, uint groupsY, uint groupsZ);
 
 	RenderContext *renderContext_ = nullptr;
 	const RenderGPUScene &scene_;
@@ -110,9 +125,9 @@ private:
 	ResourceHandle transmittanceSRV_ = InvalidResourceHandle;
 	ResourceHandle multiScatteringLUT_ = InvalidResourceHandle;
 	ResourceHandle multiScatteringSRV_ = InvalidResourceHandle;
-	ResourceHandle skyViewLUT_ = InvalidResourceHandle;
-	ResourceHandle skyViewSRV_ = InvalidResourceHandle;
-	ResourceHandle sceneLighting_ = InvalidResourceHandle;
+	// Built every frame, so graph transients.
+	rg::ResourceId skyView_;
+	rg::ResourceId sceneLighting_;
 	std::vector<ResourceHandle> parameterBuffers_; // one per frame in flight, CPU-written each frame
 
 	// Rendered on the first frame with clouds.
@@ -136,9 +151,8 @@ private:
 	CloudParameters panoramaParameters_ = {}; // what the panorama holds, the wind offset left out
 	bool panoramaValid_ = false;
 	uint32_t panoramaFrame_ = 0;
-	// Built every frame while AtmosphereSettings::skySampling is on.
-	ResourceHandle skyImportance_ = InvalidResourceHandle;
-	bool skyImportanceValid_ = false;
+	// Built every frame while AtmosphereSettings::skySampling is on, a graph transient.
+	rg::ResourceId skyImportance_;
 
 	AtmosphereParameters parameters_ = {};
 	AtmosphereParameters lutParameters_ = {}; // what the transmittance and multiple scattering LUTs hold

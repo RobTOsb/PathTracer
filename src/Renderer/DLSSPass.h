@@ -20,9 +20,10 @@ public:
 			 const RenderSettings &settings);
 	~DLSSPass() override;
 
-	void Execute(RenderContext *renderContext) override;
+	void AddPasses(FrameGraph &frame) override;
 
-	ResourceHandle GetOutput() const
+	// This frame's output, a graph transient, once AddPasses has run.
+	rg::ResourceId GetOutput() const
 	{
 		return output_;
 	}
@@ -35,7 +36,8 @@ private:
 	const RenderSettings &settings_;
 
 	DLSSFeatureParams featureParams_;
-	ResourceHandle output_ = InvalidResourceHandle;
+	rg::ResourceId output_;
+	TextureDesc outputDesc_;
 	bool reset_ = true; // no history yet
 	bool reportedFailure_ = false;
 };

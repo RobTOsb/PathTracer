@@ -1,5 +1,6 @@
 #include "AutoExposurePass.h"
 
+#include "FrameGraph.h"
 #include "PathTracerInterop.h"
 #include "RenderSettings.h"
 
@@ -12,18 +13,10 @@ namespace
 	// Must match AutoExposure.slang.
 	constexpr uint32_t kHistogramGroupSize = 16;
 	constexpr uint32_t kHistogramSize = 64;
-
-	void UAVBarrier(RenderContext *renderContext, ResourceHandle buffer)
-	{
-		renderContext->TransitionResource(buffer,
-										  ResourceLayout::UnorderedAccess,
-										  ResourceSync::ComputeShading,
-										  ResourceAccess::UnorderedAccess);
-	}
 } // namespace
 
-AutoExposurePass::AutoExposurePass(RenderContext *renderContext, ResourceHandle hdrInput, const RenderSettings &settings) :
-	renderContext_(renderContext), hdrInput_(hdrInput), settings_(settings)
+AutoExposurePass::AutoExposurePass(RenderContext *renderContext, HdrSource hdrInput, const RenderSettings &settings) :
+	renderContext_(renderContext), hdrInput_(std::move(hdrInput)), settings_(settings)
 {
 	for (auto [pipeline, entryPoint]: { std::pair{ &histogramPipeline_, "CalculateHistogram" },
 										std::pair{ &exposurePipeline_, "CalculateExposure" } })
@@ -56,22 +49,21 @@ AutoExposurePass::AutoExposurePass(RenderContext *renderContext, ResourceHandle 
 	histogram_ = createBuffer(kHistogramSize, zeros, "AutoExposure_Histogram");
 	keySceneLuminance_ = createBuffer(1, &one, "AutoExposure_KeySceneLuminance");
 	exposure_ = createBuffer(1, &one, "AutoExposure_Exposure");
+	tracingExposure_[0] = createBuffer(1, &one, "AutoExposure_TracingExposure0");
+	tracingExposure_[1] = createBuffer(1, &one, "AutoExposure_TracingExposure1");
 	renderContext->EndUpload(batch);
 }
 
 AutoExposurePass::~AutoExposurePass()
 {
-	for (ResourceHandle buffer: { histogram_, keySceneLuminance_, exposure_ })
+	for (ResourceHandle buffer: { histogram_, keySceneLuminance_, exposure_, tracingExposure_[0], tracingExposure_[1] })
 	{
 		renderContext_->DestroyResource(buffer);
 	}
 }
 
-void AutoExposurePass::Execute(RenderContext *renderContext)
+void AutoExposurePass::AddPasses(FrameGraph &frame)
 {
-	renderContext->BeginEvent("AutoExposure");
-	renderContext->BeginProfileScope("AutoExposure");
-
 	const bool enabled = settings_.autoExposure;
 	const auto now = std::chrono::steady_clock::now();
 	const float frameTime = enabled && adapting_ ? std::chrono::duration<float>(now - lastTime_).count() : 0.0f;
@@ -83,36 +75,53 @@ void AutoExposurePass::Execute(RenderContext *renderContext)
 	constants.frameTime = frameTime;
 	constants.exposureBias = exp2f(settings_.exposureEV);
 	constants.maxExposure = exp2f(settings_.maxAutoExposureEV);
-	constants.inputBufferHandle = renderContext->GetResourceViewInfo(hdrInput_).descriptorIndex;
-	constants.histogramHandle = renderContext->GetResourceViewInfo(histogram_).descriptorIndex;
-	constants.keySceneLuminanceHandle = renderContext->GetResourceViewInfo(keySceneLuminance_).descriptorIndex;
-	constants.exposureHandle = renderContext->GetResourceViewInfo(exposure_).descriptorIndex;
+	const rg::ResourceId hdrInput = hdrInput_();
+	constants.inputBufferHandle = INVALIDDESCRIPTORHANDLE; // a transient, filled in when the histogram runs
+	constants.histogramHandle = frame.DescriptorIndex(histogram_);
+	constants.keySceneLuminanceHandle = frame.DescriptorIndex(keySceneLuminance_);
+	constants.exposureHandle = frame.DescriptorIndex(exposure_);
 	constants.enabled = enabled ? 1u : 0u;
 
-	// Every barrier also orders the buffers after last frame's readers.
-	UAVBarrier(renderContext, histogram_);
-	UAVBarrier(renderContext, keySceneLuminance_);
-	UAVBarrier(renderContext, exposure_);
-
+	// Every buffer is read and written through its UAV, and so is the image.
+	const rg::ResourceId histogram = frame.ImportBuffer(histogram_, "AutoExposure_Histogram");
+	const rg::ResourceId keySceneLuminance = frame.ImportBuffer(keySceneLuminance_, "AutoExposure_KeySceneLuminance");
+	const rg::ResourceId exposure = frame.ImportBuffer(exposure_, "AutoExposure_Exposure");
 	if (enabled)
 	{
-		renderContext->TransitionResource(hdrInput_,
-										  ResourceLayout::UnorderedAccess,
-										  ResourceSync::ComputeShading,
-										  ResourceAccess::UnorderedAccess);
-		renderContext->SetComputePipeline(histogramPipeline_);
-		renderContext->SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
-		renderContext->Dispatch((width_ + kHistogramGroupSize - 1) / kHistogramGroupSize,
-								(height_ + kHistogramGroupSize - 1) / kHistogramGroupSize,
-								1);
-		UAVBarrier(renderContext, histogram_);
+		frame.AddPass(rg::Pass::Compute("AutoExposure/Histogram")
+									.Use(hdrInput, rg::Access::ComputeShaderReadWrite)
+									.Use(histogram, rg::Access::ComputeShaderReadWrite)
+									.Executes(
+											[this, constants, hdrInput](rg::PassContext &ctx)
+											{
+												AutoExposureConstants placed = constants;
+												placed.inputBufferHandle = ctx.rc.GetResourceViewInfo(ctx.Get(hdrInput)).descriptorIndex;
+												ctx.rc.SetComputePipeline(histogramPipeline_);
+												ctx.rc.SetCompute32BitConstants(&placed, sizeof(placed) / sizeof(uint32_t));
+												ctx.rc.Dispatch((width_ + kHistogramGroupSize - 1) / kHistogramGroupSize,
+																(height_ + kHistogramGroupSize - 1) / kHistogramGroupSize,
+																1);
+											}));
 	}
 
-	renderContext->SetComputePipeline(exposurePipeline_);
-	renderContext->SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
-	renderContext->Dispatch(1, 1, 1);
-	UAVBarrier(renderContext, exposure_);
+	frame.AddPass(rg::Pass::Compute("AutoExposure/Exposure")
+								.Use(histogram, rg::Access::ComputeShaderReadWrite)
+								.Use(keySceneLuminance, rg::Access::ComputeShaderReadWrite)
+								.Use(exposure, rg::Access::ComputeShaderReadWrite)
+								.Executes(
+										[this, constants](rg::PassContext &ctx)
+										{
+											ctx.rc.SetComputePipeline(exposurePipeline_);
+											ctx.rc.SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
+											ctx.rc.Dispatch(1, 1, 1);
+										}));
 
-	renderContext->EndProfileScope();
-	renderContext->EndEvent();
+	const rg::ResourceId tracing =
+			frame.ImportBuffer(tracingExposure_[frame.rc.GetCurrentFrame() & 1], "AutoExposure_TracingExposure");
+	frame.AddPass(rg::Pass::Copy("AutoExposure/Copy for tracing")
+						  .Reads(exposure)
+						  .Writes(tracing)
+						  .Executes(
+								  [exposure, tracing](rg::PassContext &ctx)
+								  { ctx.rc.CopyBufferRegion(ctx.Get(tracing), 0, ctx.Get(exposure), 0, sizeof(float)); }));
 }

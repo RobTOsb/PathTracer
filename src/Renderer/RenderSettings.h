@@ -248,6 +248,9 @@ struct RenderSettings
 	bool shaderExecutionReordering = true;
 	// Shadow rays as inline ray queries (INLINE_SHADOWS) instead of TraceRay with the shadow hit group.
 	bool inlineShadowRays = true;
+	// The scene, sky and path tracing passes (everything before DLSS-RR) on the async compute queue, with the
+	// denoiser and the passes after it on the graphics queue once they are done. Off: everything on graphics.
+	bool asyncCompute = false;
 	bool opacityMicromaps = true;
 	int opacityMicromap2StateBounce = 1;
 	// Performance approximations past this many diffuse bounces, 0 = off (FrameConstants): rays skip blended

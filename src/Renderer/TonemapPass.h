@@ -6,27 +6,27 @@
 
 #include <chrono>
 
+class BloomPass;
 struct RenderSettings;
 
 // Exposes, tone maps and sRGB-encodes the HDR radiance into an LDR target in a compute pass, then
-// copies it onto the current back buffer. Leaves the back buffer in the CopyDest layout.
+// copies it onto the current back buffer. The LDR target is a graph transient the size and format of
+// the back buffer, since swapchain buffers cannot be bound as UAVs.
 class TonemapPass final : public RenderPass
 {
 public:
-	// exposure: AutoExposurePass's exposure buffer.
-	TonemapPass(RenderContext *renderContext, ResourceHandle hdrInput, ResourceHandle exposure, const RenderSettings &settings);
-	~TonemapPass() override;
+	// The HDR image is bloom's output. exposure: AutoExposurePass's exposure buffer.
+	TonemapPass(RenderContext *renderContext, const BloomPass &bloom, ResourceHandle exposure, const RenderSettings &settings);
 
-	void Execute(RenderContext *renderContext) override;
+	void AddPasses(FrameGraph &frame) override;
 
 private:
-	RenderContext *renderContext_ = nullptr;
-	ResourceHandle hdrInput_ = InvalidResourceHandle;
+	const BloomPass &bloom_;
 	ResourceHandle exposure_ = InvalidResourceHandle;
 	const RenderSettings &settings_;
 
 	PipelineHandle pipeline_ = InvalidPipelineHandle;
-	ResourceHandle ldrOutput_ = InvalidResourceHandle;
+	Format format_ = Format::Unknown;
 	uint width_ = 0;
 	uint height_ = 0;
 

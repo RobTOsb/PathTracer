@@ -1,6 +1,7 @@
 #include "SkyAtmospherePass.h"
 
 #include "Camera.h"
+#include "FrameGraph.h"
 #include "RenderSettings.h"
 #include "Scene/RenderGPUScene.h"
 
@@ -60,7 +61,6 @@ SkyAtmospherePass::SkyAtmospherePass(RenderContext *renderContext,
 									MULTI_SCATTERING_LUT_SIZE,
 									"SkyAtmosphere_MultiScattering",
 									multiScatteringSRV_);
-	skyViewLUT_ = CreateLUT(SKY_VIEW_LUT_WIDTH, SKY_VIEW_LUT_HEIGHT, "SkyAtmosphere_SkyView", skyViewSRV_);
 	cloudShadowMap_ = CreateLUT(CLOUD_SHADOW_MAP_SIZE,
 								CLOUD_SHADOW_MAP_SIZE,
 								"Clouds_ShadowMap",
@@ -87,20 +87,6 @@ SkyAtmospherePass::SkyAtmospherePass(RenderContext *renderContext,
 							Format::R8G8_UNORM);
 	cloudPanorama_ = CreateLUT(CLOUD_PANORAMA_SIZE, CLOUD_PANORAMA_SIZE, "Clouds_Panorama", cloudPanoramaSRV_);
 
-	BufferDesc lightingDesc = {};
-	lightingDesc.sizeInBytes = ATMOSPHERE_LIGHTING_ROWS * sizeof(float4);
-	lightingDesc.structureByteStride = sizeof(float4);
-	lightingDesc.usageFlags = ResourceUsageFlags::UnorderedAccess;
-	lightingDesc.debugName = "SkyAtmosphere_SceneLighting";
-	sceneLighting_ = renderContext->CreateBuffer(lightingDesc, ResourceViewType::UnorderedAccess);
-
-	BufferDesc importanceDesc = {};
-	importanceDesc.sizeInBytes = SKY_IMPORTANCE_COUNT * sizeof(float);
-	importanceDesc.structureByteStride = sizeof(float);
-	importanceDesc.usageFlags = ResourceUsageFlags::UnorderedAccess;
-	importanceDesc.debugName = "SkyAtmosphere_SkyImportance";
-	skyImportance_ = renderContext->CreateBuffer(importanceDesc, ResourceViewType::UnorderedAccess);
-
 	parameterBuffers_.resize(renderContext->GetFramesInFlight());
 	for (ResourceHandle &buffer: parameterBuffers_)
 	{
@@ -120,7 +106,6 @@ SkyAtmospherePass::~SkyAtmospherePass()
 	// Views before the textures they view.
 	for (ResourceHandle resource: { transmittanceSRV_,
 									multiScatteringSRV_,
-									skyViewSRV_,
 									shapeNoiseSRV_,
 									detailNoiseSRV_,
 									weatherMapSRV_,
@@ -128,14 +113,11 @@ SkyAtmospherePass::~SkyAtmospherePass()
 									cloudPanoramaSRV_,
 									transmittanceLUT_,
 									multiScatteringLUT_,
-									skyViewLUT_,
 									shapeNoise_,
 									detailNoise_,
 									weatherMap_,
 									cloudShadowMap_,
-									cloudPanorama_,
-									sceneLighting_,
-									skyImportance_ })
+									cloudPanorama_ })
 	{
 		if (resource != InvalidResourceHandle)
 		{
@@ -274,26 +256,25 @@ CloudParameters SkyAtmospherePass::MakeCloudParameters() const
 	return c;
 }
 
-void SkyAtmospherePass::RenderCloudNoise(RenderContext *renderContext,
-										 PipelineHandle pipeline,
-										 ResourceHandle texture,
-										 const char *output,
-										 uint groupsX,
-										 uint groupsY,
-										 uint groupsZ)
+void SkyAtmospherePass::AddCloudNoisePass(FrameGraph &frame,
+										  const char *name,
+										  PipelineHandle pipeline,
+										  ResourceHandle texture,
+										  const char *debugName,
+										  const char *output,
+										  uint groupsX,
+										  uint groupsY,
+										  uint groupsZ)
 {
-	renderContext->TransitionResource(texture,
-									  ResourceLayout::UnorderedAccess,
-									  ResourceSync::ComputeShading,
-									  ResourceAccess::UnorderedAccess);
-	renderContext->SetComputePipeline(pipeline);
-	renderContext->SetComputeUAVByName(output, texture);
-	renderContext->Dispatch(groupsX, groupsY, groupsZ);
-	// Read by the shadow map kernel and by the path tracer.
-	renderContext->TransitionResource(texture,
-									  ResourceLayout::ShaderResource,
-									  ResourceSync::AllShading,
-									  ResourceAccess::ShaderResource);
+	rg::Pass pass = rg::Pass::Compute(name);
+	frame.UseTexture(pass, texture, debugName, rg::Access::ComputeShaderWrite);
+	frame.AddPass(std::move(pass.Executes(
+			[=](rg::PassContext &ctx)
+			{
+				ctx.rc.SetComputePipeline(pipeline);
+				ctx.rc.SetComputeUAVByName(output, texture);
+				ctx.rc.Dispatch(groupsX, groupsY, groupsZ);
+			})));
 }
 
 bool SkyAtmospherePass::IsEnabled() const
@@ -307,12 +288,6 @@ bool SkyAtmospherePass::IsSunAboveHorizon() const
 	// cosine is -sqrt(1 - (R / h)^2).
 	const float ratio = parameters_.bottomRadius / viewHeight_;
 	return sunDirection_.y >= -sqrtf(std::max(0.0f, 1.0f - ratio * ratio));
-}
-
-uint SkyAtmospherePass::GetSkyImportance() const
-{
-	return skyImportanceValid_ ? renderContext_->GetResourceViewInfo(skyImportance_).descriptorIndex
-							   : INVALIDDESCRIPTORHANDLE;
 }
 
 SkyAtmospherePass::SceneAir SkyAtmospherePass::GetSceneAir() const
@@ -337,9 +312,39 @@ SkyAtmospherePass::SceneAir SkyAtmospherePass::GetSceneAir() const
 	return air;
 }
 
-void SkyAtmospherePass::Execute(RenderContext *renderContext)
+void SkyAtmospherePass::UseForTracing(rg::Pass &pass, FrameGraph &frame) const
 {
-	skyImportanceValid_ = false;
+	if (!IsEnabled())
+	{
+		return;
+	}
+	const rg::Access read = rg::Access::RaytracingShaderRead;
+	FrameGraph::Use(pass, skyView_, read);
+	FrameGraph::Use(pass, sceneLighting_, read);
+	if (cloudParameters_.enabled != 0)
+	{
+		frame.UseTexture(pass, transmittanceLUT_, "SkyAtmosphere_Transmittance", read);
+		frame.UseTexture(pass, shapeNoise_, "Clouds_ShapeNoise", read);
+		frame.UseTexture(pass, detailNoise_, "Clouds_DetailNoise", read);
+		frame.UseTexture(pass, weatherMap_, "Clouds_WeatherMap", read);
+		frame.UseTexture(pass, cloudShadowMap_, "Clouds_ShadowMap", read);
+		if (cloudParameters_.skyPanorama != INVALIDDESCRIPTORHANDLE)
+		{
+			frame.UseTexture(pass, cloudPanorama_, "Clouds_Panorama", read);
+		}
+	}
+	// Read through its UAV.
+	if (skyImportance_.IsValid())
+	{
+		FrameGraph::Use(pass, skyImportance_, rg::Access::RaytracingShaderWrite);
+	}
+}
+
+void SkyAtmospherePass::AddPasses(FrameGraph &frame)
+{
+	skyView_ = {};
+	sceneLighting_ = {};
+	skyImportance_ = {};
 	if (!IsEnabled())
 	{
 		return;
@@ -355,119 +360,145 @@ void SkyAtmospherePass::Execute(RenderContext *renderContext)
 
 	// The slot for this frame index was last read framesInFlight frames ago, and BeginFrame has
 	// already waited on that frame's fence.
-	const ResourceHandle parameterBuffer = parameterBuffers_[renderContext->GetCurrentFrameIndex()];
-	renderContext->UpdateConstantBuffer(parameterBuffer, &parameters_, sizeof(parameters_));
+	const ResourceHandle parameterBuffer = parameterBuffers_[frame.rc.GetCurrentFrameIndex()];
+	frame.rc.UpdateConstantBuffer(parameterBuffer, &parameters_, sizeof(parameters_));
 
 	AtmosphereLUTConstants constants = {};
 	constants.viewHeight = viewHeight_;
 	constants.sunZenithCos = sunDirection_.y;
 
-	renderContext->BeginEvent("SkyAtmosphere");
-	renderContext->BeginProfileScope("SkyAtmosphere");
+	const rg::ResourceId transmittance = frame.ImportTexture(transmittanceLUT_, "SkyAtmosphere_Transmittance");
+	const rg::ResourceId multiScattering = frame.ImportTexture(multiScatteringLUT_, "SkyAtmosphere_MultiScattering");
+	// The camera's sky and the lighting at its altitude, which every frame builds anew for its paths.
+	TextureDesc skyViewDesc = {};
+	skyViewDesc.width = SKY_VIEW_LUT_WIDTH;
+	skyViewDesc.height = SKY_VIEW_LUT_HEIGHT;
+	skyViewDesc.format = Format::R16G16B16A16_FLOAT;
+	skyViewDesc.usageFlags = ResourceUsageFlags::UnorderedAccess;
+	skyViewDesc.debugName = "SkyAtmosphere_SkyView";
+	const rg::ResourceId skyView = frame.graph.CreateTexture(skyViewDesc, ResourceViewType::UnorderedAccess);
+	BufferDesc lightingDesc = {};
+	lightingDesc.sizeInBytes = ATMOSPHERE_LIGHTING_ROWS * sizeof(float4);
+	lightingDesc.structureByteStride = sizeof(float4);
+	lightingDesc.usageFlags = ResourceUsageFlags::UnorderedAccess;
+	lightingDesc.debugName = "SkyAtmosphere_SceneLighting";
+	const rg::ResourceId sceneLighting = frame.graph.CreateBuffer(lightingDesc, ResourceViewType::UnorderedAccess);
+	skyView_ = skyView;
+	sceneLighting_ = sceneLighting;
 
 	if (!lutsValid_ || std::memcmp(&lutParameters_, &parameters_, sizeof(parameters_)) != 0)
 	{
-		renderContext->TransitionResource(transmittanceLUT_,
-										  ResourceLayout::UnorderedAccess,
-										  ResourceSync::ComputeShading,
-										  ResourceAccess::UnorderedAccess);
-		renderContext->SetComputePipeline(transmittancePipeline_);
-		renderContext->SetComputeConstantBufferByName("g_Atmosphere", parameterBuffer);
-		renderContext->SetComputeUAVByName("g_Output", transmittanceLUT_);
-		renderContext->Dispatch(GroupCount(TRANSMITTANCE_LUT_WIDTH), GroupCount(TRANSMITTANCE_LUT_HEIGHT), 1);
-		// Also read by the path tracer's clouds.
-		renderContext->TransitionResource(transmittanceLUT_,
-										  ResourceLayout::ShaderResource,
-										  ResourceSync::AllShading,
-										  ResourceAccess::ShaderResource);
+		frame.AddPass(rg::Pass::Compute("Sky/Transmittance LUT")
+									.Writes(transmittance)
+									.Executes(
+											[this, parameterBuffer](rg::PassContext &ctx)
+											{
+												ctx.rc.SetComputePipeline(transmittancePipeline_);
+												ctx.rc.SetComputeConstantBufferByName("g_Atmosphere", parameterBuffer);
+												ctx.rc.SetComputeUAVByName("g_Output", transmittanceLUT_);
+												ctx.rc.Dispatch(GroupCount(TRANSMITTANCE_LUT_WIDTH),
+																GroupCount(TRANSMITTANCE_LUT_HEIGHT),
+																1);
+											}));
 
 		// One group of MULTI_SCATTERING_SAMPLES threads per texel.
-		renderContext->TransitionResource(multiScatteringLUT_,
-										  ResourceLayout::UnorderedAccess,
-										  ResourceSync::ComputeShading,
-										  ResourceAccess::UnorderedAccess);
-		renderContext->SetComputePipeline(multiScatteringPipeline_);
-		renderContext->SetComputeConstantBufferByName("g_Atmosphere", parameterBuffer);
-		renderContext->SetComputeSRVByName("g_TransmittanceLUT", transmittanceSRV_);
-		renderContext->SetComputeUAVByName("g_Output", multiScatteringLUT_);
-		renderContext->Dispatch(MULTI_SCATTERING_LUT_SIZE, MULTI_SCATTERING_LUT_SIZE, 1);
-		renderContext->TransitionResource(multiScatteringLUT_,
-										  ResourceLayout::ShaderResource,
-										  ResourceSync::ComputeShading,
-										  ResourceAccess::ShaderResource);
+		frame.AddPass(rg::Pass::Compute("Sky/Multiple scattering LUT")
+									.Reads(transmittance)
+									.Writes(multiScattering)
+									.Executes(
+											[this, parameterBuffer](rg::PassContext &ctx)
+											{
+												ctx.rc.SetComputePipeline(multiScatteringPipeline_);
+												ctx.rc.SetComputeConstantBufferByName("g_Atmosphere", parameterBuffer);
+												ctx.rc.SetComputeSRVByName("g_TransmittanceLUT", transmittanceSRV_);
+												ctx.rc.SetComputeUAVByName("g_Output", multiScatteringLUT_);
+												ctx.rc.Dispatch(MULTI_SCATTERING_LUT_SIZE, MULTI_SCATTERING_LUT_SIZE, 1);
+											}));
 
 		lutParameters_ = parameters_;
 		lutsValid_ = true;
 	}
 
-	renderContext->TransitionResource(skyViewLUT_,
-									  ResourceLayout::UnorderedAccess,
-									  ResourceSync::ComputeShading,
-									  ResourceAccess::UnorderedAccess);
-	renderContext->SetComputePipeline(skyViewPipeline_);
-	renderContext->SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
-	renderContext->SetComputeConstantBufferByName("g_Atmosphere", parameterBuffer);
-	renderContext->SetComputeSRVByName("g_TransmittanceLUT", transmittanceSRV_);
-	renderContext->SetComputeSRVByName("g_MultiScatteringLUT", multiScatteringSRV_);
-	renderContext->SetComputeUAVByName("g_Output", skyViewLUT_);
-	renderContext->Dispatch(GroupCount(SKY_VIEW_LUT_WIDTH), GroupCount(SKY_VIEW_LUT_HEIGHT), 1);
-	// Also read by the cloud panorama.
-	renderContext->TransitionResource(skyViewLUT_,
-									  ResourceLayout::ShaderResource,
-									  ResourceSync::AllShading,
-									  ResourceAccess::ShaderResource);
+	frame.AddPass(rg::Pass::Compute("Sky/Sky-view LUT")
+								.Reads(transmittance)
+								.Reads(multiScattering)
+								.Writes(skyView)
+								.Executes(
+										[this, parameterBuffer, constants, skyView](rg::PassContext &ctx)
+										{
+											ctx.rc.SetComputePipeline(skyViewPipeline_);
+											ctx.rc.SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
+											ctx.rc.SetComputeConstantBufferByName("g_Atmosphere", parameterBuffer);
+											ctx.rc.SetComputeSRVByName("g_TransmittanceLUT", transmittanceSRV_);
+											ctx.rc.SetComputeSRVByName("g_MultiScatteringLUT", multiScatteringSRV_);
+											ctx.rc.SetComputeUAVByName("g_Output", ctx.Get(skyView));
+											ctx.rc.Dispatch(GroupCount(SKY_VIEW_LUT_WIDTH), GroupCount(SKY_VIEW_LUT_HEIGHT), 1);
+										}));
 
-	renderContext->TransitionResource(sceneLighting_,
-									  ResourceLayout::UnorderedAccess,
-									  ResourceSync::ComputeShading,
-									  ResourceAccess::UnorderedAccess);
-	renderContext->SetComputePipeline(sceneLightingPipeline_);
-	renderContext->SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
-	renderContext->SetComputeConstantBufferByName("g_Atmosphere", parameterBuffer);
-	renderContext->SetComputeSRVByName("g_TransmittanceLUT", transmittanceSRV_);
-	renderContext->SetComputeSRVByName("g_MultiScatteringLUT", multiScatteringSRV_);
-	renderContext->SetComputeUAVByName("g_SceneLighting", sceneLighting_);
-	renderContext->Dispatch(1, 1, 1);
-	renderContext->TransitionResource(sceneLighting_,
-									  ResourceLayout::ShaderResource,
-									  ResourceSync::Raytracing,
-									  ResourceAccess::ShaderResource);
+	frame.AddPass(rg::Pass::Compute("Sky/Scene lighting")
+								.Reads(transmittance)
+								.Reads(multiScattering)
+								.Writes(sceneLighting)
+								.Executes(
+										[this, parameterBuffer, constants, sceneLighting](rg::PassContext &ctx)
+										{
+											ctx.rc.SetComputePipeline(sceneLightingPipeline_);
+											ctx.rc.SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
+											ctx.rc.SetComputeConstantBufferByName("g_Atmosphere", parameterBuffer);
+											ctx.rc.SetComputeSRVByName("g_TransmittanceLUT", transmittanceSRV_);
+											ctx.rc.SetComputeSRVByName("g_MultiScatteringLUT", multiScatteringSRV_);
+											ctx.rc.SetComputeUAVByName("g_SceneLighting", ctx.Get(sceneLighting));
+											ctx.rc.Dispatch(1, 1, 1);
+										}));
 
 	cloudParameters_ = MakeCloudParameters();
+	rg::ResourceId panorama;
 	if (cloudParameters_.enabled != 0)
 	{
 		if (!cloudNoiseValid_)
 		{
 			const uint shapeGroups = CLOUD_SHAPE_NOISE_SIZE / kNoiseGroupSize;
 			const uint detailGroups = CLOUD_DETAIL_NOISE_SIZE / kNoiseGroupSize;
-			RenderCloudNoise(renderContext, shapeNoisePipeline_, shapeNoise_, "g_ShapeOutput", shapeGroups, shapeGroups, shapeGroups);
-			RenderCloudNoise(renderContext, detailNoisePipeline_, detailNoise_, "g_NoiseOutput", detailGroups, detailGroups, detailGroups);
-			RenderCloudNoise(renderContext,
-							 weatherMapPipeline_,
-							 weatherMap_,
-							 "g_WeatherOutput",
-							 GroupCount(CLOUD_WEATHER_MAP_SIZE),
-							 GroupCount(CLOUD_WEATHER_MAP_SIZE),
-							 1);
+			AddCloudNoisePass(frame, "Clouds/Shape noise", shapeNoisePipeline_, shapeNoise_, "Clouds_ShapeNoise", "g_ShapeOutput",
+							  shapeGroups, shapeGroups, shapeGroups);
+			AddCloudNoisePass(frame, "Clouds/Detail noise", detailNoisePipeline_, detailNoise_, "Clouds_DetailNoise", "g_NoiseOutput",
+							  detailGroups, detailGroups, detailGroups);
+			AddCloudNoisePass(frame,
+							  "Clouds/Weather map",
+							  weatherMapPipeline_,
+							  weatherMap_,
+							  "Clouds_WeatherMap",
+							  "g_WeatherOutput",
+							  GroupCount(CLOUD_WEATHER_MAP_SIZE),
+							  GroupCount(CLOUD_WEATHER_MAP_SIZE),
+							  1);
 			cloudNoiseValid_ = true;
 		}
 
-		const ResourceHandle cloudBuffer = cloudBuffers_[renderContext->GetCurrentFrameIndex()];
-		renderContext->UpdateConstantBuffer(cloudBuffer, &cloudParameters_, sizeof(cloudParameters_));
+		// The cloud kernels march through the noise and light the clouds through the transmittance LUT.
+		auto readClouds = [&](rg::Pass &pass)
+		{
+			pass.Reads(transmittance);
+			frame.UseTexture(pass, shapeNoise_, "Clouds_ShapeNoise", rg::Access::ComputeShaderRead);
+			frame.UseTexture(pass, detailNoise_, "Clouds_DetailNoise", rg::Access::ComputeShaderRead);
+			frame.UseTexture(pass, weatherMap_, "Clouds_WeatherMap", rg::Access::ComputeShaderRead);
+		};
+
+		const ResourceHandle cloudBuffer = cloudBuffers_[frame.rc.GetCurrentFrameIndex()];
+		frame.rc.UpdateConstantBuffer(cloudBuffer, &cloudParameters_, sizeof(cloudParameters_));
 		if (!shadowMapValid_ || std::memcmp(&shadowMapParameters_, &cloudParameters_, sizeof(CloudParameters)) != 0)
 		{
-			renderContext->TransitionResource(cloudShadowMap_,
-											  ResourceLayout::UnorderedAccess,
-											  ResourceSync::ComputeShading,
-											  ResourceAccess::UnorderedAccess);
-			renderContext->SetComputePipeline(cloudShadowPipeline_);
-			renderContext->SetComputeConstantBufferByName("g_Clouds", cloudBuffer);
-			renderContext->SetComputeUAVByName("g_ShadowMapOutput", cloudShadowMap_);
-			renderContext->Dispatch(GroupCount(CLOUD_SHADOW_MAP_SIZE), GroupCount(CLOUD_SHADOW_MAP_SIZE), 1);
-			renderContext->TransitionResource(cloudShadowMap_,
-											  ResourceLayout::ShaderResource,
-											  ResourceSync::Raytracing,
-											  ResourceAccess::ShaderResource);
+			rg::Pass pass = rg::Pass::Compute("Clouds/Shadow map");
+			readClouds(pass);
+			frame.UseTexture(pass, cloudShadowMap_, "Clouds_ShadowMap", rg::Access::ComputeShaderWrite);
+			frame.AddPass(std::move(pass.Executes(
+					[this, cloudBuffer](rg::PassContext &ctx)
+					{
+						ctx.rc.SetComputePipeline(cloudShadowPipeline_);
+						ctx.rc.SetComputeConstantBufferByName("g_Clouds", cloudBuffer);
+						ctx.rc.SetComputeUAVByName("g_ShadowMapOutput", cloudShadowMap_);
+						ctx.rc.Dispatch(GroupCount(CLOUD_SHADOW_MAP_SIZE), GroupCount(CLOUD_SHADOW_MAP_SIZE), 1);
+					})));
 			shadowMapParameters_ = cloudParameters_;
 			shadowMapValid_ = true;
 		}
@@ -482,26 +513,27 @@ void SkyAtmospherePass::Execute(RenderContext *renderContext)
 			panoramaParameters_ = key;
 			panoramaValid_ = true;
 
-			CloudPanoramaConstants panorama = {};
-			panorama.origin = camera_.GetPosition();
-			panorama.viewHeight = viewHeight_;
-			panorama.frame = panoramaFrame_++;
-			panorama.blend = restart ? 1.0f : kCloudPanoramaBlend;
-			renderContext->TransitionResource(cloudPanorama_,
-											  ResourceLayout::UnorderedAccess,
-											  ResourceSync::ComputeShading,
-											  ResourceAccess::UnorderedAccess);
-			renderContext->SetComputePipeline(cloudPanoramaPipeline_);
-			renderContext->SetCompute32BitConstants(&panorama, sizeof(panorama) / sizeof(uint32_t));
-			renderContext->SetComputeConstantBufferByName("g_Clouds", cloudBuffer);
-			renderContext->SetComputeSRVByName("g_SkyViewLUT", skyViewSRV_);
-			renderContext->SetComputeUAVByName("g_PanoramaOutput", cloudPanorama_);
-			renderContext->Dispatch(GroupCount(CLOUD_PANORAMA_SIZE), GroupCount(CLOUD_PANORAMA_SIZE), 1);
-			// Also read by the sky importance map.
-			renderContext->TransitionResource(cloudPanorama_,
-											  ResourceLayout::ShaderResource,
-											  ResourceSync::AllShading,
-											  ResourceAccess::ShaderResource);
+			CloudPanoramaConstants panoramaConstants = {};
+			panoramaConstants.origin = camera_.GetPosition();
+			panoramaConstants.viewHeight = viewHeight_;
+			panoramaConstants.frame = panoramaFrame_++;
+			panoramaConstants.blend = restart ? 1.0f : kCloudPanoramaBlend;
+
+			panorama = frame.ImportTexture(cloudPanorama_, "Clouds_Panorama");
+			rg::Pass pass = rg::Pass::Compute("Clouds/Panorama");
+			readClouds(pass);
+			pass.Reads(skyView);
+			pass.Use(panorama, rg::Access::ComputeShaderReadWrite);
+			frame.AddPass(std::move(pass.Executes(
+					[this, cloudBuffer, panoramaConstants, skyView](rg::PassContext &ctx)
+					{
+						ctx.rc.SetComputePipeline(cloudPanoramaPipeline_);
+						ctx.rc.SetCompute32BitConstants(&panoramaConstants, sizeof(panoramaConstants) / sizeof(uint32_t));
+						ctx.rc.SetComputeConstantBufferByName("g_Clouds", cloudBuffer);
+						ctx.rc.SetComputeSRVByName("g_SkyViewLUT", ctx.Get(skyView));
+						ctx.rc.SetComputeUAVByName("g_PanoramaOutput", cloudPanorama_);
+						ctx.rc.Dispatch(GroupCount(CLOUD_PANORAMA_SIZE), GroupCount(CLOUD_PANORAMA_SIZE), 1);
+					})));
 		}
 		else
 		{
@@ -518,34 +550,43 @@ void SkyAtmospherePass::Execute(RenderContext *renderContext)
 		importance.viewHeight = viewHeight_;
 		importance.sunIlluminance = settings_.sun.colour * settings_.sun.intensity;
 		importance.planetRadius = parameters_.bottomRadius;
-		importance.usePanorama = cloudParameters_.enabled != 0 && cloudParameters_.skyPanorama != INVALIDDESCRIPTORHANDLE ? 1u : 0u;
+		importance.usePanorama = panorama.IsValid() ? 1u : 0u;
 
-		// Last frame's path tracer read it.
-		renderContext->TransitionResource(skyImportance_,
-										  ResourceLayout::UnorderedAccess,
-										  ResourceSync::ComputeShading,
-										  ResourceAccess::UnorderedAccess);
-		renderContext->SetComputePipeline(skyImportanceTexelsPipeline_);
-		renderContext->SetCompute32BitConstants(&importance, sizeof(importance) / sizeof(uint32_t));
-		renderContext->SetComputeSRVByName("g_SkyViewLUT", skyViewSRV_);
-		renderContext->SetComputeSRVByName("g_Panorama", cloudPanoramaSRV_);
-		renderContext->SetComputeUAVByName("g_ImportanceOutput", skyImportance_);
-		renderContext->Dispatch(SKY_IMPORTANCE_SIZE / 16, SKY_IMPORTANCE_SIZE / 16, 1);
-		renderContext->TransitionResource(skyImportance_,
-										  ResourceLayout::UnorderedAccess,
-										  ResourceSync::ComputeShading,
-										  ResourceAccess::UnorderedAccess);
+		// The panorama is bound either way, but only read, so only declared, while there is one this frame.
+		BufferDesc importanceDesc = {};
+		importanceDesc.sizeInBytes = SKY_IMPORTANCE_COUNT * sizeof(float);
+		importanceDesc.structureByteStride = sizeof(float);
+		importanceDesc.usageFlags = ResourceUsageFlags::UnorderedAccess;
+		importanceDesc.debugName = "SkyAtmosphere_SkyImportance";
+		const rg::ResourceId pyramid = frame.graph.CreateBuffer(importanceDesc, ResourceViewType::UnorderedAccess);
+		rg::Pass texels = rg::Pass::Compute("Sky/Importance texels");
+		texels.Reads(skyView);
+		if (panorama.IsValid())
+		{
+			texels.Reads(panorama);
+		}
+		texels.Use(pyramid, rg::Access::ComputeShaderReadWrite);
+		frame.AddPass(std::move(texels.Executes(
+				[this, importance, skyView, pyramid](rg::PassContext &ctx)
+				{
+					ctx.rc.SetComputePipeline(skyImportanceTexelsPipeline_);
+					ctx.rc.SetCompute32BitConstants(&importance, sizeof(importance) / sizeof(uint32_t));
+					ctx.rc.SetComputeSRVByName("g_SkyViewLUT", ctx.Get(skyView));
+					ctx.rc.SetComputeSRVByName("g_Panorama", cloudPanoramaSRV_);
+					ctx.rc.SetComputeUAVByName("g_ImportanceOutput", ctx.Get(pyramid));
+					ctx.rc.Dispatch(SKY_IMPORTANCE_SIZE / 16, SKY_IMPORTANCE_SIZE / 16, 1);
+				})));
+
 		// The reduction reflects only the pyramid, and SetCompute32BitConstants throws on a pipeline without constants.
-		renderContext->SetComputePipeline(skyImportanceReducePipeline_);
-		renderContext->SetComputeUAVByName("g_ImportanceOutput", skyImportance_);
-		renderContext->Dispatch(1, 1, 1);
-		renderContext->TransitionResource(skyImportance_,
-										  ResourceLayout::UnorderedAccess,
-										  ResourceSync::AllShading,
-										  ResourceAccess::UnorderedAccess);
-		skyImportanceValid_ = true;
+		frame.AddPass(rg::Pass::Compute("Sky/Importance reduce")
+									.Use(pyramid, rg::Access::ComputeShaderReadWrite)
+									.Executes(
+											[this, pyramid](rg::PassContext &ctx)
+											{
+												ctx.rc.SetComputePipeline(skyImportanceReducePipeline_);
+												ctx.rc.SetComputeUAVByName("g_ImportanceOutput", ctx.Get(pyramid));
+												ctx.rc.Dispatch(1, 1, 1);
+											}));
+		skyImportance_ = pyramid;
 	}
-
-	renderContext->EndProfileScope();
-	renderContext->EndEvent();
 }

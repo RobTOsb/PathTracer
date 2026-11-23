@@ -35,7 +35,7 @@ target_compile_definitions(PathTracer PRIVATE
 
 target_link_libraries(PathTracer PRIVATE
     Common
-    D3D12RenderContext
+    RenderGraph
     GLTFScene
     meshoptimizer
     $<IF:$<CONFIG:Debug>,${DLSS_LIB_DIR}/x64/nvsdk_ngx_d_dbg.lib,${DLSS_LIB_DIR}/x64/nvsdk_ngx_d.lib>

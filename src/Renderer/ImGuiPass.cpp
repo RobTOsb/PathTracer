@@ -1,6 +1,7 @@
 #include "ImGuiPass.h"
 
 #include "Camera.h"
+#include "FrameGraph.h"
 #include "LightTreeInterop.h"
 #include "PathTracerPass.h"
 #include "RenderContext.h"
@@ -9,8 +10,12 @@
 
 #include "imgui.h"
 
+#include <algorithm>
 #include <cfloat>
 #include <cstdio>
+#include <optional>
+#include <string>
+#include <vector>
 
 namespace
 {
@@ -293,12 +298,78 @@ namespace
 		}
 	}
 
-	void ProfileRow(RenderContext *renderContext, const char *scope)
+	// The graph's pass timings, averaged over recent frames, in groups by the part of their names before '/': one row
+	// per group, opening to its passes.
+	void PassTimingTable(const std::vector<rg::PassTiming> &timings)
 	{
-		if (const GPUProfileScopeStats *stats = renderContext->GetProfileScopeStats(scope))
+		struct Group
 		{
-			ImGui::Text("%-12s %6.2f ms (median %.2f)", scope, stats->averageMs, stats->medianMs);
+			std::string name;
+			float averageMs = 0.0f;
+			float medianMs = 0.0f;
+			bool timed = false;
+			std::vector<const rg::PassTiming *> passes;
+		};
+		std::vector<Group> groups;
+		for (const rg::PassTiming &timing: timings)
+		{
+			const std::string name = timing.name.substr(0, timing.name.find('/'));
+			auto it = std::find_if(groups.begin(), groups.end(), [&](const Group &g) { return g.name == name; });
+			if (it == groups.end())
+			{
+				it = groups.insert(groups.end(), Group{ name });
+			}
+			it->passes.push_back(&timing);
+			if (timing.stats.sampleCount > 0)
+			{
+				it->averageMs += timing.stats.averageMs;
+				it->medianMs += timing.stats.medianMs;
+				it->timed = true;
+			}
 		}
+
+		auto timeColumns = [](bool timed, float averageMs, float medianMs)
+		{
+			ImGui::TableNextColumn();
+			timed ? ImGui::Text("%6.2f", averageMs) : ImGui::TextUnformatted("     -");
+			ImGui::TableNextColumn();
+			timed ? ImGui::Text("%6.2f", medianMs) : ImGui::TextUnformatted("     -");
+		};
+
+		if (!ImGui::BeginTable("Pass timings", 3, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg))
+		{
+			return;
+		}
+		ImGui::TableSetupColumn("GPU time", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("Avg ms");
+		ImGui::TableSetupColumn("Median ms");
+		ImGui::TableHeadersRow();
+		for (const Group &group: groups)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			const bool single = group.passes.size() == 1 && group.passes[0]->name == group.name;
+			const ImGuiTreeNodeFlags leaf = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+			const bool open = ImGui::TreeNodeEx(group.name.c_str(), single ? leaf : ImGuiTreeNodeFlags_None);
+			timeColumns(group.timed, group.averageMs, group.medianMs);
+			if (single || !open)
+			{
+				continue;
+			}
+			for (const rg::PassTiming *pass: group.passes)
+			{
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn();
+				const size_t slash = pass->name.find('/');
+				ImGui::TreeNodeEx(pass->name.c_str(),
+								  leaf,
+								  "%s",
+								  slash == std::string::npos ? pass->name.c_str() : pass->name.c_str() + slash + 1);
+				timeColumns(pass->stats.sampleCount > 0, pass->stats.averageMs, pass->stats.medianMs);
+			}
+			ImGui::TreePop();
+		}
+		ImGui::EndTable();
 	}
 } // namespace
 
@@ -306,30 +377,25 @@ ImGuiPass::ImGuiPass(RenderSettings &settings,
 					 const Camera &camera,
 					 bool rayReconstructionSupported,
 					 const RenderGPUScene &scene,
-					 const PathTracerPass &pathTracer) :
+					 const PathTracerPass &pathTracer,
+					 const rg::RenderGraph &graph) :
 	settings_(settings), camera_(camera), rayReconstructionSupported_(rayReconstructionSupported), scene_(scene),
-	pathTracer_(pathTracer)
+	pathTracer_(pathTracer), graph_(graph)
 {
 }
 
-void ImGuiPass::Execute(RenderContext *renderContext)
+void ImGuiPass::AddPasses(FrameGraph &frame)
 {
-	renderContext->ImguiNewFrame();
-	BuildUI(renderContext);
-
-	renderContext->BeginEvent("ImGui");
-
-	const ResourceHandle backBuffer = renderContext->GetCurrentBackBufferHandle();
-	renderContext->TransitionResource(backBuffer,
-									  ResourceLayout::RenderTarget,
-									  ResourceSync::RenderTarget,
-									  ResourceAccess::RenderTarget);
-
-	const Resource renderTarget = renderContext->GetCurrentBackBuffer();
-	renderContext->SetRenderTargets(&renderTarget, 1);
-	renderContext->ImguiRender();
-
-	renderContext->EndEvent();
+	const rg::ResourceId backBuffer = frame.backBuffer;
+	frame.AddPass(rg::Pass::Graphics("ImGui")
+								.Use(backBuffer, rg::Access::ColourAttachment)
+								.Executes(
+										[backBuffer](rg::PassContext &ctx)
+										{
+											const Resource renderTarget = ctx.GetResource(backBuffer);
+											ctx.rc.SetRenderTargets(&renderTarget, 1);
+											ctx.rc.ImguiRender();
+										}));
 }
 
 void ImGuiPass::BuildStatsWindow(RenderContext *renderContext)
@@ -357,35 +423,24 @@ void ImGuiPass::BuildStatsWindow(RenderContext *renderContext)
 				FormatBytes(memoryStats.local.usageBytes).text,
 				FormatBytes(memoryStats.local.budgetBytes).text,
 				FormatBytes(memoryStats.local.allocator.blockBytes).text);
+	if (const std::optional<GPUProfileScopeStats> frame = renderContext->GetProfileScopeStats(kGpuFrameScope))
+	{
+		ImGui::Text("GPU frame %.2f ms (median %.2f)", frame->averageMs, frame->medianMs);
+	}
+
 	ImGui::Separator();
-	if (settings_.atmosphere.enabled)
-	{
-		ProfileRow(renderContext, "SkyAtmosphere");
-	}
-
-	if (scene_.GetLightCount() > 0)
-	{
-		ProfileRow(renderContext, "LightTree");
-	}
-
-	ProfileRow(renderContext, "PathTracer");
-	if (settings_.dlssMode != DLSSMode::Off)
-	{
-		ProfileRow(renderContext, "DLSS-RR");
-	}
-
-	ProfileRow(renderContext, "AutoExposure");
-	ProfileRow(renderContext, "Bloom");
-	ProfileRow(renderContext, "Tonemap");
-	if (settings_.dlssMode != DLSSMode::Off && settings_.guideView != GUIDE_VIEW_OFF)
-	{
-		ProfileRow(renderContext, "GuideView");
-	}
+	const std::vector<rg::PassTiming> timings = graph_.GetPassTimings(*renderContext);
+	ImGui::Text("Render graph: %zu passes in %u batches, %s transient",
+				timings.size(),
+				graph_.GetTotalBatchCount(),
+				FormatBytes(graph_.GetTransientMemorySize()).text);
+	PassTimingTable(timings);
 	ImGui::End();
 }
 
 void ImGuiPass::BuildUI(RenderContext *renderContext)
 {
+	renderContext->ImguiNewFrame();
 	BuildStatsWindow(renderContext);
 
 	ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_FirstUseEver);
@@ -902,6 +957,11 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::Checkbox("Inline shadow rays", &settings_.inlineShadowRays);
 		ImGui::SetItemTooltip("Shadow rays as inline ray queries, keeping the path's state in registers instead of "
 							  "saving it around a TraceRay");
+
+		ImGui::Checkbox("Async compute", &settings_.asyncCompute);
+		ImGui::SetItemTooltip("The acceleration structure, light tree, sky and path tracing passes on the async compute "
+							  "queue, and the denoiser and everything after it on the graphics queue. Off: every pass "
+							  "on the graphics queue");
 
 		ImGui::Checkbox("Merge co-located instances", &settings_.mergeInstances);
 		ImGui::SetItemTooltip("Static primitives with the same world matrix (the parts of one tree, say) as one TLAS "

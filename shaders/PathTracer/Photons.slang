@@ -58,6 +58,9 @@ void ClearPhotonReceiver()
 {
     RWStructuredBuffer<uint4> receivers = ResourceDescriptorHeap[g_Frame.photons.receivers];
     receivers[PhotonReceiverIndex()] = uint4(0u, 0u, 0u, PHOTON_NO_RECEIVER);
+    // The sums the splat adds to, which start each frame undefined (a graph transient).
+    RWStructuredBuffer<uint4> caustics = ResourceDescriptorHeap[g_Frame.photons.caustics];
+    caustics[PhotonReceiverIndex()] = uint4(0u, 0u, 0u, 0u);
 }
 
 void WritePhotonReceiver(float3 position, float3 n, float3 reflectance)

@@ -2,10 +2,15 @@
 
 #include "LightTreeInterop.h"
 #include "RenderContext.h"
+#include "RenderGraph.h"
 #include "ShaderInterop.h"
 
+#include <array>
 #include <cstdint>
 #include <span>
+#include <vector>
+
+class FrameGraph;
 
 float LightTreeFlux(const GpuLight &light, float fluxScale = 1.0f);
 
@@ -30,30 +35,40 @@ public:
 		uint32_t maxLeafLights = 4; // clamped to [1, LIGHT_TREE_MAX_LEAF_LIGHTS]
 	};
 
-	// Records the build on the current graphics command list, and leaves the outputs readable by any shader.
-	void Build(const Inputs &inputs);
-
-	ResourceHandle GetNodes() const
+	// Adds the build to the graph in four passes, each a few dispatches with global UAV barriers between them:
+	// LightTree/Keys (the lights' clusters and Morton codes), LightTree/Sort (the radix sort of the codes),
+	// LightTree/Nodes (the leaves, then the levels up to the root) and LightTree/Power (the power selection CDF).
+	// Everything is a graph transient, the outputs too, since each frame builds them anew. With no lights it records
+	// nothing and the outputs are imports of one-element placeholders, so the bindings stay valid.
+	void AddPasses(FrameGraph &frame, const Inputs &inputs);
+	// Forgets the outputs, for a frame that does not call AddPasses.
+	void ClearOutputs()
 	{
-		return nodes_;
+		outputs_ = {};
+	}
+
+	// This frame's outputs, as graph resources, once AddPasses has run; invalid before Reset.
+	rg::ResourceId GetNodes() const
+	{
+		return outputs_[kNodes];
 	}
 
 	// GpuLightTreeLeafEntry per leaf slot: the light and its PMF within the leaf.
-	ResourceHandle GetLeafLights() const
+	rg::ResourceId GetLeafLights() const
 	{
-		return leafLights_;
+		return outputs_[kLeafLights];
 	}
 
 	// GpuLightTreeLeafEntry per light: its leaf's position along the leaf level and its PMF within it.
-	ResourceHandle GetLeafOfLight() const
+	rg::ResourceId GetLeafOfLight() const
 	{
-		return leafOfLight_;
+		return outputs_[kLeafOfLight];
 	}
 
 	// GpuLightPowerEntry per light, for power selection.
-	ResourceHandle GetPower() const
+	rg::ResourceId GetPower() const
 	{
-		return power_;
+		return outputs_[kPower];
 	}
 
 	// Levels of groups every light is under, in the last build.
@@ -103,18 +118,27 @@ private:
 	PipelineHandle powerGuidePipeline_ = InvalidPipelineHandle;
 
 	uint32_t lightCount_ = 0;
-	ResourceHandle resources_ = InvalidResourceHandle; // LightTreeBuildResources
+	// LightTreeBuildResources, one per frame in flight: the transients' descriptors change when the graph places
+	// them again.
+	std::vector<ResourceHandle> resources_;
 	ResourceHandle fluxScales_ = InvalidResourceHandle;
-	ResourceHandle lightClusters_ = InvalidResourceHandle;
-	ResourceHandle nodeClusters_ = InvalidResourceHandle;
-	ResourceHandle keys_[2] = { InvalidResourceHandle, InvalidResourceHandle };
-	ResourceHandle values_[2] = { InvalidResourceHandle, InvalidResourceHandle };
-	ResourceHandle radixCounts_ = InvalidResourceHandle;
-	ResourceHandle blockSums_ = InvalidResourceHandle;
-	ResourceHandle nodes_ = InvalidResourceHandle;
-	ResourceHandle leafLights_ = InvalidResourceHandle;
-	ResourceHandle leafOfLight_ = InvalidResourceHandle;
-	ResourceHandle power_ = InvalidResourceHandle;
+	ResourceHandle lightEmitters_ = InvalidResourceHandle;
+	// The transients' sizes, in elements: per light, per node (for one light per leaf) and per block.
+	uint32_t lightElements_ = 0;
+	uint32_t nodeElements_ = 0;
+	uint32_t blockElements_ = 0;
+	enum Output
+	{
+		kNodes,
+		kLeafLights,
+		kLeafOfLight,
+		kPower,
+		kOutputCount
+	};
+	// Without lights, one-element stand-ins for the outputs.
+	std::array<ResourceHandle, kOutputCount> placeholders_ = { InvalidResourceHandle, InvalidResourceHandle,
+															   InvalidResourceHandle, InvalidResourceHandle };
+	std::array<rg::ResourceId, kOutputCount> outputs_ = {};
 	uint32_t depth_ = 0;
 	uint32_t leafSize_ = 1;
 	float3 origin_ = { 0.0f, 0.0f, 0.0f };

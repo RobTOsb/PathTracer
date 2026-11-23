@@ -25,7 +25,10 @@ if(${CMAKE_CXX_COMPILER_ID} STREQUAL "Clang" OR ${CMAKE_CXX_COMPILER_ID} STREQUA
     )
 endif()
 
-add_subdirectory("external/D3D12RenderContext")
+# The render graph brings its own RenderContext. Only its library is added: its project root also defines
+# copy_compile_commands, tests and a sandbox, which stay out of this build.
+add_subdirectory("external/RenderGraph/external/D3D12RenderContext")
 add_subdirectory("external/GLTFScene")
+add_subdirectory("external/RenderGraph/src" EXCLUDE_FROM_ALL)
 
 add_subdirectory("src")

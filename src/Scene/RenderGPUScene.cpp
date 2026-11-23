@@ -3,6 +3,7 @@
 #include "GLTFScene.h"
 #include "LightTreeBuilder.h"
 #include "PathTracerInterop.h"
+#include "Renderer/FrameGraph.h"
 #include "SceneCache.h"
 
 #include "fmtlog.h"
@@ -557,50 +558,46 @@ void RenderGPUScene::UpdateLights()
 	WriteLightRange<float>(renderContext_, frame.emissionScales, 0, emissionScales_);
 }
 
-void RenderGPUScene::BuildLightTree(uint32_t maxLeafLights)
+void RenderGPUScene::AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights)
 {
 	if (lightFrames_.empty())
 	{
+		lightTreeBuilder_->ClearOutputs();
 		return;
 	}
-	const LightFrameBuffers &frame = lightFrames_[lightFrame_];
+	const LightFrameBuffers &lightFrame = lightFrames_[lightFrame_];
 
-	// The tree build reads the light buffer through its UAV, so it stays in that state until the build is done.
-	renderContext_->TransitionResource(lights_,
-									   ResourceLayout::UnorderedAccess,
-									   ResourceSync::ComputeShading,
-									   ResourceAccess::UnorderedAccess);
+	// Read and written through its UAV, by the move and by the tree build's keys.
+	const rg::ResourceId lights = frame.ImportBuffer(lights_, "Scene_Lights");
 	const uint32_t dynamicLightCount = static_cast<uint32_t>(dynamicObjectLights_.size());
 	const uint32_t pointLightCount = static_cast<uint32_t>(pointLights_.size());
 	const uint32_t firstThread = transformsWritten_ ? 0u : dynamicLightCount;
 	if (dynamicLightCount + pointLightCount > firstThread)
 	{
-		auto index = [&](ResourceHandle buffer)
-		{ return static_cast<uint>(renderContext_->GetResourceViewInfo(buffer).descriptorIndex); };
 		DynamicLightConstants constants = {};
 		constants.firstThread = firstThread;
 		constants.dynamicLightCount = dynamicLightCount;
 		constants.pointLightCount = pointLightCount;
 		constants.staticLightCount = staticLightCount_;
-		constants.objectLightsHandle = index(dynamicObjectLightBuffer_);
-		constants.lightInstancesHandle = index(dynamicLightInstanceBuffer_);
+		constants.objectLightsHandle = frame.DescriptorIndex(dynamicObjectLightBuffer_);
+		constants.lightInstancesHandle = frame.DescriptorIndex(dynamicLightInstanceBuffer_);
 		// Not read when only the point lights are written, so any valid buffer then.
-		constants.transformsHandle = index(transformsWritten_ ? frame.transforms : dynamicObjectLightBuffer_);
-		constants.pointLightsHandle = index(frame.pointLights);
-		constants.lightsHandle = index(lights_);
-
-		renderContext_->BeginEvent("DynamicLights");
-		renderContext_->BeginProfileScope("DynamicLights");
-		renderContext_->SetComputePipeline(dynamicLightsPipeline_);
-		renderContext_->SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
+		constants.transformsHandle =
+				frame.DescriptorIndex(transformsWritten_ ? lightFrame.transforms : dynamicObjectLightBuffer_);
+		constants.pointLightsHandle = frame.DescriptorIndex(lightFrame.pointLights);
+		constants.lightsHandle = frame.DescriptorIndex(lights_);
 		const uint32_t threads = dynamicLightCount + pointLightCount - firstThread;
-		renderContext_->Dispatch((threads + DYNAMIC_LIGHTS_GROUP_SIZE - 1) / DYNAMIC_LIGHTS_GROUP_SIZE, 1, 1);
-		renderContext_->GlobalBarrier(ResourceSync::ComputeShading,
-									  ResourceAccess::UnorderedAccess,
-									  ResourceSync::ComputeShading,
-									  ResourceAccess::UnorderedAccess);
-		renderContext_->EndProfileScope();
-		renderContext_->EndEvent();
+		const PipelineHandle pipeline = dynamicLightsPipeline_;
+
+		frame.AddPass(rg::Pass::Compute("Lights/Dynamic lights")
+									.Use(lights, rg::Access::ComputeShaderReadWrite)
+									.Executes(
+											[pipeline, constants, threads](rg::PassContext &ctx)
+											{
+												ctx.rc.SetComputePipeline(pipeline);
+												ctx.rc.SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
+												ctx.rc.Dispatch((threads + DYNAMIC_LIGHTS_GROUP_SIZE - 1) / DYNAMIC_LIGHTS_GROUP_SIZE, 1, 1);
+											}));
 		if (transformsWritten_)
 		{
 			lightsPose_ = dynamicLightPose_;
@@ -610,7 +607,7 @@ void RenderGPUScene::BuildLightTree(uint32_t maxLeafLights)
 
 	LightTreeBuilder::Inputs inputs;
 	inputs.lights = lights_;
-	inputs.emissionScales = frame.emissionScales;
+	inputs.emissionScales = lightFrame.emissionScales;
 	// Over the parts that have lights, as an empty part's bounds are inverted.
 	struct Part
 	{
@@ -633,12 +630,42 @@ void RenderGPUScene::BuildLightTree(uint32_t maxLeafLights)
 		}
 	}
 	inputs.maxLeafLights = maxLeafLights;
-	lightTreeBuilder_->Build(inputs);
+	lightTreeBuilder_->AddPasses(frame, inputs);
+}
 
-	renderContext_->TransitionResource(lights_,
-									   ResourceLayout::ShaderResource,
-									   ResourceSync::Raytracing,
-									   ResourceAccess::ShaderResource);
+void RenderGPUScene::UseForTracing(rg::Pass &pass, FrameGraph &frame, bool opacityMicromaps, bool previousShadows) const
+{
+	if (frameTlases_.empty())
+	{
+		return;
+	}
+	const rg::Access structure = rg::Access::AccelerationStructureRead;
+	const FrameTLASes &current = frameTlases_[tlasFrame_];
+	const bool micromaps = opacityMicromaps && HasOpacityMicromaps();
+	frame.UseBuffer(pass, GetTLASSRV(opacityMicromaps), micromaps ? "Scene_TLAS_OMM" : "Scene_TLAS", structure);
+	if (micromaps && current.omm2StateTlasSRV != InvalidResourceHandle)
+	{
+		frame.UseBuffer(pass, current.omm2StateTlasSRV, "Scene_TLAS_OMM2State", structure);
+	}
+	if (previousShadows)
+	{
+		frame.UseBuffer(pass, GetPreviousShadowTLASSRV(opacityMicromaps), "Scene_PreviousShadowTLAS", structure);
+	}
+
+	if (lightFrames_.empty())
+	{
+		return;
+	}
+	const rg::Access read = rg::Access::RaytracingShaderRead;
+	frame.UseBuffer(pass, lights_, "Scene_Lights", read);
+	for (rg::ResourceId output: { lightTreeBuilder_->GetNodes(), lightTreeBuilder_->GetLeafLights(),
+								  lightTreeBuilder_->GetLeafOfLight(), lightTreeBuilder_->GetPower() })
+	{
+		if (output.IsValid())
+		{
+			FrameGraph::Use(pass, output, read);
+		}
+	}
 }
 
 void RenderGPUScene::Animate(float seconds)
@@ -3276,7 +3303,7 @@ void RenderGPUScene::BuildInstanceStructures()
 		 tlasInstances_.size());
 }
 
-void RenderGPUScene::UpdateAccelerationStructures()
+void RenderGPUScene::AddAccelerationStructurePasses(FrameGraph &frame)
 {
 	if (frameTlases_.empty())
 	{
@@ -3304,12 +3331,12 @@ void RenderGPUScene::UpdateAccelerationStructures()
 	// last built, possibly in a frame that traced another set.
 	tlasFrame_ = renderContext_->GetCurrentFrameIndex();
 	tlasFramesUpdated_ = std::min(tlasFramesUpdated_ + 1, 2u);
-	FrameTLASes &frame = frameTlases_[tlasFrame_];
-	if (frame.poseGeneration == dynamicPoseGeneration_)
+	FrameTLASes &tlases = frameTlases_[tlasFrame_];
+	if (tlases.poseGeneration == dynamicPoseGeneration_)
 	{
 		return;
 	}
-	frame.poseGeneration = dynamicPoseGeneration_;
+	tlases.poseGeneration = dynamicPoseGeneration_;
 
 	if (tlasInstancesGeneration_ != dynamicPoseGeneration_)
 	{
@@ -3334,14 +3361,30 @@ void RenderGPUScene::UpdateAccelerationStructures()
 		}
 	}
 
-	renderContext_->UpdateTLAS(frame.tlas, tlasInstances_);
-	if (frame.ommTlas != InvalidAccelerationStructureHandle)
+	// The instance lists hold this pose until the callback runs: only the next frame's record changes them.
+	rg::Pass pass = rg::Pass::Compute("Scene/TLAS update");
+	const rg::Access build = rg::Access::AccelerationStructureBuildWrite;
+	frame.UseBuffer(pass, tlases.tlasSRV, "Scene_TLAS", build);
+	if (tlases.ommTlas != InvalidAccelerationStructureHandle)
 	{
-		renderContext_->UpdateTLAS(frame.ommTlas, ommTlasInstances_);
+		frame.UseBuffer(pass, tlases.ommTlasSRV, "Scene_TLAS_OMM", build);
 	}
-	if (frame.omm2StateTlas != InvalidAccelerationStructureHandle)
+	if (tlases.omm2StateTlas != InvalidAccelerationStructureHandle)
 	{
-		renderContext_->UpdateTLAS(frame.omm2StateTlas, omm2StateTlasInstances_);
+		frame.UseBuffer(pass, tlases.omm2StateTlasSRV, "Scene_TLAS_OMM2State", build);
 	}
-	renderContext_->UAVBarrierForAccelerationStructures();
+	const FrameTLASes target = tlases;
+	frame.AddPass(std::move(pass.Executes(
+			[this, target](rg::PassContext &ctx)
+			{
+				ctx.rc.UpdateTLAS(target.tlas, tlasInstances_);
+				if (target.ommTlas != InvalidAccelerationStructureHandle)
+				{
+					ctx.rc.UpdateTLAS(target.ommTlas, ommTlasInstances_);
+				}
+				if (target.omm2StateTlas != InvalidAccelerationStructureHandle)
+				{
+					ctx.rc.UpdateTLAS(target.omm2StateTlas, omm2StateTlasInstances_);
+				}
+			})));
 }

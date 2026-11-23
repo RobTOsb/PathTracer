@@ -1,6 +1,9 @@
 #include "LightTreeBuilder.h"
 
+#include "Renderer/FrameGraph.h"
+
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <math.h>
 #include <stdexcept>
@@ -102,20 +105,8 @@ LightTreeBuilder::~LightTreeBuilder()
 
 void LightTreeBuilder::DestroyBuffers()
 {
-	for (ResourceHandle *buffer: { &resources_,
-								   &fluxScales_,
-								   &lightClusters_,
-								   &nodeClusters_,
-								   &keys_[0],
-								   &keys_[1],
-								   &values_[0],
-								   &values_[1],
-								   &radixCounts_,
-								   &blockSums_,
-								   &nodes_,
-								   &leafLights_,
-								   &leafOfLight_,
-								   &power_ })
+	for (ResourceHandle *buffer: { &fluxScales_, &placeholders_[kNodes], &placeholders_[kLeafLights],
+								   &placeholders_[kLeafOfLight], &placeholders_[kPower] })
 	{
 		if (*buffer != InvalidResourceHandle)
 		{
@@ -123,6 +114,12 @@ void LightTreeBuilder::DestroyBuffers()
 			*buffer = InvalidResourceHandle;
 		}
 	}
+	for (ResourceHandle buffer: resources_)
+	{
+		renderContext_->DestroyResource(buffer);
+	}
+	resources_.clear();
+	outputs_ = {};
 	lightCount_ = 0;
 	depth_ = 0;
 	leafSize_ = 1;
@@ -133,12 +130,14 @@ void LightTreeBuilder::Reset(std::span<const float> fluxScales, ResourceHandle l
 	renderContext_->WaitForGPUIdle();
 	DestroyBuffers();
 	lightCount_ = static_cast<uint32_t>(fluxScales.size());
+	lightEmitters_ = lightEmitters;
 
 	// At least one element each, so the bindings stay valid without lights. The tree is sized for one light per
-	// leaf, the most nodes any leaf size needs, so the leaf size can change without new buffers.
+	// leaf, the most nodes any leaf size needs, so the leaf size can change without a new graph.
 	const uint32_t count = std::max(lightCount_, 1u);
-	const uint32_t nodeCount = TreeLayout(count, 1).NodeCount();
-	const uint32_t blockCount = GroupCount(count, LIGHT_TREE_BUILD_BLOCK_SIZE);
+	lightElements_ = count;
+	nodeElements_ = TreeLayout(count, 1).NodeCount();
+	blockElements_ = GroupCount(count, LIGHT_TREE_BUILD_BLOCK_SIZE);
 	auto create = [&](uint32_t elements, uint32_t stride, const char *debugName)
 	{
 		BufferDesc desc = {};
@@ -148,18 +147,13 @@ void LightTreeBuilder::Reset(std::span<const float> fluxScales, ResourceHandle l
 		desc.debugName = debugName;
 		return renderContext_->CreateBuffer(desc, ResourceViewType::UnorderedAccess);
 	};
-	lightClusters_ = create(count, sizeof(GpuLightTreeCluster), "LightTree_LightClusters");
-	nodeClusters_ = create(nodeCount, sizeof(GpuLightTreeCluster), "LightTree_NodeClusters");
-	keys_[0] = create(count, sizeof(uint32_t), "LightTree_KeysA");
-	keys_[1] = create(count, sizeof(uint32_t), "LightTree_KeysB");
-	values_[0] = create(count, sizeof(uint32_t), "LightTree_ValuesA");
-	values_[1] = create(count, sizeof(uint32_t), "LightTree_ValuesB");
-	radixCounts_ = create((1u << LIGHT_TREE_RADIX_BITS) * blockCount, sizeof(uint32_t), "LightTree_RadixCounts");
-	blockSums_ = create(blockCount, sizeof(uint32_t), "LightTree_BlockSums");
-	nodes_ = create(nodeCount, sizeof(GpuLightTreeNode), "LightTree_Nodes");
-	leafLights_ = create(count, sizeof(GpuLightTreeLeafEntry), "LightTree_LeafLights");
-	leafOfLight_ = create(count, sizeof(GpuLightTreeLeafEntry), "LightTree_LeafOfLight");
-	power_ = create(count, sizeof(GpuLightPowerEntry), "LightTree_Power");
+	if (lightCount_ == 0)
+	{
+		placeholders_[kNodes] = create(nodeElements_, sizeof(GpuLightTreeNode), "LightTree_Nodes");
+		placeholders_[kLeafLights] = create(count, sizeof(GpuLightTreeLeafEntry), "LightTree_LeafLights");
+		placeholders_[kLeafOfLight] = create(count, sizeof(GpuLightTreeLeafEntry), "LightTree_LeafOfLight");
+		placeholders_[kPower] = create(count, sizeof(GpuLightPowerEntry), "LightTree_Power");
+	}
 
 	std::vector<float> scales(fluxScales.begin(), fluxScales.end());
 	scales.resize(count, 1.0f);
@@ -171,30 +165,26 @@ void LightTreeBuilder::Reset(std::span<const float> fluxScales, ResourceHandle l
 	fluxScales_ = renderContext_->CreateBuffer(desc, ResourceViewType::ShaderResource, scales.data(), batch);
 	renderContext_->EndUpload(batch);
 
-	auto index = [&](ResourceHandle buffer) { return static_cast<uint>(renderContext_->GetResourceViewInfo(buffer).descriptorIndex); };
-	LightTreeBuildResources resources = {};
-	resources.fluxScales = index(fluxScales_);
-	resources.lightEmitters = index(lightEmitters);
-	resources.lightClusters = index(lightClusters_);
-	resources.nodeClusters = index(nodeClusters_);
-	resources.keysA = index(keys_[0]);
-	resources.valuesA = index(values_[0]);
-	resources.keysB = index(keys_[1]);
-	resources.valuesB = index(values_[1]);
-	resources.radixCounts = index(radixCounts_);
-	resources.blockSums = index(blockSums_);
-	resources.nodes = index(nodes_);
-	resources.leafLights = index(leafLights_);
-	resources.leafOfLight = index(leafOfLight_);
-	resources.power = index(power_);
-	resources_ = renderContext_->CreateConstantBuffer(sizeof(resources), "LightTree_BuildResources");
-	renderContext_->UpdateConstantBuffer(resources_, &resources, sizeof(resources));
+	resources_.resize(renderContext_->GetFramesInFlight());
+	for (ResourceHandle &resources: resources_)
+	{
+		resources = renderContext_->CreateConstantBuffer(sizeof(LightTreeBuildResources), "LightTree_BuildResources");
+	}
 }
 
-void LightTreeBuilder::Build(const Inputs &inputs)
+void LightTreeBuilder::AddPasses(FrameGraph &frame, const Inputs &inputs)
 {
+	outputs_ = {};
+	if (resources_.empty())
+	{
+		return;
+	}
 	if (lightCount_ == 0)
 	{
+		outputs_ = { frame.ImportBuffer(placeholders_[kNodes], "LightTree_Nodes"),
+					 frame.ImportBuffer(placeholders_[kLeafLights], "LightTree_LeafLights"),
+					 frame.ImportBuffer(placeholders_[kLeafOfLight], "LightTree_LeafOfLight"),
+					 frame.ImportBuffer(placeholders_[kPower], "LightTree_Power") };
 		return;
 	}
 
@@ -202,10 +192,10 @@ void LightTreeBuilder::Build(const Inputs &inputs)
 	const TreeLayout layout(lightCount_, leafSize);
 	depth_ = layout.leafLevel + 1;
 	leafSize_ = leafSize;
+	const uint32_t lightCount = lightCount_;
 	const uint32_t blockCount = GroupCount(lightCount_, LIGHT_TREE_BUILD_BLOCK_SIZE);
 
 	LightTreeBuildConstants constants = {};
-	constants.boundsMin = inputs.boundsMin;
 	const float extent = std::max({ inputs.boundsMax.x - inputs.boundsMin.x,
 									inputs.boundsMax.y - inputs.boundsMin.y,
 									inputs.boundsMax.z - inputs.boundsMin.z,
@@ -218,67 +208,155 @@ void LightTreeBuilder::Build(const Inputs &inputs)
 	constants.quantStep = step_;
 	constants.lightCount = lightCount_;
 	constants.leafSize = leafSize;
-	constants.lightsHandle = renderContext_->GetResourceViewInfo(inputs.lights).descriptorIndex;
-	constants.emissionScalesHandle = renderContext_->GetResourceViewInfo(inputs.emissionScales).descriptorIndex;
+	constants.lightsHandle = frame.DescriptorIndex(inputs.lights);
+	constants.emissionScalesHandle = frame.DescriptorIndex(inputs.emissionScales);
 
-	renderContext_->BeginEvent("LightTree");
-	renderContext_->BeginProfileScope("LightTree");
-
-	// The barriers also order this frame's writes after last frame's reads. Between the kernels, which all read
-	// what the one before wrote, global barriers do instead, leaving these states as they are.
-	const ResourceHandle outputs[] = { nodes_, leafLights_, leafOfLight_, power_ };
-	for (ResourceHandle buffer: { lightClusters_, nodeClusters_, keys_[0], keys_[1], values_[0], values_[1], radixCounts_, blockSums_ })
+	// The scratch of one build, and its outputs, which nothing reads after this frame's paths.
+	auto transient = [&](uint32_t elements, uint32_t stride, const char *debugName)
 	{
-		renderContext_->TransitionResource(buffer, ResourceLayout::UnorderedAccess, ResourceSync::ComputeShading, ResourceAccess::UnorderedAccess);
-	}
-	for (ResourceHandle buffer: outputs)
-	{
-		renderContext_->TransitionResource(buffer, ResourceLayout::UnorderedAccess, ResourceSync::ComputeShading, ResourceAccess::UnorderedAccess);
-	}
-
-	auto dispatch = [&](PipelineHandle pipeline, uint32_t groups, uint32_t pass)
-	{
-		constants.pass = pass;
-		renderContext_->SetComputePipeline(pipeline);
-		renderContext_->SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
-		renderContext_->SetComputeConstantBuffer(1, resources_);
-		renderContext_->Dispatch(groups, 1, 1);
-		renderContext_->GlobalBarrier(ResourceSync::ComputeShading,
-									  ResourceAccess::UnorderedAccess,
-									  ResourceSync::ComputeShading,
-									  ResourceAccess::UnorderedAccess);
+		BufferDesc desc = {};
+		desc.sizeInBytes = static_cast<uint64_t>(elements) * stride;
+		desc.structureByteStride = stride;
+		desc.usageFlags = ResourceUsageFlags::UnorderedAccess;
+		desc.debugName = debugName;
+		return frame.graph.CreateBuffer(desc, ResourceViewType::UnorderedAccess);
 	};
+	const rg::ResourceId lightClusters = transient(lightElements_, sizeof(GpuLightTreeCluster), "LightTree_LightClusters");
+	const rg::ResourceId nodeClusters = transient(nodeElements_, sizeof(GpuLightTreeCluster), "LightTree_NodeClusters");
+	const rg::ResourceId keysA = transient(lightElements_, sizeof(uint32_t), "LightTree_KeysA");
+	const rg::ResourceId keysB = transient(lightElements_, sizeof(uint32_t), "LightTree_KeysB");
+	const rg::ResourceId valuesA = transient(lightElements_, sizeof(uint32_t), "LightTree_ValuesA");
+	const rg::ResourceId valuesB = transient(lightElements_, sizeof(uint32_t), "LightTree_ValuesB");
+	const rg::ResourceId radixCounts =
+			transient((1u << LIGHT_TREE_RADIX_BITS) * blockElements_, sizeof(uint32_t), "LightTree_RadixCounts");
+	const rg::ResourceId blockSums = transient(blockElements_, sizeof(uint32_t), "LightTree_BlockSums");
 
-	dispatch(keysPipeline_, GroupCount(lightCount_, LIGHT_TREE_BUILD_GROUP_SIZE), 0);
+	const rg::ResourceId nodes = transient(nodeElements_, sizeof(GpuLightTreeNode), "LightTree_Nodes");
+	const rg::ResourceId leafLights = transient(lightElements_, sizeof(GpuLightTreeLeafEntry), "LightTree_LeafLights");
+	const rg::ResourceId leafOfLight = transient(lightElements_, sizeof(GpuLightTreeLeafEntry), "LightTree_LeafOfLight");
+	const rg::ResourceId power = transient(lightElements_, sizeof(GpuLightPowerEntry), "LightTree_Power");
+	outputs_ = { nodes, leafLights, leafOfLight, power };
+
+	const rg::ResourceId lights = frame.ImportBuffer(inputs.lights, "Scene_Lights");
+
+	// Every kernel reads and writes through UAVs. Between the kernels of one pass, which read what the one before
+	// wrote, global UAV barriers order them, leaving every buffer in the state the pass declared.
+	struct Dispatch
+	{
+		PipelineHandle pipeline;
+		uint32_t groups;
+		uint32_t pass;
+	};
+	const ResourceHandle resourceBuffer = resources_[frame.rc.GetCurrentFrameIndex()];
+	auto record = [constants, resourceBuffer](RenderContext &rc, std::span<const Dispatch> dispatches)
+	{
+		LightTreeBuildConstants c = constants;
+		for (size_t i = 0; i < dispatches.size(); ++i)
+		{
+			if (i > 0)
+			{
+				rc.GlobalBarrier(ResourceSync::ComputeShading,
+								 ResourceAccess::UnorderedAccess,
+								 ResourceSync::ComputeShading,
+								 ResourceAccess::UnorderedAccess);
+			}
+			c.pass = dispatches[i].pass;
+			rc.SetComputePipeline(dispatches[i].pipeline);
+			rc.SetCompute32BitConstants(&c, sizeof(c) / sizeof(uint32_t));
+			rc.SetComputeConstantBuffer(1, resourceBuffer);
+			rc.Dispatch(dispatches[i].groups, 1, 1);
+		}
+	};
+	const rg::Access rw = rg::Access::ComputeShaderReadWrite;
+
+	// The descriptors of this frame's transients, which the graph has placed by the time the first pass runs.
+	const rg::RenderGraph &graph = frame.graph;
+	const ResourceHandle fluxScales = fluxScales_;
+	const ResourceHandle lightEmitters = lightEmitters_;
+	const std::array<rg::ResourceId, 8> scratchIds = { lightClusters, nodeClusters, keysA, valuesA,
+													   keysB,		  valuesB,		radixCounts, blockSums };
+	const std::array<rg::ResourceId, kOutputCount> outputIds = outputs_;
+	const std::array<Dispatch, 1> keys = { { { keysPipeline_, GroupCount(lightCount, LIGHT_TREE_BUILD_GROUP_SIZE), 0 } } };
+	frame.AddPass(rg::Pass::Compute("LightTree/Keys")
+								.Use(lights, rw)
+								.Use(lightClusters, rw)
+								.Use(keysA, rw)
+								.Use(valuesA, rw)
+								.Executes(
+										[&graph, record, keys, resourceBuffer, fluxScales, lightEmitters, outputIds,
+										 scratchIds](rg::PassContext &ctx)
+										{
+											auto index = [&](ResourceHandle handle)
+											{ return static_cast<uint>(ctx.rc.GetResourceViewInfo(handle).descriptorIndex); };
+											auto scratchIndex = [&](size_t i) { return index(graph.GetHandle(scratchIds[i])); };
+											auto outputIndex = [&](size_t i) { return index(graph.GetHandle(outputIds[i])); };
+											LightTreeBuildResources resources = {};
+											resources.fluxScales = index(fluxScales);
+											resources.lightEmitters = index(lightEmitters);
+											resources.lightClusters = scratchIndex(0);
+											resources.nodeClusters = scratchIndex(1);
+											resources.keysA = scratchIndex(2);
+											resources.valuesA = scratchIndex(3);
+											resources.keysB = scratchIndex(4);
+											resources.valuesB = scratchIndex(5);
+											resources.radixCounts = scratchIndex(6);
+											resources.blockSums = scratchIndex(7);
+											resources.nodes = outputIndex(kNodes);
+											resources.leafLights = outputIndex(kLeafLights);
+											resources.leafOfLight = outputIndex(kLeafOfLight);
+											resources.power = outputIndex(kPower);
+											ctx.rc.UpdateConstantBuffer(resourceBuffer, &resources, sizeof(resources));
+											record(ctx.rc, keys);
+										}));
+
+	std::vector<Dispatch> sort;
 	for (uint32_t pass = 0; pass < LIGHT_TREE_RADIX_PASSES; ++pass)
 	{
-		dispatch(radixCountPipeline_, blockCount, pass);
-		dispatch(radixScanPipeline_, 1, pass);
-		dispatch(radixScatterPipeline_, blockCount, pass);
+		sort.push_back({ radixCountPipeline_, blockCount, pass });
+		sort.push_back({ radixScanPipeline_, 1, pass });
+		sort.push_back({ radixScatterPipeline_, blockCount, pass });
 	}
+	frame.AddPass(rg::Pass::Compute("LightTree/Sort")
+								.Use(keysA, rw)
+								.Use(valuesA, rw)
+								.Use(keysB, rw)
+								.Use(valuesB, rw)
+								.Use(radixCounts, rw)
+								.Executes([record, sort](rg::PassContext &ctx) { record(ctx.rc, sort); }));
 
 	// Bottom up: the leaves, the wide interior levels one dispatch each, then one group for the rest.
-	dispatch(leavesPipeline_, GroupCount(layout.Nodes(layout.leafLevel), LIGHT_TREE_BUILD_GROUP_SIZE), 0);
+	std::vector<Dispatch> build;
+	build.push_back({ leavesPipeline_, GroupCount(layout.Nodes(layout.leafLevel), LIGHT_TREE_BUILD_GROUP_SIZE), 0 });
 	int level = static_cast<int>(layout.leafLevel) - 1;
 	for (; level >= 0 && layout.Nodes(level) > LIGHT_TREE_BUILD_TOP_NODES; --level)
 	{
-		dispatch(levelPipeline_, GroupCount(layout.Nodes(level), LIGHT_TREE_BUILD_GROUP_SIZE), level);
+		build.push_back({ levelPipeline_, GroupCount(layout.Nodes(level), LIGHT_TREE_BUILD_GROUP_SIZE), static_cast<uint32_t>(level) });
 	}
 	if (level >= 0)
 	{
-		dispatch(topLevelsPipeline_, 1, level);
+		build.push_back({ topLevelsPipeline_, 1, static_cast<uint32_t>(level) });
 	}
+	frame.AddPass(rg::Pass::Compute("LightTree/Nodes")
+								.Use(keysA, rw)
+								.Use(valuesA, rw)
+								.Use(lightClusters, rw)
+								.Use(nodeClusters, rw)
+								.Use(nodes, rw)
+								.Use(leafLights, rw)
+								.Use(leafOfLight, rw)
+								.Executes([record, build](rg::PassContext &ctx) { record(ctx.rc, build); }));
 
-	dispatch(powerReducePipeline_, blockCount, 0);
-	dispatch(powerScanPipeline_, 1, 0);
-	dispatch(powerApplyPipeline_, blockCount, 0);
-	dispatch(powerGuidePipeline_, GroupCount(std::bit_floor(lightCount_), LIGHT_TREE_BUILD_GROUP_SIZE), 0);
-
-	for (ResourceHandle buffer: outputs)
-	{
-		renderContext_->TransitionResource(buffer, ResourceLayout::ShaderResource, ResourceSync::Raytracing, ResourceAccess::ShaderResource);
-	}
-
-	renderContext_->EndProfileScope();
-	renderContext_->EndEvent();
+	const std::array<Dispatch, 4> powerList = { {
+			{ powerReducePipeline_, blockCount, 0 },
+			{ powerScanPipeline_, 1, 0 },
+			{ powerApplyPipeline_, blockCount, 0 },
+			{ powerGuidePipeline_, GroupCount(std::bit_floor(lightCount), LIGHT_TREE_BUILD_GROUP_SIZE), 0 },
+	} };
+	frame.AddPass(rg::Pass::Compute("LightTree/Power")
+								.Use(lightClusters, rw)
+								.Use(nodeClusters, rw)
+								.Use(keysB, rw)
+								.Use(blockSums, rw)
+								.Use(power, rw)
+								.Executes([record, powerList](rg::PassContext &ctx) { record(ctx.rc, powerList); }));
 }

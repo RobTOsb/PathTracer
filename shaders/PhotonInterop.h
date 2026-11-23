@@ -107,7 +107,8 @@ struct PhotonParameters
 	float irradianceUnit; // the splat's fixed point unit, the sun's peak irradiance / PHOTON_IRRADIANCE_SCALE
 	uint height;
 	float fadeAlpha; // see maxAlpha
-	float pad0;
+	// bindless RWStructuredBuffer<uint4>: PhotonPassConstants::caustics, which the paths zero per pixel with the receiver
+	uint caustics;
 	float pad1;
 	float pad2;
 };
