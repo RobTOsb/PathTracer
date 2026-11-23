@@ -171,6 +171,8 @@ private:
 	// Fills constants.photons for this frame (the photon map over the casters), enabled or not, and says whether the
 	// photon map starts over.
 	void PreparePhotons(FrameConstants &constants, bool sunActive, float sunAngularRadius);
+	// The photon buffers kept from frame to frame, made zeroed on first use.
+	void CreatePhotonBuffers();
 
 	RenderContext *renderContext_ = nullptr;
 	const RenderGPUScene &scene_;
@@ -214,9 +216,9 @@ private:
 	void BindPhotonPass(RenderContext &rc, PhotonPass pass, ResourceHandle constantBuffer,
 						const PhotonPassConstants &constants) const;
 	// PhotonMap.slang's passes before the photons are traced: the map adapted, then scanned.
-	// writeConstants writes the frame constants if no pass has yet.
+	// writeConstants writes the frame constants if no pass has yet. Without active, the passes do nothing.
 	void AddPhotonMapPasses(FrameGraph &frame, ResourceHandle constantBuffer, const PhotonPassConstants &constants,
-							const std::function<void(RenderContext &)> &writeConstants);
+							const std::function<void(RenderContext &)> &writeConstants, bool active);
 	// Kept from frame to frame: the shares, the block sums (whose total the next update reads), the feedback and the
 	// coverage.
 	ResourceHandle photonDensity_[2] = { InvalidResourceHandle, InvalidResourceHandle };

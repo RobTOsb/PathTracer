@@ -202,6 +202,12 @@ public:
 		return frame.omm2StateTlasSRV != InvalidResourceHandle ? frame.omm2StateTlasSRV : frame.ommTlasSRV;
 	}
 
+	// Some TLAS instance moves (an animated node), so the TLASes may differ from frame to frame.
+	bool HasDynamicInstances() const
+	{
+		return !dynamicTlasInstances_.empty();
+	}
+
 	// The dynamic instances are elsewhere in the current frame's TLASes than in last frame's. Never in the first
 	// frame: its other set is still the one built at load, which no frame traced, so there is no last frame.
 	bool MovedSinceLastFrame() const

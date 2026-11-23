@@ -168,8 +168,8 @@ enum class RenderMode
 // mirrors, and splatted onto the diffuse surfaces the camera sees directly (PhotonMap.slang).
 struct PhotonSettings
 {
-	bool enabled = false;
-	int photonsPerFrame = 262144;
+	bool enabled = true;
+	int photonsPerFrame = 524288;
 	// A photon's footprint is this many times the spacing to its neighbours on its branch across (two standard
 	// deviations of its Gaussian): higher is smoother and blurrier.
 	float footprintScale = 2.0f;
@@ -181,7 +181,7 @@ struct PhotonSettings
 	// The photon map adapts each texel's share of the photons from feedback (Yang and Ouyang's AAPS): more where its
 	// photons land wide on screen, fewer where they land small or out of view. Off: even.
 	bool adaptive = true;
-	float targetArea = 4.0f; // pixels a photon's area should cover on screen
+	float targetArea = 8.0f; // pixels a photon's area should cover on screen
 	float temporalWeight = 0.5f; // weight of a texel's new share against its neighbourhood's last ones
 	// The photon map spans only the casters whose caustics may land in view (refractors, down the sun's way), so its
 	// texels follow what the camera sees; mirrors are always kept. A change in the set starts the map over.

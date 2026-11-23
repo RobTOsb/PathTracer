@@ -101,8 +101,10 @@ private:
 							 Format format = Format::R16G16B16A16_FLOAT,
 							 uint depth = 1) const;
 	CloudParameters MakeCloudParameters() const;
+	// Declared every frame the clouds are on; dispatches only with generate.
 	void AddCloudNoisePass(FrameGraph &frame, const char *name, PipelineHandle pipeline, ResourceHandle texture,
-						   const char *debugName, const char *output, uint groupsX, uint groupsY, uint groupsZ);
+						   const char *debugName, const char *output, uint groupsX, uint groupsY, uint groupsZ,
+						   bool generate);
 
 	RenderContext *renderContext_ = nullptr;
 	const RenderGPUScene &scene_;

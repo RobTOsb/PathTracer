@@ -572,7 +572,9 @@ void RenderGPUScene::AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights)
 	const uint32_t dynamicLightCount = static_cast<uint32_t>(dynamicObjectLights_.size());
 	const uint32_t pointLightCount = static_cast<uint32_t>(pointLights_.size());
 	const uint32_t firstThread = transformsWritten_ ? 0u : dynamicLightCount;
-	if (dynamicLightCount + pointLightCount > firstThread)
+	// There in every frame of a scene with lights to write, even one with none to write now, so that the dynamic
+	// lights moving or stopping does not change the graph.
+	if (dynamicLightCount + pointLightCount > 0)
 	{
 		DynamicLightConstants constants = {};
 		constants.firstThread = firstThread;
@@ -594,6 +596,10 @@ void RenderGPUScene::AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights)
 									.Executes(
 											[pipeline, constants, threads](rg::PassContext &ctx)
 											{
+												if (threads == 0)
+												{
+													return;
+												}
 												ctx.rc.SetComputePipeline(pipeline);
 												ctx.rc.SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
 												ctx.rc.Dispatch((threads + DYNAMIC_LIGHTS_GROUP_SIZE - 1) / DYNAMIC_LIGHTS_GROUP_SIZE, 1, 1);
@@ -3332,13 +3338,16 @@ void RenderGPUScene::AddAccelerationStructurePasses(FrameGraph &frame)
 	tlasFrame_ = renderContext_->GetCurrentFrameIndex();
 	tlasFramesUpdated_ = std::min(tlasFramesUpdated_ + 1, 2u);
 	FrameTLASes &tlases = frameTlases_[tlasFrame_];
-	if (tlases.poseGeneration == dynamicPoseGeneration_)
+	// With dynamic instances the pass is there every frame, building only when the pose changed, so that pausing or
+	// moving does not change the graph. A static scene's TLASes never change, so it has none.
+	if (dynamicTlasInstances_.empty())
 	{
 		return;
 	}
+	const bool rebuild = tlases.poseGeneration != dynamicPoseGeneration_;
 	tlases.poseGeneration = dynamicPoseGeneration_;
 
-	if (tlasInstancesGeneration_ != dynamicPoseGeneration_)
+	if (rebuild && tlasInstancesGeneration_ != dynamicPoseGeneration_)
 	{
 		tlasInstancesGeneration_ = dynamicPoseGeneration_;
 		for (uint32_t i: dynamicTlasInstances_)
@@ -3375,8 +3384,12 @@ void RenderGPUScene::AddAccelerationStructurePasses(FrameGraph &frame)
 	}
 	const FrameTLASes target = tlases;
 	frame.AddPass(std::move(pass.Executes(
-			[this, target](rg::PassContext &ctx)
+			[this, target, rebuild](rg::PassContext &ctx)
 			{
+				if (!rebuild)
+				{
+					return;
+				}
 				ctx.rc.UpdateTLAS(target.tlas, tlasInstances_);
 				if (target.ommTlas != InvalidAccelerationStructureHandle)
 				{

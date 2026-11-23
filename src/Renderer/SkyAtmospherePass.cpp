@@ -264,13 +264,18 @@ void SkyAtmospherePass::AddCloudNoisePass(FrameGraph &frame,
 										  const char *output,
 										  uint groupsX,
 										  uint groupsY,
-										  uint groupsZ)
+										  uint groupsZ,
+										  bool generate)
 {
 	rg::Pass pass = rg::Pass::Compute(name);
 	frame.UseTexture(pass, texture, debugName, rg::Access::ComputeShaderWrite);
 	frame.AddPass(std::move(pass.Executes(
 			[=](rg::PassContext &ctx)
 			{
+				if (!generate)
+				{
+					return;
+				}
 				ctx.rc.SetComputePipeline(pipeline);
 				ctx.rc.SetComputeUAVByName(output, texture);
 				ctx.rc.Dispatch(groupsX, groupsY, groupsZ);
@@ -386,13 +391,19 @@ void SkyAtmospherePass::AddPasses(FrameGraph &frame)
 	skyView_ = skyView;
 	sceneLighting_ = sceneLighting;
 
-	if (!lutsValid_ || std::memcmp(&lutParameters_, &parameters_, sizeof(parameters_)) != 0)
+	// The LUT passes are there every frame but dispatch only when the parameters changed, so that changing them does
+	// not change the graph.
+	const bool rebuildLuts = !lutsValid_ || std::memcmp(&lutParameters_, &parameters_, sizeof(parameters_)) != 0;
 	{
 		frame.AddPass(rg::Pass::Compute("Sky/Transmittance LUT")
 									.Writes(transmittance)
 									.Executes(
-											[this, parameterBuffer](rg::PassContext &ctx)
+											[this, parameterBuffer, rebuildLuts](rg::PassContext &ctx)
 											{
+												if (!rebuildLuts)
+												{
+													return;
+												}
 												ctx.rc.SetComputePipeline(transmittancePipeline_);
 												ctx.rc.SetComputeConstantBufferByName("g_Atmosphere", parameterBuffer);
 												ctx.rc.SetComputeUAVByName("g_Output", transmittanceLUT_);
@@ -406,8 +417,12 @@ void SkyAtmospherePass::AddPasses(FrameGraph &frame)
 									.Reads(transmittance)
 									.Writes(multiScattering)
 									.Executes(
-											[this, parameterBuffer](rg::PassContext &ctx)
+											[this, parameterBuffer, rebuildLuts](rg::PassContext &ctx)
 											{
+												if (!rebuildLuts)
+												{
+													return;
+												}
 												ctx.rc.SetComputePipeline(multiScatteringPipeline_);
 												ctx.rc.SetComputeConstantBufferByName("g_Atmosphere", parameterBuffer);
 												ctx.rc.SetComputeSRVByName("g_TransmittanceLUT", transmittanceSRV_);
@@ -455,14 +470,15 @@ void SkyAtmospherePass::AddPasses(FrameGraph &frame)
 	rg::ResourceId panorama;
 	if (cloudParameters_.enabled != 0)
 	{
-		if (!cloudNoiseValid_)
+		// Generated once, by passes there every frame the clouds are on.
+		const bool generateNoise = !cloudNoiseValid_;
 		{
 			const uint shapeGroups = CLOUD_SHAPE_NOISE_SIZE / kNoiseGroupSize;
 			const uint detailGroups = CLOUD_DETAIL_NOISE_SIZE / kNoiseGroupSize;
 			AddCloudNoisePass(frame, "Clouds/Shape noise", shapeNoisePipeline_, shapeNoise_, "Clouds_ShapeNoise", "g_ShapeOutput",
-							  shapeGroups, shapeGroups, shapeGroups);
+							  shapeGroups, shapeGroups, shapeGroups, generateNoise);
 			AddCloudNoisePass(frame, "Clouds/Detail noise", detailNoisePipeline_, detailNoise_, "Clouds_DetailNoise", "g_NoiseOutput",
-							  detailGroups, detailGroups, detailGroups);
+							  detailGroups, detailGroups, detailGroups, generateNoise);
 			AddCloudNoisePass(frame,
 							  "Clouds/Weather map",
 							  weatherMapPipeline_,
@@ -471,7 +487,8 @@ void SkyAtmospherePass::AddPasses(FrameGraph &frame)
 							  "g_WeatherOutput",
 							  GroupCount(CLOUD_WEATHER_MAP_SIZE),
 							  GroupCount(CLOUD_WEATHER_MAP_SIZE),
-							  1);
+							  1,
+							  generateNoise);
 			cloudNoiseValid_ = true;
 		}
 
@@ -486,14 +503,20 @@ void SkyAtmospherePass::AddPasses(FrameGraph &frame)
 
 		const ResourceHandle cloudBuffer = cloudBuffers_[frame.rc.GetCurrentFrameIndex()];
 		frame.rc.UpdateConstantBuffer(cloudBuffer, &cloudParameters_, sizeof(cloudParameters_));
-		if (!shadowMapValid_ || std::memcmp(&shadowMapParameters_, &cloudParameters_, sizeof(CloudParameters)) != 0)
+		// There every frame the clouds are on, dispatching only when they changed.
+		const bool updateShadowMap =
+				!shadowMapValid_ || std::memcmp(&shadowMapParameters_, &cloudParameters_, sizeof(CloudParameters)) != 0;
 		{
 			rg::Pass pass = rg::Pass::Compute("Clouds/Shadow map");
 			readClouds(pass);
 			frame.UseTexture(pass, cloudShadowMap_, "Clouds_ShadowMap", rg::Access::ComputeShaderWrite);
 			frame.AddPass(std::move(pass.Executes(
-					[this, cloudBuffer](rg::PassContext &ctx)
+					[this, cloudBuffer, updateShadowMap](rg::PassContext &ctx)
 					{
+						if (!updateShadowMap)
+						{
+							return;
+						}
 						ctx.rc.SetComputePipeline(cloudShadowPipeline_);
 						ctx.rc.SetComputeConstantBufferByName("g_Clouds", cloudBuffer);
 						ctx.rc.SetComputeUAVByName("g_ShadowMapOutput", cloudShadowMap_);

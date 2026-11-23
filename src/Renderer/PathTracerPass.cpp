@@ -259,12 +259,50 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 	return result;
 }
 
+void PathTracerPass::CreatePhotonBuffers()
+{
+	if (photonFeedback_ != InvalidResourceHandle)
+	{
+		return;
+	}
+	// The sums the passes add to start at zero, and the shares and running sums read as empty: those buffers are
+	// created from zeros, copied in on the copy queue now. (ClearUnorderedAccessViewUint, which they used to be cleared
+	// with on their first frame, read a stale shader-visible descriptor: debug layer #646, then a GPU hang in release.)
+	std::vector<uint8_t> zeros(static_cast<size_t>(PHOTON_MAP_TEXELS) * 4 * sizeof(uint32_t), 0);
+	const UploadBatchHandle batch = renderContext_->BeginUpload();
+	auto create = [&](uint64_t count, uint32_t stride, const char *debugName, bool zeroed)
+	{
+		BufferDesc desc = {};
+		desc.sizeInBytes = count * stride;
+		desc.structureByteStride = stride;
+		desc.usageFlags = ResourceUsageFlags::UnorderedAccess;
+		desc.debugName = debugName;
+		return zeroed ? renderContext_->CreateBuffer(desc, ResourceViewType::UnorderedAccess, zeros.data(), batch)
+					  : renderContext_->CreateBuffer(desc, ResourceViewType::UnorderedAccess);
+	};
+	photonDensity_[0] = create(PHOTON_MAP_TEXELS, sizeof(float), "PathTracer_PhotonDensity0", true);
+	photonDensity_[1] = create(PHOTON_MAP_TEXELS, sizeof(float), "PathTracer_PhotonDensity1", true);
+	photonBlockPrefix_ = create(PHOTON_MAP_BLOCKS + 1, sizeof(float), "PathTracer_PhotonBlockPrefix", true);
+	photonFeedback_ = create(PHOTON_MAP_TEXELS, 4 * sizeof(uint32_t), "PathTracer_PhotonFeedback", true);
+	photonCoverage_ = create(PHOTON_MAP_TEXELS, 2 * sizeof(float), "PathTracer_PhotonCoverage", true);
+	photonCoverageSums_ = create(4, sizeof(uint32_t), "PathTracer_PhotonCoverageSums", true);
+	renderContext_->EndUpload(batch);
+	photonMapValid_ = false;
+}
+
 void PathTracerPass::PreparePhotons(FrameConstants &constants, bool sunActive, float sunAngularRadius)
 {
 	const PhotonSettings &settings = settings_.photons;
 	constants.photons = {};
 	// The reference converges to the path tracer's own caustics.
-	if (!settings.enabled || !sunActive || reference_)
+	if (!settings.enabled || reference_)
+	{
+		return;
+	}
+	// The photon passes are in the graph whenever photons are on, so their lasting buffers are made then, even in
+	// frames with no sun or casters, when the passes skip their work.
+	CreatePhotonBuffers();
+	if (!sunActive)
 	{
 		return;
 	}
@@ -418,34 +456,6 @@ void PathTracerPass::PreparePhotons(FrameConstants &constants, bool sunActive, f
 	const ResourceHandle rects = photonRects_[renderContext_->GetCurrentFrameIndex()];
 	renderContext_->UpdateUploadBuffer(rects, photonRectData_.data(), 0, photonRectData_.size() * sizeof(GpuPhotonRect));
 
-	// The buffers that last, on first use.
-	if (photonFeedback_ == InvalidResourceHandle)
-	{
-		// The sums the passes add to start at zero, and the shares and running sums read as empty: those buffers are
-		// created from zeros, copied in on the copy queue now. (ClearUnorderedAccessViewUint, which they used to be cleared
-		// with on their first frame, read a stale shader-visible descriptor: debug layer #646, then a GPU hang in release.)
-		std::vector<uint8_t> zeros(static_cast<size_t>(PHOTON_MAP_TEXELS) * 4 * sizeof(uint32_t), 0);
-		const UploadBatchHandle batch = renderContext_->BeginUpload();
-		auto create = [&](uint64_t count, uint32_t stride, const char *debugName, bool zeroed)
-		{
-			BufferDesc desc = {};
-			desc.sizeInBytes = count * stride;
-			desc.structureByteStride = stride;
-			desc.usageFlags = ResourceUsageFlags::UnorderedAccess;
-			desc.debugName = debugName;
-			return zeroed ? renderContext_->CreateBuffer(desc, ResourceViewType::UnorderedAccess, zeros.data(), batch)
-						  : renderContext_->CreateBuffer(desc, ResourceViewType::UnorderedAccess);
-		};
-		photonDensity_[0] = create(PHOTON_MAP_TEXELS, sizeof(float), "PathTracer_PhotonDensity0", true);
-		photonDensity_[1] = create(PHOTON_MAP_TEXELS, sizeof(float), "PathTracer_PhotonDensity1", true);
-		photonBlockPrefix_ = create(PHOTON_MAP_BLOCKS + 1, sizeof(float), "PathTracer_PhotonBlockPrefix", true);
-		photonFeedback_ = create(PHOTON_MAP_TEXELS, 4 * sizeof(uint32_t), "PathTracer_PhotonFeedback", true);
-		photonCoverage_ = create(PHOTON_MAP_TEXELS, 2 * sizeof(float), "PathTracer_PhotonCoverage", true);
-		photonCoverageSums_ = create(4, sizeof(uint32_t), "PathTracer_PhotonCoverageSums", true);
-		renderContext_->EndUpload(batch);
-		photonMapValid_ = false;
-	}
-
 	// The map starts over when its plane or square moves, when the UI asks, or after a frame without photons; without
 	// adaptation every frame starts from even shares.
 	const bool moved = Dot(s, photonSunDirection_) < 0.999999f || mapScale != photonMapScale_ ||
@@ -531,12 +541,13 @@ void PathTracerPass::BindPhotonPass(RenderContext &rc,
 void PathTracerPass::AddPhotonMapPasses(FrameGraph &frame,
 										ResourceHandle constantBuffer,
 										const PhotonPassConstants &constants,
-										const std::function<void(RenderContext &)> &writeConstants)
+										const std::function<void(RenderContext &)> &writeConstants,
+										bool active)
 {
-	static const char *const kDensityNames[2] = { "PathTracer_PhotonDensity0", "PathTracer_PhotonDensity1" };
-	const rg::ResourceId density[2] = { frame.ImportBuffer(photonDensity_[0], kDensityNames[0]),
-										frame.ImportBuffer(photonDensity_[1], kDensityNames[1]) };
-	const rg::ResourceId current = density[photonParity_];
+	// Imported by role rather than by buffer, so the frames declare the same graph whichever buffer is current.
+	const rg::ResourceId current = frame.ImportBuffer(photonDensity_[photonParity_], "PathTracer_PhotonDensity");
+	const rg::ResourceId previous =
+			frame.ImportBuffer(photonDensity_[photonParity_ ^ 1u], "PathTracer_PhotonDensityPrevious");
 	const rg::ResourceId texelPrefix = photonTexelPrefix_;
 	const rg::ResourceId blockPrefix = frame.ImportBuffer(photonBlockPrefix_, "PathTracer_PhotonBlockPrefix");
 	const rg::ResourceId feedback = frame.ImportBuffer(photonFeedback_, "PathTracer_PhotonFeedback");
@@ -547,15 +558,19 @@ void PathTracerPass::AddPhotonMapPasses(FrameGraph &frame,
 
 	// Last frame's share into this frame's, from the feedback the splat left; resets the block sums and coverage.
 	frame.AddPass(rg::Pass::Compute("Photons/Map update")
-								.Use(density[0], rw)
-								.Use(density[1], rw)
+								.Use(current, rw)
+								.Use(previous, rw)
 								.Use(feedback, rw)
 								.Use(blockPrefix, rw)
 								.Use(coverage, rw)
 								.Use(coverageSums, rw)
 								.Executes(
-										[this, constantBuffer, constants, writeConstants](rg::PassContext &ctx)
+										[this, constantBuffer, constants, writeConstants, active](rg::PassContext &ctx)
 										{
+											if (!active)
+											{
+												return;
+											}
 											writeConstants(ctx.rc);
 											BindPhotonPass(ctx.rc, PhotonPassUpdate, constantBuffer, constants);
 											ctx.rc.Dispatch(PHOTON_MAP_TEXELS / PHOTON_GROUP_SIZE, 1, 1);
@@ -565,8 +580,12 @@ void PathTracerPass::AddPhotonMapPasses(FrameGraph &frame,
 								.Use(texelPrefix, rw)
 								.Use(blockPrefix, rw)
 								.Executes(
-										[this, constantBuffer, constants, writeConstants](rg::PassContext &ctx)
+										[this, constantBuffer, constants, writeConstants, active](rg::PassContext &ctx)
 										{
+											if (!active)
+											{
+												return;
+											}
 											writeConstants(ctx.rc);
 											BindPhotonPass(ctx.rc, PhotonPassScanBlocks, constantBuffer, constants);
 											ctx.rc.Dispatch(PHOTON_MAP_BLOCKS, 1, 1);
@@ -575,8 +594,12 @@ void PathTracerPass::AddPhotonMapPasses(FrameGraph &frame,
 								.Use(blockPrefix, rw)
 								.Use(recordCount, rw)
 								.Executes(
-										[this, constantBuffer, constants, writeConstants](rg::PassContext &ctx)
+										[this, constantBuffer, constants, writeConstants, active](rg::PassContext &ctx)
 										{
+											if (!active)
+											{
+												return;
+											}
 											writeConstants(ctx.rc);
 											BindPhotonPass(ctx.rc, PhotonPassScanTotals, constantBuffer, constants);
 											ctx.rc.Dispatch(1, 1, 1);
@@ -924,7 +947,10 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 	// already waited on that frame's fence.
 	const ResourceHandle constantBuffer = frameConstants_[renderContext->GetCurrentFrameIndex()];
 
+	// photons: the photons run this frame. photonPasses: their passes are in the graph, whenever photons are on, so
+	// that the sun setting or the casters leaving the view does not change the graph; without photons they skip.
 	const bool photons = constants.photons.enabled != 0;
+	const bool photonPasses = settings_.photons.enabled && !reference_ && photonFeedback_ != InvalidResourceHandle;
 	const uint64_t pixels = static_cast<uint64_t>(width_) * height_;
 	auto transientBuffer = [&](uint64_t count, uint32_t stride, const char *debugName)
 	{
@@ -952,7 +978,7 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 		guides_.psrOutcome = frame.ImportTexture(psrOutcome_, "PathTracer_PsrOutcome");
 	}
 	deferredBranches_ = transientBuffer(pixels, sizeof(GpuDeferredBranch), "PathTracer_DeferredBranches");
-	if (photons)
+	if (photonPasses)
 	{
 		photonTexelPrefix_ = transientBuffer(PHOTON_MAP_TEXELS, sizeof(float), "PathTracer_PhotonTexelPrefix");
 		photonRecords_ = transientBuffer(PHOTON_RECORD_CAPACITY, sizeof(GpuPhotonRecord), "PathTracer_PhotonRecords");
@@ -998,12 +1024,13 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 		photonMapValid_ = false;
 	}
 	const PhotonPassConstants photonConstants = photons ? PhotonPassConstantsForFrame() : PhotonPassConstants{};
-	const bool shadowChanges = constants.shadowChanges != 0;
+	// Declared whenever the scene can move, not only in the frames it did, so that moving does not change the graph.
+	const bool previousShadows = rayReconstruction_ && settings_.shadowChangeMask && scene_.HasDynamicInstances();
 
 	// What every DispatchRays of this pipeline reads: the TLASes, the lights and their tree, the sky.
 	auto useScene = [&](rg::Pass &pass)
 	{
-		scene_.UseForTracing(pass, frame, pipeline->opacityMicromaps, shadowChanges);
+		scene_.UseForTracing(pass, frame, pipeline->opacityMicromaps, previousShadows);
 		atmosphere_.UseForTracing(pass, frame);
 	};
 	const rg::Access rtWrite = rg::Access::RaytracingShaderWrite;
@@ -1011,13 +1038,13 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 
 	// Caustic photons: the photon map adapted and scanned, then the photons traced into their records, before the paths
 	// mark the receivers.
-	if (photons)
+	if (photonPasses)
 	{
-		AddPhotonMapPasses(frame, constantBuffer, photonConstants, writeConstants);
+		AddPhotonMapPasses(frame, constantBuffer, photonConstants, writeConstants, photons);
 
 		rg::Pass trace = rg::Pass::Compute("Photons/Trace");
 		useScene(trace);
-		frame.UseBuffer(trace, photonDensity_[photonParity_], photonParity_ == 0 ? "PathTracer_PhotonDensity0" : "PathTracer_PhotonDensity1", rtWrite);
+		frame.UseBuffer(trace, photonDensity_[photonParity_], "PathTracer_PhotonDensity", rtWrite);
 		frame.UseBuffer(trace, photonBlockPrefix_, "PathTracer_PhotonBlockPrefix", rtWrite);
 		FrameGraph::Use(trace, photonTexelPrefix_, rtWrite);
 		FrameGraph::Use(trace, photonRecordCount_, rtWrite);
@@ -1025,8 +1052,12 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 		frame.UseBuffer(trace, photonFeedback_, "PathTracer_PhotonFeedback", rtWrite);
 		const uint32_t rows = (constants.photons.photonCount + PHOTON_DISPATCH_WIDTH - 1) / PHOTON_DISPATCH_WIDTH;
 		frame.AddPass(std::move(trace.Executes(
-				[this, pipeline, constantBuffer, atmosphere, rows, writeConstants](rg::PassContext &ctx)
+				[this, pipeline, constantBuffer, atmosphere, rows, writeConstants, photons](rg::PassContext &ctx)
 				{
+					if (!photons)
+					{
+						return;
+					}
 					writeConstants(ctx.rc);
 					BindRaytracing(ctx, *pipeline, constantBuffer, atmosphere);
 					ctx.rc.DispatchRays(pipeline->photonShaderTable, PHOTON_DISPATCH_WIDTH, rows, 1);
@@ -1065,7 +1096,7 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 		frame.UseBuffer(paths, exposure, "AutoExposure_TracingExposure", rtWrite);
 	}
 	// The paths clear the receivers and the sums the splat adds to.
-	if (photons)
+	if (photonPasses)
 	{
 		FrameGraph::Use(paths, photonReceivers_, rtWrite);
 		FrameGraph::Use(paths, photonCaustics_, rtWrite);
@@ -1079,7 +1110,7 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 			})));
 
 	// The photons splatted onto the receivers the paths marked, and added to the output.
-	if (photons)
+	if (photonPasses)
 	{
 		frame.AddPass(rg::Pass::Compute("Photons/Splat")
 									.Use(photonRecordCount_, csWrite)
@@ -1088,8 +1119,12 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 									.Use(photonCaustics_, csWrite)
 									.Use(frame.ImportBuffer(photonFeedback_, "PathTracer_PhotonFeedback"), csWrite)
 									.Executes(
-											[this, constantBuffer, photonConstants](rg::PassContext &ctx)
+											[this, constantBuffer, photonConstants, photons](rg::PassContext &ctx)
 											{
+												if (!photons)
+												{
+													return;
+												}
 												BindPhotonPass(ctx.rc, PhotonPassSplat, constantBuffer, photonConstants);
 												ctx.rc.Dispatch(PHOTON_RECORD_CAPACITY / PHOTON_GROUP_SIZE, 1, 1);
 											}));
@@ -1099,13 +1134,17 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 									.Use(photonReceivers_, csWrite)
 									.Use(output_, csWrite)
 									.Executes(
-											[this, constantBuffer, photonConstants](rg::PassContext &ctx)
+											[this, constantBuffer, photonConstants, photons](rg::PassContext &ctx)
 											{
+												if (!photons)
+												{
+													return;
+												}
 												BindPhotonPass(ctx.rc, PhotonPassComposite, constantBuffer, photonConstants);
 												ctx.rc.Dispatch((width_ + PHOTON_SCREEN_GROUP_SIZE - 1) / PHOTON_SCREEN_GROUP_SIZE,
 																(height_ + PHOTON_SCREEN_GROUP_SIZE - 1) / PHOTON_SCREEN_GROUP_SIZE,
 																1);
 											}));
-		photonMapValid_ = true;
+		photonMapValid_ = photons;
 	}
 }

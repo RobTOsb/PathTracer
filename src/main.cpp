@@ -78,7 +78,7 @@ static float QueryDisplayPeakNits(void *hwnd)
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\TransmissionThinwallTestGrid\\glTF-Binary\\TransmissionThinwallTestGrid.glb";
 //constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
 //constexpr const char *kDefaultScenePath = "h:\\suntemple.glb";
-constexpr const char *kDefaultScenePath = "h:\\AbandonedRoom.glb";
+//constexpr const char *kDefaultScenePath = "h:\\AbandonedRoom.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\SubsurfaceScene\\scene.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\SphereRoom\\SphereRoom.glb";
 //constexpr const char *kDefaultScenePath = "h:\\ZeroDay_pbr.glb";
@@ -87,7 +87,7 @@ constexpr const char *kDefaultScenePath = "h:\\AbandonedRoom.glb";
 //constexpr const char *kDefaultScenePath = "h:\\LucyCheckerboard.glb";
 //constexpr const char *kDefaultScenePath = "h:\\StressTest\\StressTest.glb";
 //constexpr const char *kDefaultScenePath = "h:\\TheMetro.glb";
-//constexpr const char *kDefaultScenePath = "h:\\AncientCathedral.glb";
+constexpr const char *kDefaultScenePath = "h:\\AncientCathedral.glb";
 //constexpr const char *kDefaultScenePath = "h:\\DarkFantasyChurch.glb";
 //constexpr const char *kDefaultScenePath = "h:\\SubwayStation.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PineForest\\PineForest.gltf";
