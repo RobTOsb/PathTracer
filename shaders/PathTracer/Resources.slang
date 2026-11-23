@@ -28,6 +28,7 @@ static const uint kPhotonMapBlock = PHOTON_MAP_BLOCK;
 static const uint kPhotonMapBlocks = PHOTON_MAP_BLOCKS;
 static const uint kPhotonRecordCapacity = PHOTON_RECORD_CAPACITY;
 static const uint kPhotonNoReceiver = PHOTON_NO_RECEIVER;
+static const float kPhotonHitScale = PHOTON_HIT_SCALE;
 #undef PHOTON_MAP_ORDER
 #undef PHOTON_MAP_SIZE
 #undef PHOTON_MAP_TEXELS
@@ -35,12 +36,14 @@ static const uint kPhotonNoReceiver = PHOTON_NO_RECEIVER;
 #undef PHOTON_MAP_BLOCKS
 #undef PHOTON_RECORD_CAPACITY
 #undef PHOTON_NO_RECEIVER
+#undef PHOTON_HIT_SCALE
 static const uint PHOTON_MAP_ORDER = kPhotonMapOrder;
 static const uint PHOTON_MAP_SIZE = kPhotonMapSize;
 static const uint PHOTON_MAP_BLOCK = kPhotonMapBlock;
 static const uint PHOTON_MAP_BLOCKS = kPhotonMapBlocks;
 static const uint PHOTON_RECORD_CAPACITY = kPhotonRecordCapacity;
 static const uint PHOTON_NO_RECEIVER = kPhotonNoReceiver;
+static const float PHOTON_HIT_SCALE = kPhotonHitScale;
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 RaytracingAccelerationStructure g_Scene : register(t0);

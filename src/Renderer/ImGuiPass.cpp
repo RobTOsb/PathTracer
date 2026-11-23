@@ -626,25 +626,26 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::BeginDisabled(!photons.enabled);
 		ImGui::SliderInt("Photons per frame", &photons.photonsPerFrame, 1024, 4194304, "%d", ImGuiSliderFlags_Logarithmic);
 		ImGui::SliderFloat("Footprint scale##photons", &photons.footprintScale, 0.25f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
-		ImGui::SetItemTooltip("A photon's footprint is this many times the area it stands for across, curved casters and "
-							  "the sun's size included: higher is smoother and blurrier");
+		ImGui::SetItemTooltip("A photon's footprint is this many times the spacing to its neighbours on its branch across, "
+							  "curved casters, rough lobes and the sun's size included: higher is smoother and blurrier");
 		ImGui::SliderFloat("Max roughness##photons", &photons.maxRoughness, 0.0f, 0.5f, "%.2f");
-		ImGui::SetItemTooltip("Lobes up to this perceptual roughness pass photons; materials up to it cast caustics");
+		ImGui::SetItemTooltip("Lobes below this perceptual roughness pass photons, all of their light up to half of it and "
+							  "less and less from there, the path tracer counting the rest; materials below it cast "
+							  "caustics");
 		ImGui::SliderInt("Max bounces##photons", &photons.maxBounces, 1, 16);
+		ImGui::Checkbox("Cull casters to view", &photons.cullToView);
+		ImGui::SetItemTooltip("The photon map spans only the casters whose caustics may land in view, so its texels are "
+							  "finer; mirrors are always kept. A change in that set starts the map over");
 		ImGui::Checkbox("Adaptive photon map", &photons.adaptive);
 		ImGui::SetItemTooltip("Each part of the sun's view of the casters gets photons by feedback: more where they land "
-							  "wide on screen or the caustics flicker, fewer where they land small or out of view");
+							  "wide on screen, fewer where they land small or out of view, and a share kept for casters "
+							  "out of view");
 		ImGui::BeginDisabled(!photons.adaptive);
 		ImGui::SliderFloat("Target area (pixels)", &photons.targetArea, 0.25f, 64.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
 		ImGui::SetItemTooltip("Pixels a photon should cover on screen: the map moves photons towards where they cover more");
-		ImGui::SliderFloat("Variance gain", &photons.varianceGain, 0.0f, 64.0f, "%.1f");
-		ImGui::SetItemTooltip("Photons per map texel that flickering caustics add");
 		ImGui::SliderFloat("Temporal weight##photons", &photons.temporalWeight, 0.0f, 1.0f, "%.2f");
 		ImGui::SetItemTooltip("How fast the map follows its feedback, against its neighbourhood's last shares: lower is "
 							  "steadier");
-		ImGui::SliderFloat("Min density", &photons.minDensity, 0.01f, 16.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
-		ImGui::SetItemTooltip("Photons per map texel over a caster at least, so that caustics coming into view are found");
-		ImGui::SliderFloat("Max density", &photons.maxDensity, 1.0f, 65536.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
 		ImGui::EndDisabled();
 		if (ImGui::Button("Reset photon map"))
 		{

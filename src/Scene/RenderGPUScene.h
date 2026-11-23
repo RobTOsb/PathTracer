@@ -371,7 +371,15 @@ public:
 		return boundsMax_;
 	}
 
-	void CollectPhotonCasters(float maxRoughness, std::vector<std::pair<float3, float3>> &bounds) const;
+	// A primitive instance that casts caustics, with its world bounds; reflects when a mirror lobe (metal or the coat)
+	// casts them rather than only refraction, which sends them on down the sun's way.
+	struct PhotonCaster
+	{
+		float3 lo;
+		float3 hi;
+		bool reflects;
+	};
+	void CollectPhotonCasters(float maxRoughness, std::vector<PhotonCaster> &casters) const;
 
 	// The geometry counts the UI shows, from the last build of the BLASes and TLASes (so they follow
 	// SetMergeInstances). Unique counts are over the primitives some instance places.
@@ -650,6 +658,8 @@ private:
 	// Per GpuMaterial row, the roughness factor of its smoothest lobe that can make a caustic (CollectPhotonCasters),
 	// FLT_MAX for none.
 	std::vector<float> materialCasterRoughness_;
+	// The same for its mirror lobes alone, metal and the coat.
+	std::vector<float> materialCasterMirrorRoughness_;
 	// Per primitiveDescs row, its object-space bounds (min, max), kept from the vertices before ReleaseStaging.
 	std::vector<std::pair<float3, float3>> primitiveBounds_;
 	uint64_t pendingUploadBytes_ = 0;

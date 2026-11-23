@@ -863,6 +863,20 @@ float3 OpenPBREvalPdfLocal(OpenPBRBaseParams p, OpenPBRContext c, float3 wi, out
     return fCos;
 }
 
+// The share of the mixture a BSDF sample's lobe was picked with.
+float SampledLobeProbability(OpenPBRContext ctx, uint lobe)
+{
+    if (lobe == LOBE_SPECULAR_REFLECTION)
+        return ctx.probSpecR;
+    if (lobe == LOBE_SPECULAR_TRANSMISSION || lobe == LOBE_DELTA_TRANSMISSION)
+        return ctx.probSpecT;
+    if (lobe == LOBE_COAT)
+        return ctx.probCoat;
+    if (lobe == LOBE_FUZZ)
+        return ctx.probFuzz;
+    return ctx.probDiffuse; // diffuse, diffuse transmission and subsurface share it
+}
+
 BSDFSample OpenPBRSample(OpenPBRBaseParams p, OpenPBRContext c, float3 u)
 {
     BSDFSample s;

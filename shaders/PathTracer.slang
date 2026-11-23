@@ -131,20 +131,6 @@ float ScatterFireflyK(float k, float pdf, float lobeProbability)
     return max(FIREFLY_MIN_K, k * p);
 }
 
-// The share of the mixture a BSDF sample's lobe was picked with.
-float SampledLobeProbability(OpenPBRContext ctx, uint lobe)
-{
-    if (lobe == LOBE_SPECULAR_REFLECTION)
-        return ctx.probSpecR;
-    if (lobe == LOBE_SPECULAR_TRANSMISSION || lobe == LOBE_DELTA_TRANSMISSION)
-        return ctx.probSpecT;
-    if (lobe == LOBE_COAT)
-        return ctx.probCoat;
-    if (lobe == LOBE_FUZZ)
-        return ctx.probFuzz;
-    return ctx.probDiffuse; // diffuse, diffuse transmission and subsurface share it
-}
-
 // Whether light along the segment just traced reaches the surface the camera sees or a surface it left.
 bool DirectSegment(uint flags, bool fromCamera, bool chainActive)
 {
@@ -551,15 +537,20 @@ SurfaceOutcome ShadeSurfaceEnd<let SIMPLE : bool>(SurfaceShading shading, LightS
     flags = SetFlag(flags, DEFERRED_SMOOTH_SEGMENT, passThrough ? smoothSegment || fromCamera : !sampleLights);
     // The photons' part of the path: a pass-through keeps it; a diffuse bounce from the receiver arms it, and a smooth
     // lobe after that covers what it goes on to find; anything else ends it. Thin-walled surfaces cast no photons
-    // (TracePhoton), so they cover nothing: the sunlight found past one is the path tracer's to count.
+    // (TracePhoton), so they cover nothing: the sunlight found past one is the path tracer's to count. A lobe whose
+    // light the photons carry only part of (PhotonLobeWeight) covers by chance, with that part as its probability, so
+    // that the path tracer counts the rest of the sunlight on average.
     if (photonState != PHOTON_NONE && !passThrough)
     {
-        bool smooth = continuePath && PhotonSmoothLobe(ctx, lobe);
         uint next = PHOTON_NONE;
         if (photonState == PHOTON_CAMERA)
             next = continuePath && lobe == LOBE_DIFFUSE && ctx.probDiffuse > 0.0 ? PHOTON_ARMED : PHOTON_NONE;
-        else
-            next = smooth && !mat.geometryThinWalled ? PHOTON_COVERED : PHOTON_NONE;
+        else if (continuePath && !mat.geometryThinWalled)
+        {
+            float photonWeight = PhotonLobeWeight(ctx, lobe);
+            bool covered = photonWeight >= 1.0 || (photonWeight > 0.0 && Rand3(rng).x < photonWeight);
+            next = covered ? PHOTON_COVERED : PHOTON_NONE;
+        }
         flags = SetPhotonState(flags, next);
     }
 

@@ -164,27 +164,28 @@ enum class RenderMode
 	Reference, // paths accumulated at the window's resolution without DLSS
 };
 
-// Caustics from sun photons (PathTracer/Photons.slang): traced from the sun through smooth glass and mirrors into a
-// world-space hash grid, read at the first diffuse surface of camera paths.
+// Caustics from sun photons (PathTracer/Photons.slang): traced from the sun's photon map through smooth glass and
+// mirrors, and splatted onto the diffuse surfaces the camera sees directly (PhotonMap.slang).
 struct PhotonSettings
 {
 	bool enabled = false;
 	int photonsPerFrame = 262144;
-	// A photon's footprint is this many times the area it stands for across (two standard deviations of its Gaussian):
-	// higher is smoother and blurrier.
-	float footprintScale = 4.0f;
-	// Perceptual roughness up to which a lobe passes photons (and counts as smooth on camera paths), also the
-	// roughness factor up to which a material's primitives are aimed at as casters.
+	// A photon's footprint is this many times the spacing to its neighbours on its branch across (two standard
+	// deviations of its Gaussian): higher is smoother and blurrier.
+	float footprintScale = 2.0f;
+	// Perceptual roughness from which a lobe passes no photons (and the camera paths count the sunlight through it
+	// themselves), also the roughness factor up to which a material's primitives are aimed at as casters. From half of
+	// it up, the photons carry less and less of a lobe's light and the paths the rest.
 	float maxRoughness = 0.10f;
 	int maxBounces = 8; // smooth bounces a photon may take
 	// The photon map adapts each texel's share of the photons from feedback (Yang and Ouyang's AAPS): more where its
-	// photons land wide on screen or the caustics flicker, fewer where they land small or out of view. Off: even.
+	// photons land wide on screen, fewer where they land small or out of view. Off: even.
 	bool adaptive = true;
 	float targetArea = 4.0f; // pixels a photon's area should cover on screen
-	float varianceGain = 64.0f; // photons per texel a fully flickering caustic adds
 	float temporalWeight = 0.5f; // weight of a texel's new share against its neighbourhood's last ones
-	float minDensity = 0.25f; // photons per texel over a caster, at least, so that new caustics are found
-	float maxDensity = 4096.0f; // photons per texel, at most
+	// The photon map spans only the casters whose caustics may land in view (refractors, down the sun's way), so its
+	// texels follow what the camera sees; mirrors are always kept. A change in the set starts the map over.
+	bool cullToView = true;
 	// The UI bumps this to start the photon map over.
 	uint resetCount = 0;
 };

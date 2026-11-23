@@ -1091,11 +1091,19 @@ void RenderGPUScene::AppendPointLightEmitters()
 
 std::vector<GpuLight> RenderGPUScene::MakePointLights() const
 {
+	// KHR_lights_punctual intensities are photometric (candela), but emissive strengths and the sun are used as
+	// radiometric values (W/m^2/sr, W/m^2), as Blender writes them. Blender's exporter in its default "Standard"
+	// lighting mode multiplies only the punctual lights by 683 lm/W, so taken as is they are 683x too bright next
+	// to the emissive meshes. Dividing by the same luminous efficacy brings them back to the radiometric scale.
+	constexpr float kLumensPerWatt = 683.0f;
 	std::vector<GpuLight> lights;
 	lights.reserve(pointLights_.size());
 	for (const PointLight &light: pointLights_)
 	{
-		lights.push_back(MakePointLight(light.intensity, light.position, light.range));
+		const float3 radiantIntensity(light.intensity.x / kLumensPerWatt,
+									  light.intensity.y / kLumensPerWatt,
+									  light.intensity.z / kLumensPerWatt);
+		lights.push_back(MakePointLight(radiantIntensity, light.position, light.range));
 	}
 	return lights;
 }
@@ -2252,6 +2260,8 @@ void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMater
 	materialGeometry_.reserve(materials.size());
 	materialCasterRoughness_.clear();
 	materialCasterRoughness_.reserve(materials.size());
+	materialCasterMirrorRoughness_.clear();
+	materialCasterMirrorRoughness_.reserve(materials.size());
 	for (GpuMaterial &packed: materials)
 	{
 		// Clamped here rather than baked, so cached scenes get it too.
@@ -2271,18 +2281,21 @@ void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMater
 		// Solid glass refracts and metal mirrors. Thin-walled materials cast none at all (TracePhoton stops photons at
 		// their lobes): a pane lets light straight through, which is direct light, and its glints are left out.
 		float casterRoughness = FLT_MAX;
+		float mirrorRoughness = FLT_MAX;
 		if ((material.transmissionFlags & TRANSMISSION_THIN_WALLED) == 0)
 		{
-			if (material.transmission > 0.0f || material.metallic >= 0.5f)
+			if (material.metallic >= 0.5f)
 			{
-				casterRoughness = material.roughness;
+				mirrorRoughness = material.roughness;
 			}
 			if (material.coatWeight > 0.0f)
 			{
-				casterRoughness = std::min(casterRoughness, material.coatRoughness);
+				mirrorRoughness = std::min(mirrorRoughness, material.coatRoughness);
 			}
+			casterRoughness = material.transmission > 0.0f ? std::min(mirrorRoughness, material.roughness) : mirrorRoughness;
 		}
 		materialCasterRoughness_.push_back(casterRoughness);
+		materialCasterMirrorRoughness_.push_back(mirrorRoughness);
 	}
 
 	materialBuffer_ = UploadStream(materials.data(),
@@ -2293,9 +2306,9 @@ void RenderGPUScene::UploadMaterials(const std::vector<GpuMaterial> &sourceMater
 	materialBufferIndex_ = renderContext_->GetResourceViewInfo(materialBuffer_).descriptorIndex;
 }
 
-void RenderGPUScene::CollectPhotonCasters(float maxRoughness, std::vector<std::pair<float3, float3>> &bounds) const
+void RenderGPUScene::CollectPhotonCasters(float maxRoughness, std::vector<PhotonCaster> &casters) const
 {
-	bounds.clear();
+	casters.clear();
 	if (primitiveBounds_.size() != primitiveDescs.size())
 	{
 		return;
@@ -2320,7 +2333,7 @@ void RenderGPUScene::CollectPhotonCasters(float maxRoughness, std::vector<std::p
 			worldLo = { std::min(worldLo.x, w.x), std::min(worldLo.y, w.y), std::min(worldLo.z, w.z) };
 			worldHi = { std::max(worldHi.x, w.x), std::max(worldHi.y, w.y), std::max(worldHi.z, w.z) };
 		}
-		bounds.emplace_back(worldLo, worldHi);
+		casters.push_back({ worldLo, worldHi, materialCasterMirrorRoughness_[material] <= maxRoughness });
 	}
 }
 

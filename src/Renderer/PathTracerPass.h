@@ -6,6 +6,7 @@
 
 #include "Maths.h"
 #include "PathTracerInterop.h"
+#include "Scene/RenderGPUScene.h"
 #include "SkyAtmosphereInterop.h"
 
 #include <chrono>
@@ -13,7 +14,6 @@
 #include <vector>
 
 class Camera;
-class RenderGPUScene;
 class SkyAtmospherePass;
 struct RenderSettings;
 
@@ -170,9 +170,9 @@ private:
 	ResourceHandle deferredBranches_ = InvalidResourceHandle; // GpuDeferredBranch per pixel
 	ResourceHandle exposure_ = InvalidResourceHandle;
 
-	// Caustic photons (created on first use): the photon map's shares (two, last frame's and this one's), running sums
-	// and feedback, the photon records, and per pixel the receivers, the splatted irradiance and the caustics' history
-	// (two). The caster rectangles per frame in flight.
+	// Caustic photons (created on first use): the photon map's shares (two, last frame's and this one's), running sums,
+	// feedback and coverage (and its sums, two), the photon records, and per pixel the receivers and the splatted
+	// irradiance. The caster rectangles per frame in flight.
 	enum PhotonPass
 	{
 		PhotonPassUpdate,
@@ -191,13 +191,14 @@ private:
 	ResourceHandle photonRecordCount_ = InvalidResourceHandle;
 	ResourceHandle photonReceivers_ = InvalidResourceHandle;
 	ResourceHandle photonCaustics_ = InvalidResourceHandle;
-	ResourceHandle photonHistory_[2] = { InvalidResourceHandle, InvalidResourceHandle };
+	ResourceHandle photonCoverage_ = InvalidResourceHandle;
+	ResourceHandle photonCoverageSums_ = InvalidResourceHandle;
 	std::vector<ResourceHandle> photonRects_;
-	std::vector<std::pair<float3, float3>> photonCasters_;
+	std::vector<RenderGPUScene::PhotonCaster> photonCasters_;
 	std::vector<GpuPhotonRect> photonRectData_;
 	bool photonMapValid_ = false; // photons ran last frame with this map
 	bool photonReset_ = false; // this frame's photon map starts over
-	uint photonParity_ = 0; // which of the two shares and histories is this frame's
+	uint photonParity_ = 0; // which of the two shares and coverage sums is this frame's
 	uint photonResetCount_ = 0;
 	bool photonAdaptive_ = true; // the last frame's PhotonSettings::adaptive
 	float3 photonSunDirection_ = { 0.0f, 0.0f, 0.0f }; // the map's plane and square, a change of which starts it over

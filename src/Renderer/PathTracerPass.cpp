@@ -136,8 +136,8 @@ PathTracerPass::~PathTracerPass()
 								  photonRecordCount_,
 								  photonReceivers_,
 								  photonCaustics_,
-								  photonHistory_[0],
-								  photonHistory_[1] })
+								  photonCoverage_,
+								  photonCoverageSums_ })
 	{
 		if (target != InvalidResourceHandle)
 		{
@@ -326,6 +326,55 @@ void PathTracerPass::PreparePhotons(FrameConstants &constants, bool sunActive, f
 	// Directions across the sun disc drift sideways on the way down, which the rectangles widen for.
 	const float spread = tanf(std::min(sunAngularRadius, 0.5f));
 
+	// Only the casters whose caustics may land in view, so that the map's texels follow what the camera sees. A
+	// refractor's go on down the sun's way: its bounds, widened by a quarter of their size each way for the light it bends
+	// aside, swept down to the scene's lowest point along the sun, must reach into the view's sides, widened by a quarter.
+	// Mirrors send theirs anywhere and always stay.
+	if (settings.cullToView)
+	{
+		float sceneLowest = FLT_MAX;
+		for (uint32_t corner = 0; corner < 8; ++corner)
+		{
+			const float3 c = { (corner & 1) != 0 ? sceneHi.x : sceneLo.x,
+							   (corner & 2) != 0 ? sceneHi.y : sceneLo.y,
+							   (corner & 4) != 0 ? sceneHi.z : sceneLo.z };
+			sceneLowest = std::min(sceneLowest, Dot(c, s));
+		}
+		const float4x4 &viewProj = constants.viewProj;
+		auto mayLandInView = [&](const RenderGPUScene::PhotonCaster &caster)
+		{
+			const float3 margin = (caster.hi - caster.lo) * 0.25f;
+			const float3 lo = caster.lo - margin;
+			const float3 hi = caster.hi + margin;
+			// A bit per side of the view (left, right, bottom, top, behind) that every point is outside of.
+			uint32_t outside = 0x1F;
+			for (uint32_t corner = 0; corner < 16 && outside != 0; ++corner)
+			{
+				float3 c = { (corner & 1) != 0 ? hi.x : lo.x, (corner & 2) != 0 ? hi.y : lo.y, (corner & 4) != 0 ? hi.z : lo.z };
+				if (corner >= 8)
+				{
+					c = c - s * (Dot(c, s) - sceneLowest);
+				}
+				const float4 clip = float4{ c.x, c.y, c.z, 1.0f } * viewProj;
+				const float side = 1.25f * clip.w;
+				uint32_t sides = 0;
+				sides |= clip.x < -side ? 1u : 0u;
+				sides |= clip.x > side ? 2u : 0u;
+				sides |= clip.y < -side ? 4u : 0u;
+				sides |= clip.y > side ? 8u : 0u;
+				sides |= clip.w <= 0.0f ? 16u : 0u;
+				outside &= sides;
+			}
+			return outside == 0;
+		};
+		std::erase_if(photonCasters_, [&](const RenderGPUScene::PhotonCaster &caster)
+					  { return !caster.reflects && !mayLandInView(caster); });
+		if (photonCasters_.empty())
+		{
+			return;
+		}
+	}
+
 	// One rectangle per caster, or one around them all past PHOTON_MAX_RECTS.
 	photonRectData_.clear();
 	auto addRect = [&](const float3 &lo, const float3 &hi)
@@ -350,19 +399,19 @@ void PathTracerPass::PreparePhotons(FrameConstants &constants, bool sunActive, f
 	};
 	if (photonCasters_.size() <= PHOTON_MAX_RECTS)
 	{
-		for (const auto &[lo, hi]: photonCasters_)
+		for (const RenderGPUScene::PhotonCaster &caster: photonCasters_)
 		{
-			addRect(lo, hi);
+			addRect(caster.lo, caster.hi);
 		}
 	}
 	else
 	{
-		float3 lo = photonCasters_[0].first;
-		float3 hi = photonCasters_[0].second;
-		for (const auto &[casterLo, casterHi]: photonCasters_)
+		float3 lo = photonCasters_[0].lo;
+		float3 hi = photonCasters_[0].hi;
+		for (const RenderGPUScene::PhotonCaster &caster: photonCasters_)
 		{
-			lo = { std::min(lo.x, casterLo.x), std::min(lo.y, casterLo.y), std::min(lo.z, casterLo.z) };
-			hi = { std::max(hi.x, casterHi.x), std::max(hi.y, casterHi.y), std::max(hi.z, casterHi.z) };
+			lo = { std::min(lo.x, caster.lo.x), std::min(lo.y, caster.lo.y), std::min(lo.z, caster.lo.z) };
+			hi = { std::max(hi.x, caster.hi.x), std::max(hi.y, caster.hi.y), std::max(hi.z, caster.hi.z) };
 		}
 		addRect(lo, hi);
 	}
@@ -428,8 +477,8 @@ void PathTracerPass::PreparePhotons(FrameConstants &constants, bool sunActive, f
 		photonRecordCount_ = create(4, sizeof(uint32_t), "PathTracer_PhotonRecordCount", true);
 		photonReceivers_ = create(2 * pixels, 4 * sizeof(float), "PathTracer_PhotonReceivers", false);
 		photonCaustics_ = create(pixels, 4 * sizeof(uint32_t), "PathTracer_PhotonCaustics", true);
-		photonHistory_[0] = create(pixels, 2 * sizeof(float), "PathTracer_PhotonHistory0", true);
-		photonHistory_[1] = create(pixels, 2 * sizeof(float), "PathTracer_PhotonHistory1", true);
+		photonCoverage_ = create(PHOTON_MAP_TEXELS, 2 * sizeof(float), "PathTracer_PhotonCoverage", true);
+		photonCoverageSums_ = create(4, sizeof(uint32_t), "PathTracer_PhotonCoverageSums", true);
 		renderContext_->EndUpload(batch);
 		photonMapValid_ = false;
 	}
@@ -462,6 +511,7 @@ void PathTracerPass::PreparePhotons(FrameConstants &constants, bool sunActive, f
 	photons.rectCount = static_cast<uint>(photonRectData_.size());
 	photons.maxBounces = static_cast<uint>(std::clamp(settings.maxBounces, 1, 64));
 	photons.maxAlpha = maxRoughness * maxRoughness;
+	photons.fadeAlpha = 0.25f * photons.maxAlpha; // half the perceptual roughness
 	photons.density = index(photonDensity_[photonParity_]);
 	photons.blockPrefix = index(photonBlockPrefix_);
 	photons.texelPrefix = index(photonTexelPrefix_);
@@ -483,16 +533,14 @@ PhotonPassConstants PathTracerPass::PhotonPassConstantsForFrame() const
 	auto index = [&](ResourceHandle handle) { return renderContext_->GetResourceViewInfo(handle).descriptorIndex; };
 	PhotonPassConstants constants = {};
 	constants.densityPrevious = index(photonDensity_[photonParity_ ^ 1u]);
-	constants.historyPrevious = index(photonHistory_[photonParity_ ^ 1u]);
-	constants.history = index(photonHistory_[photonParity_]);
+	constants.coverage = index(photonCoverage_);
+	constants.coverageSums = index(photonCoverageSums_);
+	constants.parity = photonParity_;
 	constants.caustics = index(photonCaustics_);
 	constants.output = index(output_);
 	constants.reset = photonReset_ ? 1u : 0u;
 	constants.targetArea = std::max(settings.targetArea, 0.01f);
-	constants.varianceGain = std::max(settings.varianceGain, 0.0f);
 	constants.temporalWeight = std::clamp(settings.temporalWeight, 0.0f, 1.0f);
-	constants.minDensity = std::max(settings.minDensity, 1.0e-3f);
-	constants.maxDensity = std::max(settings.maxDensity, constants.minDensity);
 	constants.frameIndex = renderContext_->GetCurrentFrame();
 	return constants;
 }
@@ -895,7 +943,7 @@ void PathTracerPass::Execute(RenderContext *renderContext)
 	// mark the receivers. A map that photons skipped a frame of starts over.
 	const ResourceHandle photonBuffers[] = { photonDensity_[0], photonDensity_[1], photonTexelPrefix_, photonBlockPrefix_,
 											 photonFeedback_,	photonRecords_,	   photonRecordCount_, photonReceivers_,
-											 photonCaustics_,	photonHistory_[0], photonHistory_[1] };
+											 photonCaustics_,	photonCoverage_,   photonCoverageSums_ };
 	if (!photons)
 	{
 		photonMapValid_ = false;

@@ -8,7 +8,7 @@
 // differentials, and records where they land (PathTracer/Photons.slang). The path tracer marks the surface each pixel
 // sees directly as a receiver; PhotonMap.slang then splats every record as an anisotropic Gaussian footprint onto the
 // receivers, adds the caustics to the image, and adapts the photon map's density from feedback: how many pixels the
-// photons' footprints cover and how much the caustics changed since last frame.
+// photons' footprints cover on screen, and how many of a texel's photons meet a caster first at all.
 
 // Photon tracing threads per DispatchRays row.
 #define PHOTON_DISPATCH_WIDTH 1024u
@@ -34,9 +34,21 @@
 #define PHOTON_SPLAT_SHARED_PIXELS 16u
 // A receiver's normal bits for none: OctEncode clamps to +-32767 and never writes -32768 (0x8000) in either half.
 #define PHOTON_NO_RECEIVER 0x80008000u
-// The feedback's sums in fixed point: units per pixel of footprint area, and per unit of caustics variance.
+// The feedback's sums in fixed point: units per pixel of footprint area, and per photon whose first surface passes
+// photons on (its share of them, PhotonCasterShare).
 #define PHOTON_AREA_SCALE 16.0f
-#define PHOTON_VARIANCE_SCALE 4096.0f
+#define PHOTON_HIT_SCALE 256.0f
+// The photon map's bounds on a texel's share, as fractions of the frame's photons, so that they mean the same whatever
+// the map's texels cover: the floor spends PHOTON_FLOOR_SHARE of them over the caster texels, by how often each one's
+// photons meet a caster (PHOTON_MIN_COVERAGE at least, so that a caster moving in is found), and no texel takes more
+// than PHOTON_MAX_SHARE.
+#define PHOTON_FLOOR_SHARE 0.1f
+#define PHOTON_MAX_SHARE 0.02f
+#define PHOTON_MIN_COVERAGE 0.02f
+// A texel's hits and photons sent are running sums fading by this each frame (about ten frames' memory).
+#define PHOTON_COVERAGE_DECAY 0.9f
+// The texels' coverage weights' sum in fixed point.
+#define PHOTON_COVERAGE_SCALE 1024.0f
 
 // One caster's bounds projected onto the plane perpendicular to the sun (PhotonParameters basisU, basisV). The photon
 // map only emits from texels that overlap one.
@@ -54,7 +66,8 @@ struct GpuPhotonRecord
 	float3 power; // flux
 	uint texel; // the photon map texel it was emitted from, in Hilbert order
 	// Its footprint's covariance on the surface, xx, xy, yy, in the frame BuildOrthonormalBasis(OctDecode(normal)):
-	// its own spread (photons.footprintScale times its positional differentials) plus the sun disc's blur.
+	// its own spread (photons.footprintScale times its positional differentials) plus the sun disc's and rough lobes'
+	// blur.
 	float3 covariance;
 	float area; // the area it stands for on the surface: its positional differentials' parallelogram
 };
@@ -72,14 +85,18 @@ struct PhotonParameters
 	uint rects; // bindless StructuredBuffer<GpuPhotonRect>
 	uint rectCount;
 	uint maxBounces; // smooth bounces a photon may take
-	float maxAlpha; // GGX alpha up to which a lobe counts as smooth, for photons and camera paths alike
+	// GGX alpha from which a lobe passes photons no more, for photons and camera paths alike (PhotonLobeWeight): up to
+	// fadeAlpha the photons carry all its light, and less and less between, the camera paths the rest.
+	float maxAlpha;
 	uint density; // bindless RWStructuredBuffer<float>: each texel's share of the photons, in Hilbert order
 	// bindless RWStructuredBuffer<float>: the shares of the blocks before each block, the total at PHOTON_MAP_BLOCKS
 	uint blockPrefix;
 	uint texelPrefix; // bindless RWStructuredBuffer<float>: the shares of a block's texels up to each, inclusive
 	uint records; // bindless RWStructuredBuffer<GpuPhotonRecord>
 	uint recordCount; // bindless RWStructuredBuffer<uint>: [0] = records written this frame, past the capacity too
-	uint feedback; // bindless RWStructuredBuffer<uint4>: per texel, fixed point area and variance sums and photons
+	// bindless RWStructuredBuffer<uint4>: per texel, the fixed point sums of its seen photons' footprint areas (x) and of
+	// its photons' first surfaces' caster shares (y), and its seen photons (z)
+	uint feedback;
 	// bindless RWStructuredBuffer<uint4>, two planes of width * height: per pixel the receiver's position (asuint xyz)
 	// and OctEncode of its normal towards the camera (w, PHOTON_NO_RECEIVER for none), the splat's one read; then its
 	// diffuse reflectance over pi times the path's throughput (asuint xyz), which only the composite reads
@@ -89,22 +106,27 @@ struct PhotonParameters
 	float sunSpread; // standard deviation of the sun disc's directions about its centre, radians (0 for a delta sun)
 	float irradianceUnit; // the splat's fixed point unit, the sun's peak irradiance / PHOTON_IRRADIANCE_SCALE
 	uint height;
+	float fadeAlpha; // see maxAlpha
+	float pad0;
+	float pad1;
+	float pad2;
 };
 
 // PhotonMap.slang's root constants.
 struct PhotonPassConstants
 {
 	uint densityPrevious; // bindless RWStructuredBuffer<float>: last frame's shares
-	uint historyPrevious; // bindless RWStructuredBuffer<float2>: last frame's caustics luminance and variance per pixel
-	uint history; // this frame's
+	// bindless RWStructuredBuffer<float2>: per texel, the running sums of its photons' caster shares and of its photons
+	uint coverage;
+	// bindless RWStructuredBuffer<uint>: [parity] = this frame's sum of the texels' coverage weights, in fixed point;
+	// [parity ^ 1] = last frame's, which the floor divides by and CompositeCaustics empties for the next frame
+	uint coverageSums;
+	uint parity;
 	uint caustics; // bindless RWStructuredBuffer<uint4>: this frame's splatted irradiance per pixel, fixed point
 	uint output; // bindless RWTexture2D<float4>: the path tracer's radiance
 	uint reset; // 1: every covered texel starts from an even share, and the feedback is dropped
 	float targetArea; // pixels a photon's area should cover on screen
-	float varianceGain; // photons per texel a caustics variance of 1 adds
 	float temporalWeight; // weight of the suggested share against the filtered last one
-	float minDensity; // photons per covered texel, at least
-	float maxDensity; // photons per texel, at most
 	uint frameIndex;
 };
 

@@ -70,7 +70,7 @@ static float QueryDisplayPeakNits(void *hwnd)
 	return 0.0f;
 }
 
-//constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
+constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
 //constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\crown\\gltf\\crown_extended.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\TransmissionThinwallTestGrid\\glTF-Binary\\TransmissionThinwallTestGrid.glb";
@@ -86,7 +86,8 @@ static float QueryDisplayPeakNits(void *hwnd)
 //constexpr const char *kDefaultScenePath = "h:\\StressTest\\StressTest.glb";
 //constexpr const char *kDefaultScenePath = "h:\\TheMetro.glb";
 //constexpr const char *kDefaultScenePath = "h:\\AncientCathedral.glb";
-constexpr const char *kDefaultScenePath = "h:\\DarkFantasyChurch.glb";
+//constexpr const char *kDefaultScenePath = "h:\\DarkFantasyChurch.glb";
+//constexpr const char *kDefaultScenePath = "h:\\SubwayStation.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PineForest\\PineForest.gltf";
 
 constexpr uint kFramesInFlight = 2;

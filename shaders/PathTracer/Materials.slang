@@ -445,6 +445,19 @@ OpenPBRBaseParams LoadMaterial(inout HitInfo hit, float coneWidth, bool anisotro
     return p;
 }
 
+// How far the base's normal map (or the coat's) spreads its normals over a ray cone coneWidth wide where it meets the
+// surface, the variance LoadMaterial's specular antialiasing would add (NormalMapVariance), 0 without a map.
+float FootprintNormalMapVariance(HitInfo hit, float coneWidth, bool coat)
+{
+    MaterialData material = LoadGpuMaterial(hit.materialId);
+    uint texture = coat ? material.coatNormalTexture : material.normalTexture;
+    if (texture == INVALIDDESCRIPTORHANDLE)
+        return 0.0;
+    float3 tn = SampleTextureGrad(texture, hit.uv, hit.uvGradients.xy * coneWidth, hit.uvGradients.zw * coneWidth, false)
+                    .xyz * 2.0 - 1.0;
+    return NormalMapVariance(tn, coat ? material.coatNormalScale : material.normalScale);
+}
+
 // What LoadMaterial sets per hit, in fewer registers: halves, the shading frame octahedral. The rest
 // keeps the constants of OpenPBRDefaults and SetGltfClearcoat, which the compiler folds into the BSDF.
 struct PackedMaterial

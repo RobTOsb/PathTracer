@@ -4,8 +4,7 @@
 //   ScanPhotonBlocks, ScanPhotonTotals: the shares' running sums, which PhotonRayGen spreads the photons by.
 //   (PhotonRayGen traces and records the photons, the path tracer marks the receivers.)
 //   SplatPhotons: every record as an anisotropic Gaussian footprint onto the receivers it covers, and its feedback.
-//   CompositeCaustics: the splatted irradiance into the path tracer's radiance, and how much it changed since last
-//   frame, which the next frame's feedback reads.
+//   CompositeCaustics: the splatted irradiance into the path tracer's radiance.
 #include "PathTracerInterop.h"
 
 ConstantBuffer<PhotonPassConstants> g_PushConstants : register(b0);
@@ -82,11 +81,6 @@ uint Hash(uint3 v)
     return h;
 }
 
-float Luminance(float3 c)
-{
-    return dot(c, float3(0.2126, 0.7152, 0.0722));
-}
-
 // The pixel a world point projects to through a view-projection, false behind the camera or off screen.
 bool ProjectToPixel(float3 position, float4x4 viewProj, out int2 pixel)
 {
@@ -101,24 +95,28 @@ bool ProjectToPixel(float3 position, float4x4 viewProj, out int2 pixel)
 }
 
 // Each texel's share of the photons. Texels over no caster's rectangle get none. Otherwise, from the photons it sent
-// last frame that landed where the camera sees (the feedback): their average footprint area on screen a and the
-// caustics' change v where they landed suggest last frame's photons times a / targetArea, so that every photon covers
-// about targetArea pixels, plus varianceGain v where the caustics flicker; at least minDensity, so that every caster
-// keeps being found. That is blended with the 3x3 neighbourhood's last shares by temporalWeight so that small features
-// change smoothly. Shares count photons per texel, last frame's scaled to the photons traced, so minDensity and the
-// gain mean photons; the scan then spreads the frame's photons in proportion, whatever their total.
+// last frame that landed where the camera sees (the feedback): their average footprint area on screen a suggests last
+// frame's photons times a / targetArea, so that every photon covers about targetArea pixels. That is blended with the
+// 3x3 neighbourhood's last shares by temporalWeight so that small features change smoothly. Shares count photons per
+// texel, last frame's scaled to the photons traced; the scan then spreads the frame's photons in proportion, whatever
+// their total.
+// The bounds are fractions of the frame's photons, so that they hold whatever a texel covers. The floor, which keeps
+// casters out of view found, spends PHOTON_FLOOR_SHARE of them over the texels by their coverage: the part of their
+// photons whose first surface passes photons on (the feedback's hits over the photons sent, both running sums), so
+// that a rectangle's corners over open ground stop taking the floor's photons from the casters it bounds.
 [shader("compute")]
 [numthreads(PHOTON_GROUP_SIZE, 1, 1)]
 void UpdatePhotonMap(uint3 id : SV_DispatchThreadID)
 {
+    // The dispatch covers the texels exactly, so every lane takes part in the wave sum below.
     uint texel = id.x;
-    if (texel >= PHOTON_MAP_TEXELS)
-        return;
     PhotonParameters ph = g_Frame.photons;
     RWStructuredBuffer<float> previous = ResourceDescriptorHeap[g_PushConstants.densityPrevious];
     RWStructuredBuffer<float> density = ResourceDescriptorHeap[ph.density];
     RWStructuredBuffer<uint4> feedback = ResourceDescriptorHeap[ph.feedback];
     RWStructuredBuffer<float> blockPrefix = ResourceDescriptorHeap[ph.blockPrefix];
+    RWStructuredBuffer<float2> coverage = ResourceDescriptorHeap[g_PushConstants.coverage];
+    RWStructuredBuffer<uint> coverageSums = ResourceDescriptorHeap[g_PushConstants.coverageSums];
     StructuredBuffer<GpuPhotonRect> rects = ResourceDescriptorHeap[ph.rects];
 
     uint4 f = feedback[texel];
@@ -134,27 +132,43 @@ void UpdatePhotonMap(uint3 id : SV_DispatchThreadID)
         GpuPhotonRect rect = rects[r];
         covered = all(lo <= rect.hi) && all(hi >= rect.lo);
     }
+    float previousTotal = blockPrefix[PHOTON_MAP_BLOCKS];
+    bool reset = g_PushConstants.reset != 0 || !(previousTotal > 0.0);
+    float photons = float(ph.photonCount);
+    float toPhotons = reset ? 0.0 : photons / previousTotal;
+    float sent = previous[texel] * toPhotons;
+
+    // Hits and photons sent, fading; a texel not yet tried counts as covered (one photon that hit).
+    float2 seen = float2(0.0, 0.0);
+    if (!reset && covered)
+        seen = coverage[texel] * PHOTON_COVERAGE_DECAY + float2(float(f.y) / PHOTON_HIT_SCALE, sent);
+    coverage[texel] = seen;
+    float weight = covered ? clamp((seen.x + 1.0) / (seen.y + 1.0), PHOTON_MIN_COVERAGE, 1.0) : 0.0;
+    uint waveUnits = WaveActiveSum(uint(weight * PHOTON_COVERAGE_SCALE + 0.5));
+    if (WaveIsFirstLane() && waveUnits != 0u)
+        InterlockedAdd(coverageSums[g_PushConstants.parity], waveUnits);
+
     if (!covered)
     {
         density[texel] = 0.0;
         return;
     }
-    float previousTotal = blockPrefix[PHOTON_MAP_BLOCKS];
-    if (g_PushConstants.reset != 0 || !(previousTotal > 0.0))
+    if (reset)
     {
         density[texel] = 1.0;
         return;
     }
-    float toPhotons = float(ph.photonCount) / previousTotal;
+    float weightSum = float(coverageSums[g_PushConstants.parity ^ 1u]) / PHOTON_COVERAGE_SCALE;
+    float minShare = weightSum > 0.0 ? PHOTON_FLOOR_SHARE * photons * weight / weightSum : weight;
+    float maxShare = max(PHOTON_MAX_SHARE * photons, minShare);
 
     float suggested = 0.0;
     if (f.z > 0u)
     {
         float area = float(f.x) / (PHOTON_AREA_SCALE * float(f.z));
-        float variance = float(f.y) / (PHOTON_VARIANCE_SCALE * float(f.z));
-        suggested = previous[texel] * toPhotons * area / g_PushConstants.targetArea + g_PushConstants.varianceGain * variance;
+        suggested = sent * area / g_PushConstants.targetArea;
     }
-    suggested = max(suggested, g_PushConstants.minDensity);
+    suggested = max(suggested, minShare);
 
     // The covered neighbours' last shares, weighted 4 / 2 / 1 from the centre out.
     float sum = 0.0;
@@ -176,7 +190,7 @@ void UpdatePhotonMap(uint3 id : SV_DispatchThreadID)
     }
     float filtered = weights > 0.0 ? sum / weights * toPhotons : suggested;
     float share = lerp(filtered, suggested, g_PushConstants.temporalWeight);
-    density[texel] = clamp(share, g_PushConstants.minDensity, g_PushConstants.maxDensity);
+    density[texel] = clamp(share, minShare, maxShare);
 }
 
 groupshared float s_WaveSums[PHOTON_MAP_BLOCK];
@@ -399,8 +413,7 @@ void SplatPixel(Splat s, uint2 pixel, RWStructuredBuffer<uint4> receivers, RWStr
         InterlockedAdd(caustics[index].z, units.z);
 }
 
-// The feedback from a photon whose centre the camera sees: its area in pixels and last frame's caustics change there,
-// into the photon map texel it came from.
+// The feedback from a photon whose centre the camera sees: its area in pixels, into the photon map texel it came from.
 void SendFeedback(GpuPhotonRecord record, Splat s, float cosView, float pixelSize, RWStructuredBuffer<uint4> receivers)
 {
     int2 centre;
@@ -411,12 +424,9 @@ void SendFeedback(GpuPhotonRecord record, Splat s, float cosView, float pixelSiz
     if (receiver.w == PHOTON_NO_RECEIVER || abs(dot(asfloat(receiver.xyz) - record.position, s.n)) > s.planeTolerance ||
         dot(OctDecode(receiver.w), s.n) < 0.5)
         return;
-    RWStructuredBuffer<float2> historyPrevious = ResourceDescriptorHeap[g_PushConstants.historyPrevious];
     RWStructuredBuffer<uint4> feedback = ResourceDescriptorHeap[g_Frame.photons.feedback];
     float area = min(record.area * cosView / (pixelSize * pixelSize), 65536.0);
-    float variance = saturate(historyPrevious[pixel].y);
     InterlockedAdd(feedback[record.texel].x, uint(area * PHOTON_AREA_SCALE + 0.5));
-    InterlockedAdd(feedback[record.texel].y, uint(variance * PHOTON_VARIANCE_SCALE + 0.5));
     InterlockedAdd(feedback[record.texel].z, 1u);
 }
 
@@ -494,41 +504,32 @@ void SplatPhotons(uint3 id : SV_DispatchThreadID)
 }
 
 // Per pixel: the splatted irradiance times the receiver's reflectance into the radiance, the sums emptied for the next
-// frame. The caustics' change since last frame, relative to them, where the receiver was last frame: the variance the
-// next frame's feedback reads.
+// frame. Also empties last frame's coverage sum, which UpdatePhotonMap has read, for the next frame to add to.
 [shader("compute")]
 [numthreads(PHOTON_SCREEN_GROUP_SIZE, PHOTON_SCREEN_GROUP_SIZE, 1)]
 void CompositeCaustics(uint3 id : SV_DispatchThreadID)
 {
     PhotonParameters ph = g_Frame.photons;
+    if (all(id.xy == 0u))
+    {
+        RWStructuredBuffer<uint> coverageSums = ResourceDescriptorHeap[g_PushConstants.coverageSums];
+        coverageSums[g_PushConstants.parity ^ 1u] = 0u;
+    }
     if (id.x >= ph.width || id.y >= ph.height)
         return;
     uint pixel = id.y * ph.width + id.x;
     RWStructuredBuffer<uint4> caustics = ResourceDescriptorHeap[g_PushConstants.caustics];
     RWStructuredBuffer<uint4> receivers = ResourceDescriptorHeap[ph.receivers];
-    RWStructuredBuffer<float2> historyPrevious = ResourceDescriptorHeap[g_PushConstants.historyPrevious];
-    RWStructuredBuffer<float2> history = ResourceDescriptorHeap[g_PushConstants.history];
 
     uint4 sum = caustics[pixel];
     caustics[pixel] = uint4(0u, 0u, 0u, 0u);
-    float3 irradiance = float3(sum.xyz) * ph.irradianceUnit;
     uint4 receiver = receivers[pixel];
-    float luminance = 0.0;
-    float variance = 0.0;
     if (receiver.w != PHOTON_NO_RECEIVER)
     {
+        float3 irradiance = float3(sum.xyz) * ph.irradianceUnit;
         RWTexture2D<float4> output = ResourceDescriptorHeap[g_PushConstants.output];
         float4 radiance = output[id.xy];
         radiance.rgb += asfloat(receivers[ph.width * ph.height + pixel].rgb) * irradiance;
         output[id.xy] = radiance;
-        luminance = Luminance(irradiance);
-        int2 previousPixel;
-        if (g_PushConstants.reset == 0 && ProjectToPixel(asfloat(receiver.xyz), g_Frame.prevViewProj, previousPixel))
-        {
-            float previous = historyPrevious[uint(previousPixel.y) * ph.width + uint(previousPixel.x)].x;
-            float both = luminance + previous;
-            variance = both > 0.0 ? abs(luminance - previous) / both : 0.0;
-        }
     }
-    history[pixel] = float2(luminance, variance);
 }
