@@ -53,6 +53,8 @@ private:
 	PipelineHandle selectPipeline_ = InvalidPipelineHandle;
 	PipelineHandle tracePipeline_ = InvalidPipelineHandle;
 	PipelineHandle compositePipeline_ = InvalidPipelineHandle;
+	PipelineHandle kawaseDownPipeline_ = InvalidPipelineHandle;
+	PipelineHandle kawaseUpPipeline_ = InvalidPipelineHandle;
 	PipelineHandle ghostPipeline_ = InvalidPipelineHandle;
 	PipelineHandle starburstPipeline_ = InvalidPipelineHandle;
 	CommandSignatureHandle drawSignature_ = InvalidCommandSignatureHandle;

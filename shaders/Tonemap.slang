@@ -5,6 +5,8 @@ ConstantBuffer<TonemapConstants> g_PushConstants : register(b0);
 RWTexture2D<float4> g_Input : register(u0);
 RWTexture2D<float4> g_Output : register(u1);
 RWStructuredBuffer<float> g_Exposure : register(u2); // [0] the exposure, see AutoExposurePass
+Texture3D<float4> g_FilmLut : register(t0); // display-encoded RGB => display-encoded RGB, red along x
+SamplerState g_LinearClamp : register(s2);
 
 float Luma(float3 c)
 {
@@ -148,6 +150,25 @@ float3 LinearToSRGB(float3 c)
     return LinearToSRGBUnclamped(saturate(c));
 }
 
+bool FilmLutActive()
+{
+    return g_PushConstants.filmLutStrength > 0.0;
+}
+
+// The film LUT grades a display-referred SDR image, as in a grading tool: linear [0, 1] in, sRGB-encoded for the
+// lookup, linear out. Texel centres sit at i / (N - 1) of the domain, hence the half-texel remap.
+float3 ApplyFilmLut(float3 linearSdr)
+{
+    if (!FilmLutActive())
+        return linearSdr;
+    float3 encoded = LinearToSRGB(linearSdr);
+    float n = g_PushConstants.filmLutSize;
+    float3 uvw = encoded * ((n - 1.0) / n) + 0.5 / n;
+    float3 graded = g_FilmLut.SampleLevel(g_LinearClamp, uvw, 0.0).rgb;
+    graded = lerp(encoded, max(graded, 0.0), g_PushConstants.filmLutStrength);
+    return SRGBToLinearUnclamped(graded);
+}
+
 // Jarzynski and Olano, "Hash Functions for GPU Rendering".
 uint3 Pcg3d(uint3 v)
 {
@@ -234,6 +255,21 @@ float3 ApplyFilmGrain(float3 encoded, uint2 pixel)
     return max(encoded + FilmGrain(pixel) * (g_PushConstants.grainStrength * weight), 0.0);
 }
 
+// Darkens with the distance from the centre in pixels, so it is circular whatever the aspect ratio: 1 - r^2, with r
+// 0 at the centre and 1 in the corners. g_PushConstants.vignettePower sets how fast it falls off (0 = off). Applied
+// to scene light, like a lens's falloff, so SDR and HDR darken alike.
+float3 ApplyVignette(float3 colour, uint2 pixel)
+{
+    float power = g_PushConstants.vignettePower;
+    if (power <= 0.0)
+        return colour;
+    float2 size = float2(g_PushConstants.width, g_PushConstants.height);
+    float2 offset = float2(pixel) + 0.5 - 0.5 * size;
+    float r2 = dot(offset, offset) / dot(0.5 * size, 0.5 * size);
+    float vig = saturate(1.0 - r2);
+    return colour * pow(vig, power);
+}
+
 // SDR monitors decode with a pure 2.2 power rather than the piecewise sRGB curve, so that is
 // what people are used to seeing. Re-encoding with sRGB and decoding with 2.2 reproduces it in
 // HDR; without it shadows look lifted compared with the SDR output. This is the inverse of that
@@ -274,6 +310,7 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
 
     float3 colour = max(g_Input[id.xy].rgb, 0.0) * g_Exposure[0];
+    colour = ApplyVignette(colour, id.xy);
     ToneMappingOperator op = (ToneMappingOperator)g_PushConstants.toneMapOperator;
     float clip = g_PushConstants.whiteClip;
 
@@ -292,10 +329,13 @@ void main(uint3 id : SV_DispatchThreadID)
         }
         else
         {
-            if (op != TONEMAP_NEUTWO)
+            // The film LUT grades the SDR image, so it joins the tone mapper's look: the graded SDR image sets the
+            // mid-tones' colour and the highlights the SDR curve compressed are added back above it.
+            if (op != TONEMAP_NEUTWO || FilmLutActive())
             {
                 float3 sdrNeutral = ToneMapNeutral(colour, 1.0, clip);
-                float3 sdrLook = ApplySDRLook(colour, op, clip);
+                float3 sdrLook = op == TONEMAP_NEUTWO ? sdrNeutral : ApplySDRLook(colour, op, clip);
+                sdrLook = ApplyFilmLut(sdrLook);
                 colour = ApplySDRLookToScene(colour, sdrNeutral, sdrLook);
             }
             colour = ToneMapNeutral(colour, tonemapPeak, clip);
@@ -311,7 +351,7 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    colour = ApplySDRLook(colour, op, clip);
+    colour = ApplyFilmLut(ApplySDRLook(colour, op, clip));
     float3 encoded = ApplyFilmGrain(LinearToSRGB(colour), id.xy);
     g_Output[id.xy] = float4(saturate(encoded), 1.0);
 }

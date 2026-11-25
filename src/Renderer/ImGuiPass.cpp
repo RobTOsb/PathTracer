@@ -1,6 +1,7 @@
 #include "ImGuiPass.h"
 
 #include "Camera.h"
+#include "FilmLut.h"
 #include "FrameGraph.h"
 #include "LensFlarePass.h"
 #include "LightTreeInterop.h"
@@ -1104,6 +1105,35 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 			ImGui::SetItemTooltip("Scene value (1 = paper white) that the Neutwo curve maps exactly to its peak");
 		}
 
+		{
+			const std::vector<FilmLutFile> &luts = GetFilmLutFiles();
+			settings_.filmLut = std::clamp(settings_.filmLut, 0, static_cast<int>(luts.size()));
+			const char *preview = settings_.filmLut == 0 ? "None" : luts[settings_.filmLut - 1].name.c_str();
+			if (ImGui::BeginCombo("Film LUT", preview))
+			{
+				if (ImGui::Selectable("None", settings_.filmLut == 0))
+				{
+					settings_.filmLut = 0;
+				}
+				for (int i = 0; i < static_cast<int>(luts.size()); ++i)
+				{
+					if (ImGui::Selectable(luts[i].name.c_str(), settings_.filmLut == i + 1))
+					{
+						settings_.filmLut = i + 1;
+					}
+				}
+				ImGui::EndCombo();
+			}
+			ImGui::SetItemTooltip("A 3D look LUT from assets/luts (made from .cube files by tools/cube_to_dds.py), "
+								  "applied to the display-encoded SDR image after the tone mapper. In HDR the graded "
+								  "image sets the mid-tones and the highlights extend above paper white; with the tone "
+								  "mapper off in HDR it is not applied");
+			ImGui::BeginDisabled(settings_.filmLut == 0);
+			ImGui::SliderFloat("LUT strength", &settings_.filmLutStrength, 0.0f, 1.0f, "%.2f");
+			ImGui::SetItemTooltip("Blend from the tone mapper's output (0) to the graded image (1)");
+			ImGui::EndDisabled();
+		}
+
 		ImGui::Checkbox("Bloom", &settings_.bloom);
 		ImGui::BeginDisabled(!settings_.bloom);
 		ImGui::SliderFloat("Bloom strength", &settings_.bloomStrength, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
@@ -1146,6 +1176,14 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SetItemTooltip("Each ghost's size about its centre, 1 = what the lens gives; smaller ghosts are brighter");
 		ImGui::SliderFloat("Ghost softness", &flare.ghostSoftness, 0.0f, 0.5f, "%.3f");
 		ImGui::SetItemTooltip("How far inside its edge each ghost fades, as a share of the iris; 0 = sharp outlines");
+		ImGui::SliderInt("Ghost blur passes", &flare.ghostBlurPasses, 0, 6);
+		ImGui::SetItemTooltip("Dual Kawase blur over the ghosts (not the starbursts): each pass doubles its reach. "
+							  "0 = off");
+		ImGui::BeginDisabled(flare.ghostBlurPasses <= 0);
+		ImGui::SliderFloat("Ghost blur offset", &flare.ghostBlurOffset, 0.0f, 4.0f, "%.2f");
+		ImGui::SetItemTooltip("How far apart the blur's taps are, in half texels of each pass; larger is wider but can "
+							  "show a grid pattern past about 2");
+		ImGui::EndDisabled();
 		ImGui::SliderFloat("Starburst intensity", &flare.starburstIntensity, 0.0f, 4.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
 		ImGui::SetItemTooltip("Share of the light's irradiance spread into the starburst");
 		ImGui::SliderFloat("Starburst size", &flare.starburstSize, 0.05f, 2.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
@@ -1163,6 +1201,12 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SetItemTooltip("How strongly the grain fades out towards black and white, 0 = the same grain everywhere");
 		ImGui::SliderFloat("Grain frame rate", &settings_.filmGrainFps, 0.0f, 60.0f, "%.0f fps");
 		ImGui::SetItemTooltip("How often the grain pattern changes, 0 = static");
+		ImGui::EndDisabled();
+
+		ImGui::Checkbox("Vignette", &settings_.vignette);
+		ImGui::BeginDisabled(!settings_.vignette);
+		ImGui::SliderFloat("Vignette strength", &settings_.vignetteStrength, 0.0f, 2.0f, "%.2f");
+		ImGui::SetItemTooltip("How strongly the image darkens towards the corners; the centre is unchanged, 0 = none");
 		ImGui::EndDisabled();
 	}
 

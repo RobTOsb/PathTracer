@@ -325,9 +325,9 @@ struct LensFlareConstants
 	float ghostScale; // each ghost's size about its centre, 1 = the lens's own
 
 	float compression; // exponent on a light's brightness over the threshold, 1 = physical
+	float blurOffset; // the ghosts' dual Kawase blur: its taps' distance from the centre, in half texels
 	uint pad0;
 	uint pad1;
-	uint pad2;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -746,6 +746,9 @@ struct TonemapConstants
 	float grainColour; // 0: monochrome grain, 1: independent grain per channel
 	float grainResponse; // exponent on the mid-tone bell, 0 = the same grain at every level
 	uint grainSeed; // changes whenever the grain pattern should change
+	float vignettePower; // exponent on the vignette's corner falloff, 0 = off
+	float filmLutStrength; // blend towards the film LUT's output in display-encoded space, 0 = no LUT
+	float filmLutSize; // texels per side of g_FilmLut
 };
 
 // The DLSS-RR guide GuideViewPass shows in place of the image.
@@ -841,7 +844,7 @@ static_assert(sizeof(GpuCameraGuides) == 48 && sizeof(GpuSpecularChain) == 84 &&
 			  "GpuCameraState parts must match their HLSL layout");
 static_assert(sizeof(GpuCameraState) == 232, "GpuCameraState must match the structured buffer stride");
 static_assert(sizeof(GpuDeferredBranch) == 44, "GpuDeferredBranch must match the structured buffer stride");
-static_assert(sizeof(TonemapConstants) == 52, "TonemapConstants must fit the root constants");
+static_assert(sizeof(TonemapConstants) == 64, "TonemapConstants must fit the root constants");
 static_assert(sizeof(GuideViewConstants) <= 16 * 4, "GuideViewConstants must fit the root constants");
 #endif
 

@@ -14,6 +14,7 @@ add_executable(PathTracer
     Renderer/BloomPass.cpp
     Renderer/LensFlarePass.cpp
     Renderer/TonemapPass.cpp
+    Renderer/FilmLut.cpp
     Renderer/ImGuiPass.cpp
 )
 
@@ -32,6 +33,7 @@ target_include_directories(PathTracer PRIVATE
 target_compile_definitions(PathTracer PRIVATE
     NOMINMAX
     PATHTRACER_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders/"
+    PATHTRACER_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets/"
 )
 
 target_link_libraries(PathTracer PRIVATE

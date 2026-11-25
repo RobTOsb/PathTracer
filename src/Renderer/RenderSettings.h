@@ -213,7 +213,7 @@ struct LensFlareSettings
 	// Past minIntensity a flare grows only as (brightness / minIntensity)^compression: 1 = physical, lower evens out
 	// the sun and the brightest lights against dimmer ones. It never brightens a flare.
 	float compression = 1.0f;
-	int maxLights = 16; // 1 to FLARE_MAX_LIGHTS, the brightest first
+	int maxLights = 4; // 1 to FLARE_MAX_LIGHTS, the brightest first
 	float fNumber = 4.0f; // the iris: smaller ghosts and a larger starburst as it closes
 	int apertureBlades = 11; // 0 = a round iris, at most 32
 	float ghostIntensity = 1.1f; // 1 = the lens's own reflections, which are faint beside anything but the sun
@@ -223,6 +223,10 @@ struct LensFlareSettings
 	float ghostSize = 0.2f;
 	float starburstIntensity = 0.001f; // the share of the light's irradiance in the starburst
 	float starburstSize = 0.01f; // half the starburst's side as a fraction of half the screen's height, at f/8
+	// The ghosts' dual Kawase blur (not the starbursts'): down and up passes (0 = off, each doubles its reach) and
+	// its taps' spread, in half texels of each pass's input.
+	int ghostBlurPasses = 2;
+	float ghostBlurOffset = 1.0f;
 };
 
 // Everything the UI can tweak; passes read it every frame.
@@ -321,6 +325,11 @@ struct RenderSettings
 	float peakNits = 1000.0f; // overwritten with the display's reported peak at startup
 	bool hdrGammaCorrection = true; // match the 2.2 gamma SDR displays decode with
 
+	// Film look LUT on the display-encoded SDR image after the tone mapper; in HDR the graded SDR image is carried up to
+	// the peak. 0 = none, i = GetFilmLutFiles()[i - 1] (FilmLut.h, the .dds files in assets/luts).
+	int filmLut = 0;
+	float filmLutStrength = 1.0f; // blend from the tone mapper's output (0) to the LUT's (1)
+
 	// Bloom, blended into the HDR image after upscaling: the mean of bloomLevels ever blurrier half-resolution
 	// levels replaces bloomStrength of the image.
 	bool bloom = true;
@@ -337,6 +346,10 @@ struct RenderSettings
 	float filmGrainColour = 1.0f; // 0 = monochrome, 1 = independent per channel
 	float filmGrainResponse = 1.0f; // mid-tone emphasis, 0 = the same grain at every level
 	float filmGrainFps = 60.0f; // how often the grain pattern changes, 0 = static
+
+	// Lens vignette on the exposed scene light, before tone mapping: the exponent on the corner falloff.
+	bool vignette = true;
+	float vignetteStrength = 0.25f;
 
 	DLSSMode dlssMode = DLSSMode::MaxQuality;
 	DLSSRayReconstructionPreset rrPreset = DLSSRayReconstructionPreset::PresetF;

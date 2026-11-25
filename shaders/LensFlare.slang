@@ -26,6 +26,10 @@ Texture2D<float4> g_Starburst : register(t6);
 Texture2D<float4> g_Flare : register(t7);
 RWTexture2D<float4> g_Output : register(u7);
 
+// Ghost blur
+Texture2D<float4> g_BlurInput : register(t8);
+RWTexture2D<float4> g_BlurOutput : register(u8);
+
 SamplerState g_LinearClamp : register(s2);
 
 #if FLARE_GRID > 63
@@ -679,6 +683,54 @@ float4 StarburstPS(StarburstVaryings input) : SV_Target
 
     float3 value = sampled * input.scale;
     return float4(min(value, kMaxFlareValue), 0.0);
+}
+
+// Ghost blur: the dual Kawase blur (Bjorge, "Bandwidth-Efficient Rendering", SIGGRAPH 2015) over the ghosts alone;
+// the starbursts are drawn after it. Each down pass halves the resolution, each up pass doubles it back; every pass
+// reads g_BlurInput through the bilinear sampler and writes all of g_BlurOutput. The taps sit g_Constants.blurOffset
+// half texels of the input from the centre, so more passes or a larger offset widen the blur.
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void KawaseDown(uint3 id : SV_DispatchThreadID)
+{
+    uint2 outputSize;
+    g_BlurOutput.GetDimensions(outputSize.x, outputSize.y);
+    if (any(id.xy >= outputSize))
+        return;
+    uint2 inputSize;
+    g_BlurInput.GetDimensions(inputSize.x, inputSize.y);
+    float2 uv = (float2(id.xy) + 0.5) / float2(outputSize);
+    float2 o = 0.5 / float2(inputSize) * g_Constants.blurOffset;
+    float4 sum = g_BlurInput.SampleLevel(g_LinearClamp, uv, 0.0) * 4.0;
+    sum += g_BlurInput.SampleLevel(g_LinearClamp, uv - o, 0.0);
+    sum += g_BlurInput.SampleLevel(g_LinearClamp, uv + o, 0.0);
+    sum += g_BlurInput.SampleLevel(g_LinearClamp, uv + float2(o.x, -o.y), 0.0);
+    sum += g_BlurInput.SampleLevel(g_LinearClamp, uv - float2(o.x, -o.y), 0.0);
+    g_BlurOutput[id.xy] = sum * (1.0 / 8.0);
+}
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void KawaseUp(uint3 id : SV_DispatchThreadID)
+{
+    uint2 outputSize;
+    g_BlurOutput.GetDimensions(outputSize.x, outputSize.y);
+    if (any(id.xy >= outputSize))
+        return;
+    uint2 inputSize;
+    g_BlurInput.GetDimensions(inputSize.x, inputSize.y);
+    float2 uv = (float2(id.xy) + 0.5) / float2(outputSize);
+    float2 o = 0.5 / float2(inputSize) * g_Constants.blurOffset;
+    float4 sum = g_BlurInput.SampleLevel(g_LinearClamp, uv + float2(-2.0 * o.x, 0.0), 0.0);
+    sum += g_BlurInput.SampleLevel(g_LinearClamp, uv + float2(2.0 * o.x, 0.0), 0.0);
+    sum += g_BlurInput.SampleLevel(g_LinearClamp, uv + float2(0.0, -2.0 * o.y), 0.0);
+    sum += g_BlurInput.SampleLevel(g_LinearClamp, uv + float2(0.0, 2.0 * o.y), 0.0);
+    sum += g_BlurInput.SampleLevel(g_LinearClamp, uv + float2(-o.x, o.y), 0.0) * 2.0;
+    sum += g_BlurInput.SampleLevel(g_LinearClamp, uv + float2(o.x, o.y), 0.0) * 2.0;
+    sum += g_BlurInput.SampleLevel(g_LinearClamp, uv + float2(o.x, -o.y), 0.0) * 2.0;
+    sum += g_BlurInput.SampleLevel(g_LinearClamp, uv + float2(-o.x, -o.y), 0.0) * 2.0;
+    g_BlurOutput[id.xy] = sum * (1.0 / 12.0);
 }
 
 [shader("compute")]

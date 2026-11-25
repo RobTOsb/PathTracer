@@ -203,6 +203,8 @@ namespace
 	constexpr float kMinVisible = 1.0e-3f;
 
 	constexpr int kStarburstSize = 512;
+	// Down passes of the ghosts' dual Kawase blur at most.
+	constexpr int kMaxGhostBlurPasses = 6;
 	constexpr float kStarburstReferenceWavelength = 550.0f;
 
 	// Refractive index at a wavelength from the d-line index and Abbe number, by Cauchy's two-term formula.
@@ -535,6 +537,8 @@ LensFlarePass::LensFlarePass(RenderContext *renderContext,
 	selectPipeline_ = computePipeline("Select");
 	tracePipeline_ = computePipeline("Trace");
 	compositePipeline_ = computePipeline("Composite");
+	kawaseDownPipeline_ = computePipeline("KawaseDown");
+	kawaseUpPipeline_ = computePipeline("KawaseUp");
 	ghostPipeline_ = CreateGraphicsPipeline("GhostVS", "GhostPS");
 	starburstPipeline_ = CreateGraphicsPipeline("StarburstVS", "StarburstPS");
 	drawSignature_ = renderContext_->CreateCommandSignature(IndirectCommandType::Draw, 0, InvalidPipelineHandle);
@@ -1209,6 +1213,8 @@ void LensFlarePass::AddPasses(FrameGraph &frame)
 	// nearly every ghost away.
 	constants.fieldScale = kSensorHalfHeight / focalLength_ / constants.tanHalfFovY;
 	constants.ghostScale = std::clamp(flare.ghostSize, 0.01f, 1.0f);
+	constants.blurOffset = std::max(flare.ghostBlurOffset, 0.0f);
+	const int blurPasses = std::clamp(flare.ghostBlurPasses, 0, kMaxGhostBlurPasses);
 
 	const ResourceHandle constantBuffer = constantBuffers_[renderContext_->GetCurrentFrameIndex()];
 	renderContext_->UpdateConstantBuffer(constantBuffer, &constants, sizeof(constants));
@@ -1228,6 +1234,34 @@ void LensFlarePass::AddPasses(FrameGraph &frame)
 	desc.format = Format::R16G16B16A16_FLOAT;
 	desc.debugName = "LensFlare_Target";
 	const rg::ResourceId target = frame.graph.CreateTexture(desc);
+	// With the ghost blur: the dual Kawase chain halves the ghosts blurPasses times into down[1..], then doubles them
+	// back through up[blurPasses - 1..0]; up[0], at the target's size, is what the starbursts are drawn onto and
+	// Composite reads.
+	rg::ResourceId flareTarget = target;
+	std::vector<rg::ResourceId> down = { target };
+	std::vector<rg::ResourceId> up;
+	std::vector<uint2> sizes = { uint2(flareWidth_, flareHeight_) };
+	if (blurPasses > 0)
+	{
+		for (int level = 1; level <= blurPasses; ++level)
+		{
+			const uint2 previous = sizes.back();
+			sizes.push_back(uint2(std::max((previous.x + 1) / 2, 1u), std::max((previous.y + 1) / 2, 1u)));
+			desc.width = sizes.back().x;
+			desc.height = sizes.back().y;
+			desc.debugName = "LensFlare_KawaseDown";
+			down.push_back(frame.graph.CreateTexture(desc));
+		}
+		up.resize(blurPasses);
+		for (int level = 0; level < blurPasses; ++level)
+		{
+			desc.width = sizes[level].x;
+			desc.height = sizes[level].y;
+			desc.debugName = "LensFlare_KawaseUp";
+			up[level] = frame.graph.CreateTexture(desc);
+		}
+		flareTarget = up[0];
+	}
 
 	const rg::Access rw = rg::Access::ComputeShaderReadWrite;
 	frame.AddPass(rg::Pass::Compute("LensFlare/Select")
@@ -1271,16 +1305,14 @@ void LensFlarePass::AddPasses(FrameGraph &frame)
 								  }));
 
 	const rg::Access vsRead = rg::Access::VertexShaderRead;
-	frame.AddPass(rg::Pass::Graphics("LensFlare/Draw")
+	frame.AddPass(rg::Pass::Graphics("LensFlare/Ghosts")
 						  .Writes(target)
-						  .Use(lights, vsRead)
 						  .Use(vertices, vsRead)
 						  .Use(apertures, vsRead)
 						  .Use(quads, vsRead)
 						  .Use(args, rg::Access::IndirectArgumentRead)
 						  .Executes(
-								  [this, constantBuffer, target, lights, vertices, apertures, quads, args](
-										  rg::PassContext &ctx)
+								  [this, constantBuffer, target, vertices, apertures, quads, args](rg::PassContext &ctx)
 								  {
 									  RenderContext &rc = ctx.rc;
 									  const Resource renderTarget = ctx.GetResource(target);
@@ -1297,6 +1329,56 @@ void LensFlarePass::AddPasses(FrameGraph &frame)
 									  rc.SetSRVByName("g_Vertices", ctx.Get(vertices));
 									  rc.SetSRVByName("g_Apertures", ctx.Get(apertures));
 									  rc.ExecuteIndirect(drawSignature_, ctx.Get(args), 0, 1);
+								  }));
+
+	if (blurPasses > 0)
+	{
+		auto addBlur = [&](const char *name,
+						   PipelineHandle pipeline,
+						   rg::ResourceId input,
+						   rg::ResourceId blurOutput,
+						   uint2 outputSize)
+		{
+			const uint32_t groupsX = (outputSize.x + 7) / 8;
+			const uint32_t groupsY = (outputSize.y + 7) / 8;
+			frame.AddPass(rg::Pass::Compute(name)
+								  .Reads(input)
+								  .Writes(blurOutput)
+								  .Executes(
+										  [constantBuffer, pipeline, input, blurOutput, groupsX, groupsY](
+												  rg::PassContext &ctx)
+										  {
+											  ctx.rc.SetComputePipeline(pipeline);
+											  ctx.rc.SetComputeConstantBufferByName("g_Constants", constantBuffer);
+											  ctx.rc.SetComputeSRVByName("g_BlurInput", ctx.Get(input));
+											  ctx.rc.SetComputeUAVByName("g_BlurOutput", ctx.Get(blurOutput));
+											  ctx.rc.Dispatch(groupsX, groupsY, 1);
+										  }));
+		};
+		for (int level = 1; level <= blurPasses; ++level)
+		{
+			addBlur("LensFlare/KawaseDown", kawaseDownPipeline_, down[level - 1], down[level], sizes[level]);
+		}
+		for (int level = blurPasses - 1; level >= 0; --level)
+		{
+			const rg::ResourceId input = level == blurPasses - 1 ? down[blurPasses] : up[level + 1];
+			addBlur("LensFlare/KawaseUp", kawaseUpPipeline_, input, up[level], sizes[level]);
+		}
+	}
+
+	// The starbursts are drawn after the blur, so they stay sharp.
+	frame.AddPass(rg::Pass::Graphics("LensFlare/Starbursts")
+						  .Writes(flareTarget)
+						  .Use(lights, vsRead)
+						  .Use(args, rg::Access::IndirectArgumentRead)
+						  .Executes(
+								  [this, constantBuffer, flareTarget, lights, args](rg::PassContext &ctx)
+								  {
+									  RenderContext &rc = ctx.rc;
+									  const Resource renderTarget = ctx.GetResource(flareTarget);
+									  rc.SetRenderTargets(&renderTarget, 1);
+									  rc.SetViewport(Viewport{ 0, 0, flareWidth_, flareHeight_, 0.0f, 1.0f });
+									  rc.SetScissorRect(ScissorRect{ 0, 0, flareWidth_, flareHeight_ });
 
 									  rc.SetGraphicsPipeline(starburstPipeline_);
 									  rc.SetPrimitiveTopology(PrimitiveTopology::TriangleList);
@@ -1307,14 +1389,14 @@ void LensFlarePass::AddPasses(FrameGraph &frame)
 								  }));
 
 	frame.AddPass(rg::Pass::Compute("LensFlare/Composite")
-						  .Reads(target)
+						  .Reads(flareTarget)
 						  .Use(output, rw)
 						  .Executes(
-								  [this, constantBuffer, target, output](rg::PassContext &ctx)
+								  [this, constantBuffer, flareTarget, output](rg::PassContext &ctx)
 								  {
 									  ctx.rc.SetComputePipeline(compositePipeline_);
 									  ctx.rc.SetComputeConstantBufferByName("g_Constants", constantBuffer);
-									  ctx.rc.SetComputeSRVByName("g_Flare", ctx.Get(target));
+									  ctx.rc.SetComputeSRVByName("g_Flare", ctx.Get(flareTarget));
 									  ctx.rc.SetComputeUAVByName("g_Output", ctx.Get(output));
 									  ctx.rc.Dispatch((width_ + 7) / 8, (height_ + 7) / 8, 1);
 								  }));
