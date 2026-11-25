@@ -201,6 +201,30 @@ struct ReferenceSettings
 	uint restartCount = 0;
 };
 
+// Lens flare (LensFlarePass): ghosts traced through a real lens prescription and the iris's diffraction starburst,
+// for the brightest lights the camera sees.
+struct LensFlareSettings
+{
+	bool enabled = true;
+	int lens = 0; // LensFlarePass::GetLensName; 0 = the double Gauss 50 mm
+	// A light flares only while its irradiance at the lens, exposed as the image is, has at least this luminance; the
+	// flare fades in up to twice it.
+	float minIntensity = 0.001f;
+	// Past minIntensity a flare grows only as (brightness / minIntensity)^compression: 1 = physical, lower evens out
+	// the sun and the brightest lights against dimmer ones. It never brightens a flare.
+	float compression = 1.0f;
+	int maxLights = 16; // 1 to FLARE_MAX_LIGHTS, the brightest first
+	float fNumber = 4.0f; // the iris: smaller ghosts and a larger starburst as it closes
+	int apertureBlades = 11; // 0 = a round iris, at most 32
+	float ghostIntensity = 1.1f; // 1 = the lens's own reflections, which are faint beside anything but the sun
+	// How far inside its edge a ghost fades, as a share of the iris: the light's own size blurs every ghost's outline.
+	float ghostSoftness = 0.08f;
+	// Each ghost's size about its centre, 1 = the lens's own; smaller ghosts are brighter, so each keeps its light.
+	float ghostSize = 0.2f;
+	float starburstIntensity = 0.001f; // the share of the light's irradiance in the starburst
+	float starburstSize = 0.01f; // half the starburst's side as a fraction of half the screen's height, at f/8
+};
+
 // Everything the UI can tweak; passes read it every frame.
 struct RenderSettings
 {
@@ -303,6 +327,8 @@ struct RenderSettings
 	float bloomStrength = 0.1f;
 	int bloomLevels = 6; // 1 to kMaxBloomLevels, each doubles the radius
 	bool bloomSun = false;
+
+	LensFlareSettings lensFlare;
 
 	// Film grain, added after tone mapping in display-encoded space.
 	bool filmGrain = true;

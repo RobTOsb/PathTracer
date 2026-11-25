@@ -199,6 +199,135 @@ struct FrameConstants
 	// reaches the sky.
 	uint skyImportance;
 	float skySelectProbability;
+
+	// Lens flare (LensFlarePass): FlareRayGen measures flareCandidateCount candidate lights at the camera, reading
+	// GpuFlareCandidate and GpuFlareSample (SRVs) and writing GpuFlareResult (a UAV), all descriptor heap indices.
+	uint flareCandidates;
+	uint flareSamples;
+	uint flareResults;
+	uint flareCandidateCount;
+};
+
+// Lens flare after Hullin et al., "Physically-Based Real-Time Lens Flare Rendering" (SIGGRAPH 2011). FlareRayGen
+// measures each candidate light's irradiance at the camera through the scene's shadow rays; LensFlare.slang keeps the
+// brightest few, traces a grid of rays from each through a lens prescription for every two-reflection ghost, and
+// rasterises the grids, with the aperture's diffraction starburst on top.
+#define FLARE_MAX_CANDIDATES 4096
+#define FLARE_MAX_SAMPLES 16 // shadow rays per candidate
+#define FLARE_MAX_LIGHTS 16
+#define FLARE_MAX_SURFACES 40
+#define FLARE_MAX_GHOSTS 64
+#define FLARE_WAVELENGTHS 3 // a ghost is traced and drawn once per colour channel, at its own wavelength
+#define FLARE_GRID 32 // quads per side of a ghost's ray grid
+#define FLARE_GRID_VERTICES ((FLARE_GRID + 1) * (FLARE_GRID + 1))
+#define FLARE_SELECT_GROUP 1024
+#define FLARE_TRACE_GROUP 256
+#define FLARE_SUN_LIGHT 0xFFFFFFFF // GpuFlareSample::light of the sun disc's samples
+#define FLARE_SURFACE_STOP 1 // GpuFlareSurface::flags: the aperture stop, a plane that only clips
+
+// A light the flare may come from: its samples in the sample buffer.
+struct GpuFlareCandidate
+{
+	uint firstSample;
+	uint sampleCount;
+	uint pad0;
+	uint pad1;
+};
+
+// One shadow ray of a candidate: towards a point on a light of the light buffer (u picks it on a triangle), or with
+// light == FLARE_SUN_LIGHT towards the sun disc (u on the disc). weight: the sample's share of the light, so that
+// the weighted sum estimates the whole light's irradiance.
+struct GpuFlareSample
+{
+	uint light;
+	float weight;
+	float2 u;
+};
+
+// FlareRayGen's measurement of a candidate: irradiance.rgb at the camera through the scene, and direction.xyz the
+// directions of its visible samples weighted by their luminance (zero when nothing is seen).
+struct GpuFlareResult
+{
+	float4 direction;
+	float4 irradiance;
+};
+
+// A light the flare is drawn for this frame (LensFlare.slang Select).
+struct GpuFlareLight
+{
+	float2 screenTan; // the light's direction in the camera's (right, up) tangent plane: x / z, y / z
+	float exposure; // the frame's exposure, for culling invisible quads
+	float cosAngle; // between the light and the optical axis
+	float3 irradiance; // at the lens, faded out towards the intensity threshold
+	float exposedLuminance;
+};
+
+// A lens surface (or the aperture stop), front to back along +z in millimetres. radius > 0: the centre of curvature
+// lies behind the vertex (towards the sensor), 0: a plane.
+struct GpuFlareSurface
+{
+	float z;
+	float radius;
+	float nBefore; // refractive index in front of the surface
+	float nAfter;
+	float semiAperture;
+	float coatingThickness; // quarter-wave anti-reflection coating, nm; 0 = bare (cemented) interface
+	float coatingIor;
+	uint flags; // FLARE_SURFACE_STOP
+};
+
+// A ghost: light reflected back at surface first (the later one), then forward again at surface second.
+struct GpuFlareGhost
+{
+	uint first;
+	uint second;
+	float pad0;
+	float pad1;
+};
+
+// LensFlare.slang's constant buffer (g_Constants).
+struct LensFlareConstants
+{
+	float3 cameraRight;
+	float tanHalfFovX;
+	float3 cameraUp;
+	float tanHalfFovY;
+	float3 cameraFront;
+	float threshold; // exposed luminance of a light's irradiance at the lens below which it has no flare
+
+	uint candidateCount;
+	uint maxLights;
+	uint ghostCount;
+	uint surfaceCount;
+
+	float entranceZ; // where the ray grid starts, in front of the first surface
+	float entranceRadius; // half the grid's side
+	float sensorZ;
+	float focalLength;
+
+	float pupilArea; // the entrance pupil's area, mm^2, which the main image's light comes through
+	float stopRadius; // the aperture stop's circumradius at the current f-number
+	float ghostIntensity;
+	float starburstIntensity;
+
+	float starburstHalfSize; // tangent-plane half side of the starburst quad
+	uint blades; // aperture blades, 0 = round
+	float bladeRotation; // radians
+	float minVisible; // exposed radiance below which a ghost quad is not drawn
+
+	uint outputWidth;
+	uint outputHeight;
+	float2 flareTexelSize; // 1 / the half resolution flare target's size
+
+	uint quadCapacity;
+	float ghostSoftness; // how far inside a ghost's iris and rim edges it fades, in the iris's units
+	float fieldScale; // the lens's tangent per screen tangent: the screen's height is the sensor's
+	float ghostScale; // each ghost's size about its centre, 1 = the lens's own
+
+	float compression; // exponent on a light's brightness over the threshold, 1 = physical
+	uint pad0;
+	uint pad1;
+	uint pad2;
 };
 
 // Path-traced subsurface scattering (FrameConstants::subsurfaceComponents): which orders of
@@ -699,7 +828,10 @@ struct AutoExposureConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
-static_assert(sizeof(FrameConstants) == 880,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 896,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(GpuFlareLight) == 32 && sizeof(GpuFlareSurface) == 32 && sizeof(GpuFlareResult) == 32,
+			  "Lens flare structs must match their structured buffer strides");
+static_assert(sizeof(LensFlareConstants) % 16 == 0, "LensFlareConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(BloomConstants) <= 16 * 4, "BloomConstants must fit the 16 root constants of a generated root signature");
 static_assert(sizeof(GpuMaterial) == 152,"GpuMaterial must match the structured buffer stride");
 static_assert(sizeof(GpuVertex) == 48 && offsetof(GpuVertex, position) == 0,

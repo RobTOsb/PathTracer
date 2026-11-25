@@ -2,6 +2,7 @@
 
 #include "Camera.h"
 #include "FrameGraph.h"
+#include "LensFlarePass.h"
 #include "LightTreeInterop.h"
 #include "PathTracerPass.h"
 #include "RenderContext.h"
@@ -1111,6 +1112,44 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::SetItemTooltip("Half-resolution levels averaged into the bloom, each twice as blurry as the last");
 		ImGui::Checkbox("Bloom the sun", &settings_.bloomSun);
 		ImGui::SetItemTooltip("Off: the sun disc seen directly is left out of the bloom, its reflections still bloom");
+		ImGui::EndDisabled();
+
+		LensFlareSettings &flare = settings_.lensFlare;
+		ImGui::Checkbox("Lens flare", &flare.enabled);
+		ImGui::SetItemTooltip("Ghosts traced through a real lens prescription and the iris's diffraction starburst, "
+							  "for the brightest lights in view");
+		ImGui::BeginDisabled(!flare.enabled);
+		ImGui::Combo(
+				"Flare lens",
+				&flare.lens,
+				[](void *, int index) { return LensFlarePass::GetLensName(index); },
+				nullptr,
+				LensFlarePass::GetLensCount());
+		ImGui::SetItemTooltip("The lens the ghosts are traced through: its focal length, open f-number and (surface "
+							  "count). More surfaces give more ghosts; long lenses give small, tight ones. The f-number "
+							  "slider cannot open a lens past its own");
+		ImGui::SliderFloat("Flare min intensity", &flare.minIntensity, 0.001f, 100.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("A light flares only once its irradiance at the lens, exposed like the image, reaches this "
+							  "luminance; it fades in up to twice it. Occluded lights are dimmed first");
+		ImGui::SliderFloat("Flare compression", &flare.compression, 0.0f, 1.0f, "%.2f");
+		ImGui::SetItemTooltip("How a flare grows with its light's brightness past the minimum intensity: 1 = in "
+							  "proportion, 0.5 = as its square root, 0 = every flare as bright as one at the minimum");
+		ImGui::SliderInt("Flare max lights", &flare.maxLights, 1, FLARE_MAX_LIGHTS);
+		ImGui::SetItemTooltip("The brightest lights above the minimum that get a flare; each costs about the same");
+		ImGui::SliderFloat("Flare f-number", &flare.fNumber, 2.0f, 16.0f, "f/%.1f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Closing the iris clips the ghosts smaller and spreads the starburst wider");
+		ImGui::SliderInt("Iris blades", &flare.apertureBlades, 0, 32);
+		ImGui::SetItemTooltip("The iris polygon the ghosts and the starburst take their shape from, below 3 = round");
+		ImGui::SliderFloat("Ghost intensity", &flare.ghostIntensity, 0.0f, 100.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("1 = what the lens's coated surfaces reflect");
+		ImGui::SliderFloat("Ghost size", &flare.ghostSize, 0.05f, 1.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Each ghost's size about its centre, 1 = what the lens gives; smaller ghosts are brighter");
+		ImGui::SliderFloat("Ghost softness", &flare.ghostSoftness, 0.0f, 0.5f, "%.3f");
+		ImGui::SetItemTooltip("How far inside its edge each ghost fades, as a share of the iris; 0 = sharp outlines");
+		ImGui::SliderFloat("Starburst intensity", &flare.starburstIntensity, 0.0f, 4.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Share of the light's irradiance spread into the starburst");
+		ImGui::SliderFloat("Starburst size", &flare.starburstSize, 0.05f, 2.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Half the starburst's side over half the screen's height, at f/8; it scales with the f-number");
 		ImGui::EndDisabled();
 
 		ImGui::Checkbox("Film grain", &settings_.filmGrain);

@@ -1155,6 +1155,55 @@ void FogGuides(inout PrimaryGuides guides, float3 cameraOrigin)
 
 // Entry points
 
+// Lens flare (LensFlarePass): one candidate light per thread, its irradiance at the camera measured with the same
+// shadow rays as next event estimation, so glass bulbs, alpha-tested leaves and clouds dim it as they dim the light
+// it casts. The samples are fixed (GpuFlareSample), so a still view gives the same result every frame. The direction
+// is the luminance-weighted mean of the visible samples', following the part of a large light that can be seen.
+[shader("raygeneration")]
+void FlareRayGen()
+{
+#ifdef OPACITY_MICROMAPS
+    AllowOpacityMicromapsInRayQueries();
+#endif
+    uint index = DispatchRaysIndex().x;
+    if (index >= g_Frame.flareCandidateCount)
+        return;
+    StructuredBuffer<GpuFlareCandidate> candidates = ResourceDescriptorHeap[g_Frame.flareCandidates];
+    StructuredBuffer<GpuFlareSample> samples = ResourceDescriptorHeap[g_Frame.flareSamples];
+    RWStructuredBuffer<GpuFlareResult> results = ResourceDescriptorHeap[g_Frame.flareResults];
+
+    GpuFlareCandidate candidate = candidates[index];
+    float3 origin = g_Frame.invView[3].xyz;
+    float3 irradiance = float3(0.0, 0.0, 0.0);
+    float3 direction = float3(0.0, 0.0, 0.0);
+    uint count = min(candidate.sampleCount, kFlareMaxSamples);
+    for (uint s = 0; s < count; ++s)
+    {
+        GpuFlareSample sample = samples[candidate.firstSample + s];
+        LightSample ls;
+        if (sample.light == kFlareSunLight)
+        {
+            ls = SampleSun(origin, sample.u);
+        }
+        else
+        {
+            ls = SampleBufferLight(g_Lights[sample.light], origin, sample.u);
+            ls.radiance *= LightEmissionScale(sample.light);
+        }
+        if (ls.pdf <= 0.0 || all(ls.radiance <= 0.0))
+            continue;
+        float3 visibility = TraceShadowRay(origin, ls.direction, ls.distance);
+        float3 contribution = ls.radiance * visibility * (sample.weight / ls.pdf);
+        irradiance += contribution;
+        direction += ls.direction * dot(contribution, float3(0.2126, 0.7152, 0.0722));
+    }
+
+    GpuFlareResult result;
+    result.direction = float4(direction, 0.0);
+    result.irradiance = float4(irradiance, 0.0);
+    results[index] = result;
+}
+
 // Caustic photons from the sun's photon map into the photon records (PathTracer/Photons.slang), one per thread, rows of
 // PHOTON_DISPATCH_WIDTH. Neighbouring indices start next to each other (EmitSunPhoton), so a wave's rays are coherent.
 [shader("raygeneration")]

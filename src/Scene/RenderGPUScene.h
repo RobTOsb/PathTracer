@@ -352,6 +352,25 @@ public:
 		return static_cast<uint32_t>(punctualLights_.size());
 	}
 
+	// The light buffer's emissive triangles in its order (the dynamic ones at rest), with their flux scales (the
+	// average of an emissive texture over the triangle).
+	std::span<const GpuLight> GetTriangleLights() const
+	{
+		return emissiveLights_;
+	}
+
+	std::span<const float> GetTriangleLightFluxScales() const
+	{
+		return emissiveFluxScales_;
+	}
+
+	// Per light of the light buffer, its emission scale slot: a triangle light's emissive instance, then one slot per
+	// punctual light.
+	std::span<const uint32_t> GetLightEmitterSlots() const
+	{
+		return lightEmitters_;
+	}
+
 	// Levels of node groups every light is under in the last tree.
 	uint32_t GetLightTreeDepth() const
 	{

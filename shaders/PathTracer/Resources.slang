@@ -44,6 +44,8 @@ static const uint PHOTON_MAP_BLOCKS = kPhotonMapBlocks;
 static const uint PHOTON_RECORD_CAPACITY = kPhotonRecordCapacity;
 static const uint PHOTON_NO_RECEIVER = kPhotonNoReceiver;
 static const float PHOTON_HIT_SCALE = kPhotonHitScale;
+static const uint kFlareSunLight = FLARE_SUN_LIGHT;
+static const uint kFlareMaxSamples = FLARE_MAX_SAMPLES;
 
 ConstantBuffer<FrameConstants> g_Frame : register(b0);
 RaytracingAccelerationStructure g_Scene : register(t0);

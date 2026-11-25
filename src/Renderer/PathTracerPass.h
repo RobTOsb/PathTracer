@@ -97,6 +97,22 @@ public:
 		exposure_[1] = odd;
 	}
 
+	// The lights LensFlarePass may draw a flare for, whose irradiance at the camera FlareRayGen measures after the
+	// paths (the "LensFlare/Visibility" graph pass, while RenderSettings::lensFlare is on). candidates and samples are
+	// static SRVs, results a persistent UAV, all read through FrameConstants by descriptor.
+	struct FlareVisibility
+	{
+		ResourceHandle candidates = InvalidResourceHandle; // GpuFlareCandidate
+		ResourceHandle samples = InvalidResourceHandle; // GpuFlareSample
+		ResourceHandle results = InvalidResourceHandle; // GpuFlareResult per candidate
+		uint32_t candidateCount = 0;
+	};
+
+	void SetFlareVisibility(const FlareVisibility &flare)
+	{
+		flare_ = flare;
+	}
+
 	// The sub-pixel offset of this frame's camera rays from the pixel centre, in render pixels
 	// with +y down. Zero without ray reconstruction.
 	float2 GetJitter() const
@@ -148,6 +164,7 @@ private:
 		PipelineHandle pipeline = InvalidPipelineHandle;
 		ShaderTableHandle shaderTable = InvalidShaderTableHandle;
 		ShaderTableHandle photonShaderTable = InvalidShaderTableHandle; // PhotonRayGen with the same hit groups
+		ShaderTableHandle flareShaderTable = InvalidShaderTableHandle; // FlareRayGen, likewise
 		bool opacityMicromaps = false; // traces the scene's micromap TLAS
 	};
 
@@ -197,6 +214,7 @@ private:
 	ResourceHandle psrOutcome_ = InvalidResourceHandle;
 	ResourceHandle cameraState_ = InvalidResourceHandle; // GpuCameraState per pixel, DLSS-RR only
 	ResourceHandle exposure_[2] = { InvalidResourceHandle, InvalidResourceHandle };
+	FlareVisibility flare_;
 
 	// Caustic photons (created on first use): the photon map's shares (two, last frame's and this one's), running sums,
 	// feedback and coverage (and its sums, two), the photon records, and per pixel the receivers and the splatted

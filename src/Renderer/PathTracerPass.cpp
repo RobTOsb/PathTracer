@@ -181,7 +181,7 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 														 bool sgLightTree) const
 {
 	RaytracingPipelineDesc desc = {};
-	desc.exports = { "RayGen", "PhotonRayGen", "Miss", "ClosestHit", "AnyHit" };
+	desc.exports = { "RayGen", "PhotonRayGen", "FlareRayGen", "Miss", "ClosestHit", "AnyHit" };
 	desc.hitGroups = { RaytracingHitGroup{ "HitGroup", "ClosestHit", "AnyHit", "" } };
 	// Inline shadow rays are ray queries, so that permutation has no shadow shaders.
 	if (!inlineShadows)
@@ -238,7 +238,7 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 		return result;
 	}
 
-	// The paths' table and the photons', which differ only in their ray generation shader.
+	// The paths' table, the photons' and the lens flare's, which differ only in their ray generation shader.
 	auto createTable = [&](const char *rayGen)
 	{
 		ShaderTableHandle table = renderContext_->CreateShaderTable(result.pipeline);
@@ -256,6 +256,7 @@ PathTracerPass::Pipeline PathTracerPass::CreatePipeline(bool shaderExecutionReor
 	};
 	result.shaderTable = createTable("RayGen");
 	result.photonShaderTable = createTable("PhotonRayGen");
+	result.flareShaderTable = createTable("FlareRayGen");
 	return result;
 }
 
@@ -772,6 +773,11 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 	constants.skyImportance = INVALIDDESCRIPTORHANDLE;
 	constants.skySelectProbability = environmentProbability * skyShare;
 	constants.sunSelectProbability = sunActive ? environmentProbability - constants.skySelectProbability : 0.0f;
+	const bool flare = settings_.lensFlare.enabled && flare_.candidateCount > 0;
+	constants.flareCandidates = flare ? renderContext->GetResourceViewInfo(flare_.candidates).descriptorIndex : INVALIDDESCRIPTORHANDLE;
+	constants.flareSamples = flare ? renderContext->GetResourceViewInfo(flare_.samples).descriptorIndex : INVALIDDESCRIPTORHANDLE;
+	constants.flareResults = flare ? renderContext->GetResourceViewInfo(flare_.results).descriptorIndex : INVALIDDESCRIPTORHANDLE;
+	constants.flareCandidateCount = flare ? flare_.candidateCount : 0;
 	constants.lightTreeGlossyBounces = static_cast<uint>(std::max(lights.glossyImportanceBounces, 0));
 	constants.lightTreeFarFieldSharpness = lights.farFieldImportance ? lights.farFieldSharpness : FLT_MAX;
 	constants.lightTreeDiffuseOnlyAlpha = lights.diffuseOnlyRoughLobes
@@ -1109,6 +1115,22 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 				BindRaytracing(ctx, *pipeline, constantBuffer, atmosphere);
 				ctx.rc.DispatchRays(pipeline->shaderTable, width_, height_, 1);
 			})));
+
+	// The lens flare's candidate lights measured at the camera through the scene, for LensFlarePass. Like the photon
+	// trace it binds the paths' targets without using them.
+	if (flare)
+	{
+		rg::Pass visibility = rg::Pass::Compute("LensFlare/Visibility");
+		useScene(visibility);
+		frame.UseBuffer(visibility, flare_.results, "LensFlare_Results", rtWrite);
+		frame.AddPass(std::move(visibility.Executes(
+				[this, pipeline, constantBuffer, atmosphere, writeConstants, count = flare_.candidateCount](rg::PassContext &ctx)
+				{
+					writeConstants(ctx.rc);
+					BindRaytracing(ctx, *pipeline, constantBuffer, atmosphere);
+					ctx.rc.DispatchRays(pipeline->flareShaderTable, count, 1, 1);
+				})));
+	}
 
 	// The photons splatted onto the receivers the paths marked, and added to the output.
 	if (photonPasses)

@@ -12,6 +12,7 @@ add_executable(PathTracer
     Renderer/GuideViewPass.cpp
     Renderer/AutoExposurePass.cpp
     Renderer/BloomPass.cpp
+    Renderer/LensFlarePass.cpp
     Renderer/TonemapPass.cpp
     Renderer/ImGuiPass.cpp
 )

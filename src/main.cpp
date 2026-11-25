@@ -11,6 +11,7 @@
 #include "Renderer/FrameGraph.h"
 #include "Renderer/GuideViewPass.h"
 #include "Renderer/ImGuiPass.h"
+#include "Renderer/LensFlarePass.h"
 #include "Renderer/PathTracerPass.h"
 #include "Renderer/RenderPass.h"
 #include "Renderer/RenderSettings.h"
@@ -76,7 +77,7 @@ static float QueryDisplayPeakNits(void *hwnd)
 //constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\crown\\gltf\\crown_extended.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\TransmissionThinwallTestGrid\\glTF-Binary\\TransmissionThinwallTestGrid.glb";
-//constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
+constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
 //constexpr const char *kDefaultScenePath = "h:\\suntemple.glb";
 //constexpr const char *kDefaultScenePath = "h:\\AbandonedRoom.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\SubsurfaceScene\\scene.gltf";
@@ -90,7 +91,7 @@ static float QueryDisplayPeakNits(void *hwnd)
 //constexpr const char *kDefaultScenePath = "h:\\AncientCathedral.glb";
 //constexpr const char *kDefaultScenePath = "h:\\DarkFantasyChurch.glb";
 //constexpr const char *kDefaultScenePath = "h:\\SubwayStation.glb";
-constexpr const char *kDefaultScenePath = "h:\\VintageBar.glb";
+//constexpr const char *kDefaultScenePath = "h:\\VintageBar.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PineForest\\PineForest.gltf";
 
 constexpr uint kFramesInFlight = 2;
@@ -260,6 +261,10 @@ BuiltPasses BuildPasses(RenderContext *renderContext,
 	auto bloom = std::make_unique<BloomPass>(renderContext, radiance, exposure, camera, settings);
 	const BloomPass &bloomPass = *bloom;
 	passes.push_back(std::move(bloom));
+	// The lens flare adds onto bloom's output; the path tracer measures its lights after the paths.
+	auto lensFlare = std::make_unique<LensFlarePass>(renderContext, gpuScene, bloomPass, exposure, camera, settings);
+	pathTracerPass.SetFlareVisibility(lensFlare->GetVisibility());
+	passes.push_back(std::move(lensFlare));
 	passes.push_back(std::make_unique<TonemapPass>(renderContext, bloomPass, exposure, settings));
 	if (rayReconstruction)
 	{
