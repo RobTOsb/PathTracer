@@ -206,6 +206,15 @@ struct FrameConstants
 	uint flareSamples;
 	uint flareResults;
 	uint flareCandidateCount;
+
+	// DLSS_RR: the motion of skinned vertices, which the object motion (g_PreviousTransforms) misses. Bindless SRVs,
+	// INVALIDDESCRIPTORHANDLE without skinned primitives (RenderGPUScene::GetSkinnedPrimitiveBaseBuffer and
+	// ::GetPreviousSkinnedPositionBuffer): per primitive row (InstanceID() + GeometryIndex()) a uint, 1 + its first
+	// skinned vertex or 0 when no skin deforms it (rows past the table read 0); per skinned vertex a float4, its
+	// object-space position as last frame traced it.
+	uint skinnedPrimitiveBases;
+	uint previousSkinnedPositions;
+	uint2 padSkinned;
 };
 
 // Lens flare after Hullin et al., "Physically-Based Real-Time Lens Flare Rendering" (SIGGRAPH 2011). FlareRayGen
@@ -831,7 +840,7 @@ struct AutoExposureConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
-static_assert(sizeof(FrameConstants) == 896,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 912,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuFlareLight) == 32 && sizeof(GpuFlareSurface) == 32 && sizeof(GpuFlareResult) == 32,
 			  "Lens flare structs must match their structured buffer strides");
 static_assert(sizeof(LensFlareConstants) % 16 == 0, "LensFlareConstants must match the HLSL cbuffer layout");

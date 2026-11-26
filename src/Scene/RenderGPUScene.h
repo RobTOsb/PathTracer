@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Animation.h"
+#include "Animation/AnimationData.h"
 #include "GPUScene.h"
 #include "RenderContext.h"
 
@@ -85,16 +85,34 @@ public:
 
 	void SetMergeInstances(bool merge);
 
-	// The scene's glTF animations, which play together: whether there are any, and the time of the last key
-	// of any (they loop over it).
-	bool HasAnimation() const
+	// The scene's glTF animations and skins, with the vertices the skins deform, as tables for an
+	// Animation::AnimationSystem. Valid until the scene loads again.
+	Animation::AnimationData GetAnimationData() const;
+
+	// Moves the scene to a pose an Animation::AnimationSystem evaluated from GetAnimationData(). The instances it
+	// places are the dynamic ones: their TLAS instances follow at the next AddAccelerationStructurePasses and their
+	// lights at the next UpdateLights. The skinned vertices go to the vertex buffer and their BLASes are rebuilt at the
+	// next AddAccelerationStructurePasses. The cameras and punctual lights on posed nodes follow at once.
+	void ApplyAnimationPose(const Animation::Pose &pose);
+
+	// Primitives a skin deforms, which keep a BLAS of their own that is rebuilt for every new pose.
+	uint32_t GetSkinnedPrimitiveCount() const
 	{
-		return !animationChannels_.empty();
+		return static_cast<uint32_t>(skinnedPrimitives_.size());
 	}
 
-	float GetAnimationDuration() const
+	// For the motion vectors of skinned vertices (FrameConstants::skinnedPrimitiveBases), invalid without skins: per
+	// primitive desc a uint, 1 + its first skinned vertex or 0; and, this frame's after AddAccelerationStructurePasses,
+	// per skinned vertex its object-space position last frame (float4). Upload heap buffers with SRVs.
+	ResourceHandle GetSkinnedPrimitiveBaseBuffer() const
 	{
-		return animationDuration_;
+		return skinnedPrimitiveBases_;
+	}
+
+	ResourceHandle GetPreviousSkinnedPositionBuffer() const
+	{
+		return previousSkinnedPositions_.empty() ? InvalidResourceHandle
+												 : previousSkinnedPositions_[previousTransformFrame_];
 	}
 
 	// The scene's perspective glTF cameras: the first an animation moves is the one the view can follow while
@@ -112,7 +130,7 @@ public:
 		return FindAnimatedCamera() != UINT32_MAX;
 	}
 
-	// As the last Animate posed it.
+	// As the last ApplyAnimationPose posed it.
 	CameraPose GetAnimatedCameraPose() const
 	{
 		return PoseOf(sceneCameras_[FindAnimatedCamera()]);
@@ -121,12 +139,7 @@ public:
 	uint32_t GetStillCameraCount() const;
 	CameraPose GetStillCameraPose(uint32_t still) const; // still < GetStillCameraCount(), in node order
 
-	// Poses the animated nodes at this many seconds into the animations. The scene instances they move are
-	// the dynamic ones: their TLAS instances follow at the next UpdateAccelerationStructures and their lights
-	// at the next UpdateLights.
-	void Animate(float seconds);
-
-	// The scene instances an animation moves, through their own node or a parent.
+	// The scene instances an animation or a skin moves, through their own node or a parent.
 	uint32_t GetDynamicInstanceCount() const
 	{
 		return static_cast<uint32_t>(dynamicInstances_.size());
@@ -153,8 +166,10 @@ public:
 	void SetEmissionScale(uint32_t emissiveInstance, float scale);
 
 	// Picks the current frame's set of TLASes and keeps last frame's transforms for the motion vectors, and adds the
-	// Scene/TLAS update pass, which rebuilds the set, if the dynamic instances have moved since it was last built.
-	// Call once per frame while recording the graph, before any pass that traces.
+	// Scene/TLAS update pass, which rebuilds the set, if the dynamic instances have moved since it was last built. With
+	// skinned primitives, a new pose's vertices are copied into the vertex buffer first (Scene/Skinned vertices) and
+	// the TLAS update pass rebuilds their BLASes before the TLASes. Call once per frame while recording the graph,
+	// after BeginFrame (which frees the current frame's upload buffers), before any pass that traces.
 	void AddAccelerationStructurePasses(FrameGraph &frame);
 
 	// Per TLAS instance (InstanceIndex()), last frame's object-to-world transform as three float4 rows of
@@ -484,40 +499,14 @@ private:
 	void BuildInstanceStructures();
 	void DestroyInstanceStructures();
 
-	// A node an animation moves, through its own channels or a parent's. The table lists parents before
-	// their children.
-	struct AnimatedNode
-	{
-		uint32_t parent; // into animatedNodes_, or kStaticParent for a parent that does not move
-		uint32_t instance; // into instances, or UINT32_MAX for a node without a mesh
-		// The local transform at rest, in parts for the channels to replace, and whole for nodes without any.
-		float translation[3];
-		float rotation[4]; // quaternion xyzw
-		float scale[3];
-		float localMatrix[12];
-		float parentMatrix[12]; // the world matrix of a parent that does not move, identity for a root
-	};
-	static constexpr uint32_t kStaticParent = UINT32_MAX;
-
 	struct SceneCamera
 	{
-		float worldMatrix[12]; // at rest, then as Animate last posed it
+		float worldMatrix[12]; // at rest, then as ApplyAnimationPose last posed it
 		float yFov; // radians
 		uint32_t animatedNode; // into animatedNodes_, or UINT32_MAX for a camera that does not move
 	};
 	static CameraPose PoseOf(const SceneCamera &camera);
 	uint32_t FindAnimatedCamera() const; // into sceneCameras_, UINT32_MAX for none
-
-	// A glTF animation channel, its keys in animationTimes_ and animationValues_ (see Scene::SampleAnimation).
-	struct AnimationChannel
-	{
-		uint32_t node; // into animatedNodes_
-		Scene::AnimationPath path;
-		Scene::AnimationInterpolation interpolation;
-		uint32_t keyCount;
-		uint32_t firstTime;
-		uint32_t firstValue;
-	};
 
 	void UploadStreams(UploadBatchHandle batch);
 	void BuildMaterials(const Scene::GLTFScene &scene, UploadBatchHandle &batch, std::vector<GpuMaterial> &materials);
@@ -561,10 +550,13 @@ private:
 	void ComputeBounds(const Scene::GLTFScene &scene);
 	// Returns each node's scene instance, UINT32_MAX for those without a mesh.
 	std::vector<uint32_t> FillInstances(const Scene::GLTFScene &scene);
-	// Fills the animation tables from the glTF's animations, and the cameras and punctual lights, which may move.
+	// Fills the animation tables from the glTF's animations and skins, and the cameras and punctual lights, which may
+	// move. Call after the primitive descs are made.
 	void BuildAnimation(const Scene::GLTFScene &scene, const std::vector<uint32_t> &instanceOfNode);
-	// From the animation tables, their duration and the dynamic instances. Call before PartitionDynamicLights.
+	// From the animation tables, the dynamic instances and the skinned primitives' bind vertices. Call while the
+	// vertices are staged, before PartitionDynamicLights.
 	void PrepareAnimation();
+	void DestroySkinUploads();
 	void DestroyLights();
 	// The light buffer and the dynamic lights' object-space tables. Only while the GPU is idle.
 	void CreateLightBuffers(std::span<const GpuLight> punctualLights);
@@ -657,7 +649,7 @@ private:
 	{
 		float3 intensity; // candela, colour times intensity
 		float range; // 0 = infinite
-		float3 position; // world space, at rest, then as Animate last posed it
+		float3 position; // world space, at rest, then as ApplyAnimationPose last posed it
 		uint32_t animatedNode; // into animatedNodes_, or UINT32_MAX for a light that does not move
 		float3 direction; // spot only: world space, the way the cone points (the node's -Z), posed like position
 		uint32_t spot; // 1 for a spot light, 0 for a point light
@@ -668,12 +660,30 @@ private:
 	float3 punctualLightBoundsMin_ = {};
 	float3 punctualLightBoundsMax_ = {};
 
-	// The animations, kept in the scene cache.
-	std::vector<AnimatedNode> animatedNodes_;
-	std::vector<AnimationChannel> animationChannels_;
+	// The animation system's tables (Animation::AnimationData), kept in the scene cache: the nodes it poses, the
+	// channels that move them, and the skins with their joints and the influences on each skinned vertex.
+	std::vector<Animation::Node> animatedNodes_;
+	std::vector<Animation::Channel> animationChannels_;
 	std::vector<float> animationTimes_;
 	std::vector<float> animationValues_;
-	float animationDuration_ = 0.0f;
+	std::vector<Animation::Skin> skins_;
+	std::vector<Animation::Joint> skinJoints_;
+	std::vector<Animation::SkinnedPrimitive> skinnedPrimitives_; // in instance order
+	std::vector<Animation::VertexInfluence> skinInfluences_;
+	// Per skinned vertex, from the staged vertices: its bind pose for the animation system, and its row as the vertex
+	// buffer holds it, which ApplyAnimationPose moves to the pose and AddAccelerationStructurePasses uploads.
+	std::vector<Animation::SkinVertex> skinBindVertices_;
+	std::vector<GpuVertex> skinnedVertices_;
+	std::vector<uint8_t> primitiveSkinned_; // per primitive desc
+	uint32_t skinPoseGeneration_ = 0; // counts the poses ApplyAnimationPose has given the skinned vertices
+	uint32_t skinUploadGeneration_ = 0; // the pose the vertex buffer and the skinned BLASes hold
+	std::vector<ResourceHandle> skinUploads_; // per frame in flight, skinnedVertices_ in an upload heap
+	ResourceHandle skinnedPrimitiveBases_ = InvalidResourceHandle; // GetSkinnedPrimitiveBaseBuffer's
+	std::vector<ResourceHandle> previousSkinnedPositions_; // per frame in flight, GetPreviousSkinnedPositionBuffer's
+	// Per skinned vertex, its object-space position as the last frame traced it; valid once a frame has.
+	std::vector<float4> skinnedLastFramePositions_;
+	bool skinnedLastFrameValid_ = false;
+	std::vector<AccelerationStructureHandle> skinnedBlases_; // blases_ of the skinned primitives, never compacted
 	std::vector<SceneCamera> sceneCameras_; // every perspective camera, in node order
 
 	// The scene instances that move, and the lights of their triangles.
@@ -688,7 +698,7 @@ private:
 	std::vector<std::array<float3, 2>> dynamicObjectLightBounds_;
 	bool dynamicLightsMoved_ = false;
 	uint32_t dynamicLightPose_ = 0; // counts the moves of the dynamic lights
-	uint32_t dynamicPoseGeneration_ = 0; // counts the poses Animate has moved the dynamic instances to
+	uint32_t dynamicPoseGeneration_ = 0; // counts the poses ApplyAnimationPose has moved the dynamic instances to
 
 	std::vector<LightFrameBuffers> lightFrames_;
 	uint32_t lightFrame_ = 0;
@@ -739,6 +749,7 @@ private:
 		ResourceHandle ommTlasSRV = InvalidResourceHandle;
 		ResourceHandle omm2StateTlasSRV = InvalidResourceHandle;
 		uint32_t poseGeneration = 0; // the pose of the dynamic instances it was built with
+		uint32_t skinGeneration = 0; // the skinned BLASes' pose it was built over, as their bounds are in it
 	};
 	std::vector<FrameTLASes> frameTlases_; // empty without instanced geometry
 	bool hasBlendedInstances_ = false; // some TLAS instance is INSTANCE_MASK_BLENDED

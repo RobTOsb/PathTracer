@@ -422,6 +422,28 @@ RenderGPUScene::~RenderGPUScene()
 		}
 	}
 	DestroyLights();
+	DestroySkinUploads();
+}
+
+void RenderGPUScene::DestroySkinUploads()
+{
+	for (std::vector<ResourceHandle> *list: { &skinUploads_, &previousSkinnedPositions_ })
+	{
+		for (ResourceHandle buffer: *list)
+		{
+			if (buffer != InvalidResourceHandle)
+			{
+				renderContext_->DestroyResource(buffer);
+			}
+		}
+		list->clear();
+	}
+	if (skinnedPrimitiveBases_ != InvalidResourceHandle)
+	{
+		renderContext_->DestroyResource(skinnedPrimitiveBases_);
+		skinnedPrimitiveBases_ = InvalidResourceHandle;
+	}
+	skinnedLastFrameValid_ = false;
 }
 
 void RenderGPUScene::DestroyLights()
@@ -657,12 +679,17 @@ void RenderGPUScene::UseForTracing(rg::Pass &pass, FrameGraph &frame, bool opaci
 	{
 		frame.UseBuffer(pass, GetPreviousShadowTLASSRV(opacityMicromaps), "Scene_PreviousShadowTLAS", structure);
 	}
+	const rg::Access read = rg::Access::RaytracingShaderRead;
+	// Written by the skinning copy, so in the graph; static scenes leave it out like the other scene buffers.
+	if (!skinnedBlases_.empty())
+	{
+		frame.UseBuffer(pass, vertexBuffer_, "Scene_Vertices", read);
+	}
 
 	if (lightFrames_.empty())
 	{
 		return;
 	}
-	const rg::Access read = rg::Access::RaytracingShaderRead;
 	frame.UseBuffer(pass, lights_, "Scene_Lights", read);
 	for (rg::ResourceId output: { lightTreeBuilder_->GetNodes(), lightTreeBuilder_->GetLeafLights(),
 								  lightTreeBuilder_->GetLeafOfLight(), lightTreeBuilder_->GetPower() })
@@ -674,84 +701,50 @@ void RenderGPUScene::UseForTracing(rg::Pass &pass, FrameGraph &frame, bool opaci
 	}
 }
 
-void RenderGPUScene::Animate(float seconds)
+Animation::AnimationData RenderGPUScene::GetAnimationData() const
 {
-	if (animatedNodes_.empty())
+	Animation::AnimationData data;
+	data.nodes = animatedNodes_;
+	data.channels = animationChannels_;
+	data.times = animationTimes_;
+	data.values = animationValues_;
+	data.skins = skins_;
+	data.joints = skinJoints_;
+	data.skinnedPrimitives = skinnedPrimitives_;
+	data.influences = skinInfluences_;
+	data.bindVertices = skinBindVertices_;
+	return data;
+}
+
+void RenderGPUScene::ApplyAnimationPose(const Animation::Pose &pose)
+{
+	// A pose from other tables (an earlier scene's) does not fit these.
+	if (animatedNodes_.empty() || pose.nodeWorlds.size() != animatedNodes_.size())
 	{
 		return;
 	}
-	const float time =
-			animationDuration_ > 0.0f ? seconds - floorf(seconds / animationDuration_) * animationDuration_ : 0.0f;
 
-	// The rest pose, with what the channels animate replaced.
-	struct Pose
+	for (const Animation::InstancePlacement &placement: pose.instances)
 	{
-		float translation[3];
-		float rotation[4];
-		float scale[3];
-		bool animated;
-	};
-	std::vector<Pose> poses(animatedNodes_.size());
-	for (size_t i = 0; i < animatedNodes_.size(); ++i)
-	{
-		const AnimatedNode &node = animatedNodes_[i];
-		Pose &pose = poses[i];
-		std::copy(std::begin(node.translation), std::end(node.translation), pose.translation);
-		std::copy(std::begin(node.rotation), std::end(node.rotation), pose.rotation);
-		std::copy(std::begin(node.scale), std::end(node.scale), pose.scale);
-		pose.animated = false;
-	}
-	for (const AnimationChannel &channel: animationChannels_)
-	{
-		Pose &pose = poses[channel.node];
-		float *target = channel.path == Scene::AnimationPath::Translation ? pose.translation
-						: channel.path == Scene::AnimationPath::Rotation  ? pose.rotation
-																		  : pose.scale;
-		float value[4];
-		Scene::SampleAnimation(channel.path,
-							   channel.interpolation,
-							   animationTimes_.data() + channel.firstTime,
-							   animationValues_.data() + channel.firstValue,
-							   channel.keyCount,
-							   time,
-							   value);
-		std::copy(value, value + Scene::AnimationPathComponents(channel.path), target);
-		pose.animated = true;
-	}
-
-	// Parents come first, so their world matrices are ready for their children.
-	std::vector<std::array<float, 12>> worlds(animatedNodes_.size());
-	for (size_t i = 0; i < animatedNodes_.size(); ++i)
-	{
-		const AnimatedNode &node = animatedNodes_[i];
-		const Pose &pose = poses[i];
-		float composed[12];
-		if (pose.animated)
+		if (placement.instance < instances.size())
 		{
-			Scene::ComposeTRS(pose.translation, pose.rotation, pose.scale, composed);
-		}
-		const float *local = pose.animated ? composed : node.localMatrix;
-		const float *parent = node.parent == kStaticParent ? node.parentMatrix : worlds[node.parent].data();
-		Scene::ComposeAffine(local, parent, worlds[i].data());
-		if (node.instance != UINT32_MAX)
-		{
-			std::copy(worlds[i].begin(), worlds[i].end(), instances[node.instance].worldMatrix);
+			std::copy(placement.world.begin(), placement.world.end(), instances[placement.instance].worldMatrix);
 		}
 	}
 	for (SceneCamera &camera: sceneCameras_)
 	{
-		if (camera.animatedNode != UINT32_MAX)
+		if (camera.animatedNode != Animation::kNone)
 		{
-			const std::array<float, 12> &world = worlds[camera.animatedNode];
+			const Animation::Matrix3x4 &world = pose.nodeWorlds[camera.animatedNode];
 			std::copy(world.begin(), world.end(), camera.worldMatrix);
 		}
 	}
 	// UpdateLights writes the punctual lights every frame.
 	for (PunctualLight &light: punctualLights_)
 	{
-		if (light.animatedNode != UINT32_MAX)
+		if (light.animatedNode != Animation::kNone)
 		{
-			const std::array<float, 12> &world = worlds[light.animatedNode];
+			const Animation::Matrix3x4 &world = pose.nodeWorlds[light.animatedNode];
 			light.position = float3(world[3], world[7], world[11]);
 			light.direction = float3(-world[8], -world[9], -world[10]);
 			NormaliseFloat3(light.direction);
@@ -762,8 +755,21 @@ void RenderGPUScene::Animate(float seconds)
 	{
 		++dynamicPoseGeneration_;
 	}
-
 	dynamicLightsMoved_ = !dynamicObjectLights_.empty();
+
+	// The vertex buffer rows of the skinned vertices, their UVs kept.
+	if (!skinnedVertices_.empty() && pose.skinnedVertices.size() == skinnedVertices_.size())
+	{
+		for (size_t v = 0; v < skinnedVertices_.size(); ++v)
+		{
+			const Animation::SkinVertex &skinned = pose.skinnedVertices[v];
+			GpuVertex &row = skinnedVertices_[v];
+			row.position = float3(skinned.position[0], skinned.position[1], skinned.position[2]);
+			row.normal = float3(skinned.normal[0], skinned.normal[1], skinned.normal[2]);
+			row.tangent = float4(skinned.tangent[0], skinned.tangent[1], skinned.tangent[2], skinned.tangent[3]);
+		}
+		++skinPoseGeneration_;
+	}
 }
 
 RenderGPUScene::CameraPose RenderGPUScene::PoseOf(const SceneCamera &camera)
@@ -1359,6 +1365,10 @@ void RenderGPUScene::SerialiseTables(Archive &archive,
 	archive.Table(animationChannels_);
 	archive.Table(animationTimes_);
 	archive.Table(animationValues_);
+	archive.Table(skins_);
+	archive.Table(skinJoints_);
+	archive.Table(skinnedPrimitives_);
+	archive.Table(skinInfluences_);
 	archive.Table(sceneCameras_);
 	archive.Table(punctualLights_);
 	archive.Value(boundsMin_);
@@ -1473,9 +1483,9 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 	}
 	for (size_t i = 0; i < animatedNodes_.size(); ++i)
 	{
-		const AnimatedNode &node = animatedNodes_[i];
-		if ((node.parent != kStaticParent && node.parent >= i) ||
-			(node.instance != UINT32_MAX && node.instance >= instances.size()))
+		const Animation::Node &node = animatedNodes_[i];
+		if ((node.parent != Animation::kNone && node.parent >= i) ||
+			(node.instance != Animation::kNone && node.instance >= instances.size()))
 		{
 			return false;
 		}
@@ -1494,7 +1504,7 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 			return false;
 		}
 	}
-	for (const AnimationChannel &channel: animationChannels_)
+	for (const Animation::Channel &channel: animationChannels_)
 	{
 		if (channel.node >= animatedNodes_.size() || channel.path > Scene::AnimationPath::Scale ||
 			channel.interpolation > Scene::AnimationInterpolation::CubicSpline || channel.keyCount == 0 ||
@@ -1505,6 +1515,42 @@ bool RenderGPUScene::ValidateTables(const std::vector<GpuMaterial> &materials, u
 					animationValues_.size())
 		{
 			return false;
+		}
+	}
+	for (const Animation::Skin &skin: skins_)
+	{
+		if (skin.anchor >= animatedNodes_.size() || skin.jointCount == 0 ||
+			static_cast<uint64_t>(skin.firstJoint) + skin.jointCount > skinJoints_.size())
+		{
+			return false;
+		}
+	}
+	for (const Animation::Joint &joint: skinJoints_)
+	{
+		if (joint.node >= animatedNodes_.size())
+		{
+			return false;
+		}
+	}
+	for (const Animation::SkinnedPrimitive &primitive: skinnedPrimitives_)
+	{
+		if (primitive.skin >= skins_.size() || primitive.instance >= instances.size() ||
+			primitive.primitive >= primitiveDescs.size() ||
+			primitive.vertexCount != primitiveDescs[primitive.primitive].vertexCount ||
+			static_cast<uint64_t>(primitive.firstVertex) + primitive.vertexCount > skinInfluences_.size())
+		{
+			return false;
+		}
+		const uint32_t jointCount = skins_[primitive.skin].jointCount;
+		for (uint32_t v = primitive.firstVertex; v < primitive.firstVertex + primitive.vertexCount; ++v)
+		{
+			for (uint32_t i = 0; i < Animation::kMaxInfluences; ++i)
+			{
+				if (skinInfluences_[v].weights[i] != 0.0f && skinInfluences_[v].joints[i] >= jointCount)
+				{
+					return false;
+				}
+			}
 		}
 	}
 	return !materials.empty() && emissiveLights_.size() == emissiveFluxScales_.size();
@@ -1537,6 +1583,10 @@ bool RenderGPUScene::LoadGPUScene(const std::filesystem::path &cachePath)
 		animationChannels_.clear();
 		animationTimes_.clear();
 		animationValues_.clear();
+		skins_.clear();
+		skinJoints_.clear();
+		skinnedPrimitives_.clear();
+		skinInfluences_.clear();
 		sceneCameras_.clear();
 		punctualLights_.clear();
 		ReleaseStaging();
@@ -1651,6 +1701,10 @@ void RenderGPUScene::BuildAnimation(const Scene::GLTFScene &scene, const std::ve
 	animationChannels_.clear();
 	animationTimes_.clear();
 	animationValues_.clear();
+	skins_.clear();
+	skinJoints_.clear();
+	skinnedPrimitives_.clear();
+	skinInfluences_.clear();
 
 	// The nodes the channels animate. Those given as a matrix have no parts for a channel to replace.
 	const size_t nodeCount = scene.GetInstanceCount();
@@ -1672,8 +1726,72 @@ void RenderGPUScene::BuildAnimation(const Scene::GLTFScene &scene, const std::ve
 		}
 	}
 
-	// Depth first from the roots, so the table lists every moving node after its parent. A node moves with
-	// its own channels or a parent's.
+	// The skinned instances: a node with a mesh and a skin, whose primitives all carry joint influences. The skin
+	// deforms the mesh's vertices in place, so a mesh more than one node draws is left in its bind pose. The animation
+	// system poses such a node with the skin's joints and anchor.
+	std::vector<uint8_t> posed = targeted;
+	std::vector<uint32_t> meshUsers(scene.GetMeshCount(), 0);
+	for (size_t n = 0; n < nodeCount; ++n)
+	{
+		if (instanceOfNode[n] != UINT32_MAX)
+		{
+			++meshUsers[scene.GetInstance(n).GetMeshIndex()];
+		}
+	}
+	auto anchorOf = [](const Scene::Skin &skin) { return skin.skeleton >= 0 ? skin.skeleton : skin.joints[0]; };
+	std::vector<int32_t> skinOfNode(nodeCount, -1);
+	for (size_t n = 0; n < nodeCount; ++n)
+	{
+		const Scene::Instance &source = scene.GetInstance(n);
+		const int32_t skinIndex = source.GetSkinIndex();
+		if (skinIndex < 0 || instanceOfNode[n] == UINT32_MAX)
+		{
+			continue;
+		}
+		if (static_cast<size_t>(skinIndex) >= scene.GetSkinCount())
+		{
+			logw("GPUScene: node '{}' has no skin {}, so it stays in its bind pose", source.GetName(), skinIndex);
+			continue;
+		}
+		const Scene::Skin &skin = scene.GetSkin(skinIndex);
+		const Scene::Mesh &mesh = scene.GetMesh(source.GetMeshIndex());
+		const char *refusal = nullptr;
+		if (skin.joints.empty() || skin.joints.size() > UINT16_MAX + 1 ||
+			std::any_of(skin.joints.begin(), skin.joints.end(), [](int32_t joint) { return joint < 0; }))
+		{
+			refusal = "its skin has no joints or an invalid one";
+		}
+		else if (meshUsers[source.GetMeshIndex()] > 1)
+		{
+			refusal = "other nodes draw its mesh too";
+		}
+		else if (std::any_of(mesh.GetPrimitives().begin(),
+							 mesh.GetPrimitives().end(),
+							 [](const Scene::Primitive &primitive)
+							 { return IsUsablePrimitive(primitive) && !primitive.HasSkinWeights(); }))
+		{
+			refusal = "a primitive of its mesh has no joint influences";
+		}
+		if (refusal != nullptr)
+		{
+			logw("GPUScene: skin '{}' on node '{}' left out, as {}, so the mesh stays in its bind pose",
+				 skin.name,
+				 source.GetName(),
+				 refusal);
+			continue;
+		}
+		skinOfNode[n] = skinIndex;
+		posed[n] = 1;
+		posed[anchorOf(skin)] = 1;
+		for (int32_t joint: skin.joints)
+		{
+			posed[joint] = 1;
+		}
+	}
+
+	// Depth first from the roots, so the table lists every posed node after its parent. A node is posed when it moves,
+	// with its own channels or a parent's, or when a skin needs it (above). Only moving nodes take their children
+	// along: a still skeleton root does not make the scene under it dynamic.
 	std::vector<std::vector<uint32_t>> children(nodeCount);
 	std::vector<uint32_t> stack;
 	for (uint32_t n = 0; n < static_cast<uint32_t>(nodeCount); ++n)
@@ -1689,16 +1807,19 @@ void RenderGPUScene::BuildAnimation(const Scene::GLTFScene &scene, const std::ve
 		}
 	}
 	std::vector<uint32_t> animatedOfNode(nodeCount, UINT32_MAX);
+	std::vector<uint8_t> moves(nodeCount, 0);
 	while (!stack.empty())
 	{
 		const uint32_t n = stack.back();
 		stack.pop_back();
 		const int32_t parent = scene.GetParentIndex(n);
-		const uint32_t animatedParent = parent >= 0 ? animatedOfNode[parent] : kStaticParent;
-		if (targeted[n] || animatedParent != kStaticParent)
+		moves[n] = targeted[n] || (parent >= 0 && moves[parent]);
+		// A parent left out of the table never moves, so its world at rest (the node's parentMatrix) holds.
+		const uint32_t animatedParent = parent >= 0 ? animatedOfNode[parent] : Animation::kNone;
+		if (moves[n] || posed[n])
 		{
 			const Scene::Instance &source = scene.GetInstance(n);
-			AnimatedNode &node = animatedNodes_.emplace_back();
+			Animation::Node &node = animatedNodes_.emplace_back();
 			node.parent = animatedParent;
 			node.instance = instanceOfNode[n];
 			std::copy(source.GetTranslation(), source.GetTranslation() + 3, node.translation);
@@ -1709,6 +1830,80 @@ void RenderGPUScene::BuildAnimation(const Scene::GLTFScene &scene, const std::ve
 			animatedOfNode[n] = static_cast<uint32_t>(animatedNodes_.size() - 1);
 		}
 		stack.insert(stack.end(), children[n].begin(), children[n].end());
+	}
+
+	// The skins the skinned instances use, each once, and their primitives' influences, in instance order.
+	std::vector<uint32_t> entryOfSkin(scene.GetSkinCount(), UINT32_MAX);
+	uint32_t droppedInfluences = 0;
+	for (size_t n = 0; n < nodeCount; ++n)
+	{
+		if (skinOfNode[n] < 0)
+		{
+			continue;
+		}
+		const Scene::Skin &skin = scene.GetSkin(skinOfNode[n]);
+		uint32_t &skinEntry = entryOfSkin[skinOfNode[n]];
+		if (skinEntry == UINT32_MAX)
+		{
+			skinEntry = static_cast<uint32_t>(skins_.size());
+			Animation::Skin &entry = skins_.emplace_back();
+			entry.firstJoint = static_cast<uint32_t>(skinJoints_.size());
+			entry.jointCount = static_cast<uint32_t>(skin.joints.size());
+			entry.anchor = animatedOfNode[anchorOf(skin)];
+			for (size_t j = 0; j < skin.joints.size(); ++j)
+			{
+				Animation::Joint &joint = skinJoints_.emplace_back();
+				joint.node = animatedOfNode[skin.joints[j]];
+				std::copy_n(&skin.inverseBindMatrices[j * 12], 12, joint.inverseBind);
+			}
+		}
+
+		const Scene::Instance &source = scene.GetInstance(n);
+		const Scene::Mesh &mesh = scene.GetMesh(source.GetMeshIndex());
+		const MeshGPUDesc &meshDesc = meshDescs[source.GetMeshIndex()];
+		const uint32_t jointCount = static_cast<uint32_t>(skin.joints.size());
+		uint32_t vertices = 0;
+		for (uint32_t k = 0; k < meshDesc.primitiveCount; ++k)
+		{
+			const Scene::Primitive &primitive = mesh.GetPrimitives()[k];
+			if (!IsUsablePrimitive(primitive))
+			{
+				continue;
+			}
+			Animation::SkinnedPrimitive &entry = skinnedPrimitives_.emplace_back();
+			entry.skin = skinEntry;
+			entry.instance = instanceOfNode[n];
+			entry.primitive = meshDesc.primitiveOffset + k;
+			entry.firstVertex = static_cast<uint32_t>(skinInfluences_.size());
+			entry.vertexCount = primitiveDescs[entry.primitive].vertexCount;
+			vertices += entry.vertexCount;
+
+			const std::vector<uint16_t> &joints = primitive.GetJoints();
+			const std::vector<float> &weights = primitive.GetWeights();
+			for (uint32_t v = 0; v < entry.vertexCount; ++v)
+			{
+				Animation::VertexInfluence &influence = skinInfluences_.emplace_back();
+				float sum = 0.0f;
+				for (uint32_t i = 0; i < Animation::kMaxInfluences; ++i)
+				{
+					const size_t k4 = static_cast<size_t>(v) * Scene::kMaxVertexInfluences + i;
+					const bool valid = i < Scene::kMaxVertexInfluences && joints[k4] < jointCount;
+					droppedInfluences += !valid && i < Scene::kMaxVertexInfluences && weights[k4] > 0.0f;
+					influence.joints[i] = valid ? joints[k4] : 0;
+					influence.weights[i] = valid ? weights[k4] : 0.0f;
+					sum += influence.weights[i];
+				}
+				for (uint32_t i = 0; i < Animation::kMaxInfluences; ++i)
+				{
+					influence.weights[i] = sum > 0.0f ? influence.weights[i] / sum : (i == 0 ? 1.0f : 0.0f);
+				}
+			}
+		}
+		logi("GPUScene: skin '{}' deforms node '{}': {} joint(s), {} vertices", skin.name, source.GetName(), jointCount, vertices);
+	}
+	if (droppedInfluences > 0)
+	{
+		logw("GPUScene: {} joint influence(s) name a joint their skin does not have, and were dropped", droppedInfluences);
 	}
 
 	// Every perspective camera: the first that moves is the one the view can follow, the still ones are views.
@@ -1813,7 +2008,7 @@ void RenderGPUScene::BuildAnimation(const Scene::GLTFScene &scene, const std::ve
 			{
 				continue;
 			}
-			AnimationChannel &entry = animationChannels_.emplace_back();
+			Animation::Channel &entry = animationChannels_.emplace_back();
 			entry.node = animatedOfNode[channel.node];
 			entry.path = channel.path;
 			entry.interpolation = channel.interpolation;
@@ -1833,19 +2028,13 @@ void RenderGPUScene::BuildAnimation(const Scene::GLTFScene &scene, const std::ve
 
 void RenderGPUScene::PrepareAnimation()
 {
-	animationDuration_ = 0.0f;
-	for (const AnimationChannel &channel: animationChannels_)
-	{
-		animationDuration_ = std::max(animationDuration_, animationTimes_[channel.firstTime + channel.keyCount - 1]);
-	}
-
 	dynamicInstances_.clear();
 	dynamicOfInstance_.assign(instances.size(), UINT32_MAX);
 	dynamicRestMirrored_.clear();
 	dynamicLastFrameTransforms_.clear();
-	for (const AnimatedNode &node: animatedNodes_)
+	for (const Animation::Node &node: animatedNodes_)
 	{
-		if (node.instance == UINT32_MAX)
+		if (node.instance == Animation::kNone)
 		{
 			continue;
 		}
@@ -1856,13 +2045,45 @@ void RenderGPUScene::PrepareAnimation()
 		std::copy(m, m + 12, dynamicLastFrameTransforms_.emplace_back().begin());
 	}
 
-	if (!animationChannels_.empty())
+	// The skinned vertices as staged: their bind pose for the animation system, and their rows to move and upload.
+	primitiveSkinned_.assign(primitiveDescs.size(), 0);
+	skinBindVertices_.assign(skinInfluences_.size(), {});
+	skinnedVertices_.assign(skinInfluences_.size(), {});
+	for (const Animation::SkinnedPrimitive &primitive: skinnedPrimitives_)
 	{
-		logi("GPUScene: {} animation channel(s) over {:.2f} s move {} node(s), {} of them instances",
+		primitiveSkinned_[primitive.primitive] = 1;
+		const PrimitiveGPUDesc &desc = primitiveDescs[primitive.primitive];
+		for (uint32_t v = 0; v < primitive.vertexCount; ++v)
+		{
+			const GpuVertex &row = vertices_[desc.vertexOffset + v];
+			skinnedVertices_[primitive.firstVertex + v] = row;
+			Animation::SkinVertex &bind = skinBindVertices_[primitive.firstVertex + v];
+			bind.position[0] = row.position.x;
+			bind.position[1] = row.position.y;
+			bind.position[2] = row.position.z;
+			bind.normal[0] = row.normal.x;
+			bind.normal[1] = row.normal.y;
+			bind.normal[2] = row.normal.z;
+			bind.tangent[0] = row.tangent.x;
+			bind.tangent[1] = row.tangent.y;
+			bind.tangent[2] = row.tangent.z;
+			bind.tangent[3] = row.tangent.w;
+		}
+	}
+	skinPoseGeneration_ = 0;
+	skinUploadGeneration_ = 0;
+	DestroySkinUploads();
+
+	if (!animatedNodes_.empty())
+	{
+		logi("GPUScene: {} animation channel(s) and {} skin(s) pose {} node(s), {} of them instances; {} skinned "
+			 "primitive(s) with {} vertices",
 			 animationChannels_.size(),
-			 animationDuration_,
+			 skins_.size(),
 			 animatedNodes_.size(),
-			 dynamicInstances_.size());
+			 dynamicInstances_.size(),
+			 skinnedPrimitives_.size(),
+			 skinnedVertices_.size());
 	}
 }
 
@@ -2914,6 +3135,7 @@ void RenderGPUScene::DestroyInstanceStructures()
 		}
 	}
 	tlasRefs_.clear();
+	skinnedBlases_.clear();
 	tlasInstances_.clear();
 	ommTlasInstances_.clear();
 	omm2StateTlasInstances_.clear();
@@ -2930,10 +3152,12 @@ void RenderGPUScene::BuildInstanceStructures()
 	const bool micromaps = renderContext_->SupportsOpacityMicromaps() && ommIndexBuffer_ != InvalidResourceHandle;
 	auto geometryFlags = [&](uint32_t primitive) -> const MaterialGeometryFlags &
 	{ return materialGeometry_[primitiveDescs[primitive].materialIndex]; };
-	// Older scene caches baked micromaps for alpha-tested thin walls that are pass-through now.
+	// Older scene caches baked micromaps for alpha-tested thin walls that are pass-through now. A skinned primitive's
+	// BLAS is rebuilt every pose, so it goes without, which keeps it to one BLAS.
 	auto hasMicromaps = [&](uint32_t primitive)
 	{
-		return micromaps && ommIndexOffsets_[primitive] != kNoOpacityMicromaps && !geometryFlags(primitive).passThrough;
+		return micromaps && ommIndexOffsets_[primitive] != kNoOpacityMicromaps && !geometryFlags(primitive).passThrough &&
+			   !primitiveSkinned_[primitive];
 	};
 	auto geometryOf = [&](uint32_t primitive, bool linkMicromaps)
 	{
@@ -3046,6 +3270,7 @@ void RenderGPUScene::BuildInstanceStructures()
 	}
 	blases_.assign(primitiveDescs.size(), InvalidAccelerationStructureHandle);
 	ommBlases_.assign(primitiveDescs.size(), InvalidAccelerationStructureHandle);
+	skinnedBlases_.clear();
 	for (uint32_t p = 0; p < static_cast<uint32_t>(primitiveDescs.size()); ++p)
 	{
 		if (!ownBlas[p])
@@ -3053,6 +3278,11 @@ void RenderGPUScene::BuildInstanceStructures()
 			continue;
 		}
 		blases_[p] = renderContext_->CreateBLAS(geometryOf(p, false));
+		if (primitiveSkinned_[p])
+		{
+			skinnedBlases_.push_back(blases_[p]);
+			continue;
+		}
 		if (hasMicromaps(p))
 		{
 			ommBlases_[p] = renderContext_->CreateBLAS(geometryOf(p, true));
@@ -3099,7 +3329,8 @@ void RenderGPUScene::BuildInstanceStructures()
 		}
 	}
 
-	// Built and compacted in submissions of their own, which leaves them none of the build's memory.
+	// Built and compacted in submissions of their own, which leaves them none of the build's memory. The skinned ones
+	// stay their full size, as each new pose builds them again in place, here on the graphics list first.
 	std::vector<AccelerationStructureHandle> builtBlases;
 	for (const std::vector<AccelerationStructureHandle> *list:
 		 { &blases_, &ommBlases_, &prototypeBlases_, &prototypeOmmBlases_ })
@@ -3107,9 +3338,22 @@ void RenderGPUScene::BuildInstanceStructures()
 		std::copy_if(list->begin(),
 					 list->end(),
 					 std::back_inserter(builtBlases),
-					 [](AccelerationStructureHandle h) { return h != InvalidAccelerationStructureHandle; });
+					 [&](AccelerationStructureHandle h)
+					 {
+						 return h != InvalidAccelerationStructureHandle &&
+								std::find(skinnedBlases_.begin(), skinnedBlases_.end(), h) == skinnedBlases_.end();
+					 });
 	}
 	renderContext_->BuildCompactedBLASes(builtBlases);
+	for (AccelerationStructureHandle blas: skinnedBlases_)
+	{
+		renderContext_->BuildAccelerationStructure(blas);
+	}
+	if (!skinnedBlases_.empty())
+	{
+		// Before the TLAS builds below read them.
+		renderContext_->UAVBarrierForAccelerationStructures();
+	}
 
 	// Each prototype's rows again after the primitive descs, so that a hit's row is InstanceID() + GeometryIndex().
 	std::vector<uint32_t> prototypeRow(prototypes.size());
@@ -3283,6 +3527,9 @@ void RenderGPUScene::BuildInstanceStructures()
 			renderContext_->BuildAccelerationStructure(frame.omm2StateTlas);
 		}
 		frame.poseGeneration = dynamicPoseGeneration_;
+		// The skinned BLASes were built above from the vertex buffer, which holds the last uploaded pose (the staged
+		// vertices before the first).
+		frame.skinGeneration = skinUploadGeneration_;
 	}
 	tlasInstancesGeneration_ = dynamicPoseGeneration_;
 	tlasRefs_ = std::move(tlasRefs);
@@ -3378,8 +3625,103 @@ void RenderGPUScene::AddAccelerationStructurePasses(FrameGraph &frame)
 	{
 		return;
 	}
-	const bool rebuild = tlases.poseGeneration != dynamicPoseGeneration_;
+	// A new pose of the skinned vertices goes to the vertex buffer, from this frame's upload buffer, which BeginFrame
+	// has waited for the last reader of. Like the TLAS update, the copy pass is there every frame, copying only for a
+	// new pose.
+	const bool skinned = !skinnedBlases_.empty();
+	const bool rebuildSkins = skinned && skinUploadGeneration_ != skinPoseGeneration_;
+	if (skinned)
+	{
+		const uint64_t bytes = skinnedVertices_.size() * sizeof(GpuVertex);
+		skinUploads_.resize(renderContext_->GetFramesInFlight(), InvalidResourceHandle);
+		ResourceHandle &upload = skinUploads_[renderContext_->GetCurrentFrameIndex()];
+		if (upload == InvalidResourceHandle)
+		{
+			BufferDesc desc = {};
+			desc.sizeInBytes = bytes;
+			desc.structureByteStride = sizeof(GpuVertex);
+			desc.debugName = "Scene_SkinnedVertexUpload";
+			upload = renderContext_->CreateUploadBuffer(desc, ResourceViewType::ShaderResource);
+		}
+		if (rebuildSkins)
+		{
+			renderContext_->UpdateUploadBuffer(upload, skinnedVertices_.data(), 0, bytes);
+			skinUploadGeneration_ = skinPoseGeneration_;
+		}
+
+		// The motion vectors' last frame positions, like the transforms above: what the last frame traced goes to this
+		// frame's buffer, then this frame's pose becomes the last frame. The first frame has no last frame, so it has
+		// no motion.
+		const size_t vertexCount = skinnedVertices_.size();
+		if (skinnedPrimitiveBases_ == InvalidResourceHandle)
+		{
+			std::vector<uint32_t> bases(primitiveDescs.size(), 0);
+			for (const Animation::SkinnedPrimitive &primitive: skinnedPrimitives_)
+			{
+				bases[primitive.primitive] = primitive.firstVertex + 1;
+			}
+			BufferDesc desc = {};
+			desc.sizeInBytes = bases.size() * sizeof(uint32_t);
+			desc.structureByteStride = sizeof(uint32_t);
+			desc.debugName = "Scene_SkinnedPrimitiveBases";
+			skinnedPrimitiveBases_ = renderContext_->CreateUploadBuffer(desc, ResourceViewType::ShaderResource, bases.data());
+		}
+		previousSkinnedPositions_.resize(renderContext_->GetFramesInFlight(), InvalidResourceHandle);
+		ResourceHandle &previousPositions = previousSkinnedPositions_[previousTransformFrame_];
+		if (previousPositions == InvalidResourceHandle)
+		{
+			BufferDesc desc = {};
+			desc.sizeInBytes = vertexCount * sizeof(float4);
+			desc.structureByteStride = sizeof(float4);
+			desc.debugName = "Scene_PreviousSkinnedPositions";
+			previousPositions = renderContext_->CreateUploadBuffer(desc, ResourceViewType::ShaderResource);
+		}
+		skinnedLastFramePositions_.resize(vertexCount);
+		auto takeCurrentPositions = [&]
+		{
+			for (size_t v = 0; v < vertexCount; ++v)
+			{
+				const float3 &p = skinnedVertices_[v].position;
+				skinnedLastFramePositions_[v] = float4(p.x, p.y, p.z, 1.0f);
+			}
+		};
+		if (!skinnedLastFrameValid_)
+		{
+			takeCurrentPositions();
+			skinnedLastFrameValid_ = true;
+		}
+		renderContext_->UpdateUploadBuffer(
+				previousPositions, skinnedLastFramePositions_.data(), 0, vertexCount * sizeof(float4));
+		takeCurrentPositions();
+
+		rg::Pass copy = rg::Pass::Copy("Scene/Skinned vertices");
+		frame.UseBuffer(copy, vertexBuffer_, "Scene_Vertices", rg::Access::CopyDest);
+		const ResourceHandle source = upload;
+		frame.AddPass(std::move(copy.Executes(
+				[this, source, rebuildSkins](rg::PassContext &ctx)
+				{
+					if (!rebuildSkins)
+					{
+						return;
+					}
+					for (const Animation::SkinnedPrimitive &primitive: skinnedPrimitives_)
+					{
+						const PrimitiveGPUDesc &desc = primitiveDescs[primitive.primitive];
+						ctx.rc.CopyBufferRegion(vertexBuffer_,
+												static_cast<uint64_t>(desc.vertexOffset) * sizeof(GpuVertex),
+												source,
+												static_cast<uint64_t>(primitive.firstVertex) * sizeof(GpuVertex),
+												static_cast<uint64_t>(primitive.vertexCount) * sizeof(GpuVertex));
+					}
+				})));
+	}
+
+	// The skinned BLASes are shared by every set, and a TLAS keeps their bounds, so a set built over an older pose of
+	// them is built again too.
+	const bool rebuild =
+			tlases.poseGeneration != dynamicPoseGeneration_ || tlases.skinGeneration != skinUploadGeneration_;
 	tlases.poseGeneration = dynamicPoseGeneration_;
+	tlases.skinGeneration = skinUploadGeneration_;
 
 	if (rebuild && tlasInstancesGeneration_ != dynamicPoseGeneration_)
 	{
@@ -3416,10 +3758,23 @@ void RenderGPUScene::AddAccelerationStructurePasses(FrameGraph &frame)
 	{
 		frame.UseBuffer(pass, tlases.omm2StateTlasSRV, "Scene_TLAS_OMM2State", build);
 	}
+	if (skinned)
+	{
+		frame.UseBuffer(pass, vertexBuffer_, "Scene_Vertices", rg::Access::AccelerationStructureBuildInput);
+	}
 	const FrameTLASes target = tlases;
 	frame.AddPass(std::move(pass.Executes(
-			[this, target, rebuild](rg::PassContext &ctx)
+			[this, target, rebuild, rebuildSkins](rg::PassContext &ctx)
 			{
+				if (rebuildSkins)
+				{
+					// In place, over the vertices the copy pass just wrote, then done before the TLASes read them.
+					for (AccelerationStructureHandle blas: skinnedBlases_)
+					{
+						ctx.rc.BuildAccelerationStructure(blas);
+					}
+					ctx.rc.UAVBarrierForAccelerationStructures();
+				}
 				if (!rebuild)
 				{
 					return;

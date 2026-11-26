@@ -5,6 +5,7 @@
 #include "RenderContext.h"
 #include "Window.h"
 
+#include "Animation/AnimationSystem.h"
 #include "Renderer/AutoExposurePass.h"
 #include "Renderer/BloomPass.h"
 #include "Renderer/DLSSPass.h"
@@ -74,10 +75,10 @@ static float QueryDisplayPeakNits(void *hwnd)
 }
 
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
-//constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
+constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\crown\\gltf\\crown_extended.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\TransmissionThinwallTestGrid\\glTF-Binary\\TransmissionThinwallTestGrid.glb";
-constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
+//constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
 //constexpr const char *kDefaultScenePath = "h:\\suntemple.glb";
 //constexpr const char *kDefaultScenePath = "h:\\AbandonedRoom.glb";
 //constexpr const char *kDefaultScenePath = "H:\\PathTracer\\assets\\SubsurfaceScene\\scene.gltf";
@@ -504,7 +505,16 @@ int Run(const char *scenePath)
 		return 1;
 	}
 
+	// The scene's animations and skins, posed on the CPU from the GPU scene's tables, which it reads for as long as the
+	// scene is loaded. The frame loop applies each new pose back to the scene.
+	Animation::AnimationSystem animator(gpuScene.GetAnimationData());
+
 	RenderSettings settings;
+	settings.animation.available = animator.HasAnimation();
+	settings.animation.duration = animator.GetDuration();
+	settings.animation.skinCount = animator.GetSkinCount();
+	settings.animation.jointCount = animator.GetJointCount();
+	settings.animation.skinnedVertices = animator.GetSkinnedVertexCount();
 	if (renderContext->GetUseHDR())
 	{
 		const float peakNits = QueryDisplayPeakNits(window.GetNativeWindow());
@@ -617,10 +627,11 @@ int Run(const char *scenePath)
 		}
 		settings.cameraBookmarkRequest = RenderSettings::CameraBookmarkRequest::None;
 
-		if (gpuScene.HasAnimation())
+		// A scene with skins but no channels is still posed once, which puts its skinned meshes in the joints' pose.
+		if (!animator.IsEmpty())
 		{
 			AnimationSettings &animation = settings.animation;
-			const float duration = gpuScene.GetAnimationDuration();
+			const float duration = animator.GetDuration();
 			// The reference holds the scene still, at the time the UI sets.
 			if (animation.play && settings.renderMode != RenderMode::Reference)
 			{
@@ -629,7 +640,9 @@ int Run(const char *scenePath)
 			animation.seconds = duration > 0.0f ? animation.seconds - floorf(animation.seconds / duration) * duration : 0.0f;
 			if (animation.seconds != animatedSeconds)
 			{
-				gpuScene.Animate(animation.seconds);
+				gpuScene.ApplyAnimationPose(animator.Evaluate(animation.seconds));
+				animation.evaluateMs = static_cast<float>(animator.GetEvaluateMs());
+				animation.skinningMs = static_cast<float>(animator.GetSkinningMs());
 				animatedSeconds = animation.seconds;
 				// What the reference sums changes, so it starts over.
 				++settings.reference.restartCount;

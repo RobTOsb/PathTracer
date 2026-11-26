@@ -1,4 +1,5 @@
 add_subdirectory(Common)
+add_subdirectory(Animation)
 
 add_executable(PathTracer
     main.cpp
@@ -38,6 +39,7 @@ target_compile_definitions(PathTracer PRIVATE
 
 target_link_libraries(PathTracer PRIVATE
     Common
+    Animation
     RenderGraph
     GLTFScene
     meshoptimizer

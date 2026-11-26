@@ -222,7 +222,7 @@ namespace
 		ImGui::TextUnformatted(FormatCount(count).text);
 	}
 
-	void SceneUI(const RenderGPUScene &scene)
+	void SceneUI(const RenderGPUScene &scene, const AnimationSettings &animation)
 	{
 		if (!scene.GetName().empty())
 		{
@@ -283,11 +283,21 @@ namespace
 			}
 			CountRow("Emissive instances", scene.GetEmissiveInstanceCount());
 			CountRow("Point / spot lights", scene.GetPunctualLightCount());
-			if (scene.HasAnimation())
+			if (scene.GetDynamicInstanceCount() > 0)
 			{
 				CountRow("Animated instances", scene.GetDynamicInstanceCount());
+			}
+			if (animation.available)
+			{
 				BeginStatRow("Animation length", nullptr);
-				ImGui::Text("%.2f s", scene.GetAnimationDuration());
+				ImGui::Text("%.2f s", animation.duration);
+			}
+			if (animation.skinCount > 0)
+			{
+				CountRow("Skins", animation.skinCount);
+				CountRow("Joints", animation.jointCount);
+				CountRow("Skinned primitives", scene.GetSkinnedPrimitiveCount());
+				CountRow("Skinned vertices", animation.skinnedVertices);
 			}
 			if (scene.GetSceneCameraCount() > 0)
 			{
@@ -459,7 +469,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 
 	if (ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen))
 	{
-		SceneUI(scene_);
+		SceneUI(scene_, settings_.animation);
 	}
 
 	if (ImGui::CollapsingHeader("Render mode", ImGuiTreeNodeFlags_DefaultOpen))
@@ -711,14 +721,21 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::EndDisabled();
 	}
 
-	if (scene_.HasAnimation() && ImGui::CollapsingHeader("Animation", ImGuiTreeNodeFlags_DefaultOpen))
+	if (settings_.animation.available && ImGui::CollapsingHeader("Animation", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		AnimationSettings &animation = settings_.animation;
 		ImGui::Text("%u instance(s) move", scene_.GetDynamicInstanceCount());
+		if (animation.skinCount > 0)
+		{
+			ImGui::Text("%u skin(s), %u joint(s), %u skinned vertices", animation.skinCount, animation.jointCount,
+						animation.skinnedVertices);
+			ImGui::Text("Pose %.2f ms on the CPU, %.2f ms of it skinning", animation.evaluateMs, animation.skinningMs);
+		}
 		ImGui::Checkbox("Play", &animation.play);
-		ImGui::SetItemTooltip("Rebuilds the TLAS every frame");
+		ImGui::SetItemTooltip(animation.skinCount > 0 ? "Rebuilds the TLAS and the skinned meshes' BLASes every frame"
+													  : "Rebuilds the TLAS every frame");
 		ImGui::SliderFloat("Playback speed", &animation.speed, 0.0f, 4.0f, "%.2fx");
-		ImGui::SliderFloat("Time", &animation.seconds, 0.0f, scene_.GetAnimationDuration(), "%.2f s");
+		ImGui::SliderFloat("Time", &animation.seconds, 0.0f, animation.duration, "%.2f s");
 		if (scene_.IsCameraAnimated())
 		{
 			ImGui::Checkbox("Scene camera", &animation.sceneCamera);

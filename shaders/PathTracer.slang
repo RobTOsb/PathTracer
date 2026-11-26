@@ -1465,11 +1465,27 @@ void ClosestHit(inout HitPayload payload, in BuiltInTriangleIntersectionAttribut
 #ifdef DLSS_RR
 
     // The same point of the object under last frame's transform. Both transforms take the same steps, so a
-    // static instance's motion is zero.
+    // static instance's motion is zero. A skinned triangle's corners also moved within the object, so the point
+    // last frame is where its barycentrics were on last frame's corners.
     float4 objectPosition = float4(p0 + (p1 - p0) * bary.y + (p2 - p0) * bary.z, 1.0);
+    float4 previousObjectPosition = objectPosition;
+    if (g_Frame.skinnedPrimitiveBases != INVALIDDESCRIPTORHANDLE)
+    {
+        StructuredBuffer<uint> skinnedBases = ResourceDescriptorHeap[g_Frame.skinnedPrimitiveBases];
+        uint skinnedBase = skinnedBases[InstanceID() + GeometryIndex()];
+        if (skinnedBase != 0)
+        {
+            StructuredBuffer<float4> previousPositions = ResourceDescriptorHeap[g_Frame.previousSkinnedPositions];
+            uint3 skinnedTri = tri - prim.vertexOffset + (skinnedBase - 1);
+            float3 q0 = previousPositions[skinnedTri.x].xyz;
+            float3 q1 = previousPositions[skinnedTri.y].xyz;
+            float3 q2 = previousPositions[skinnedTri.z].xyz;
+            previousObjectPosition = float4(q0 + (q1 - q0) * bary.y + (q2 - q0) * bary.z, 1.0);
+        }
+    }
     uint row = 3 * InstanceIndex();
     float3x4 previousToWorld = float3x4(g_PreviousTransforms[row], g_PreviousTransforms[row + 1], g_PreviousTransforms[row + 2]);
-    float3 motion = clamp(mul(previousToWorld, objectPosition) - mul(ObjectToWorld3x4(), objectPosition), -HALF_MAX, HALF_MAX);
+    float3 motion = clamp(mul(previousToWorld, previousObjectPosition) - mul(ObjectToWorld3x4(), objectPosition), -HALF_MAX, HALF_MAX);
     payload.motion = uint2(PackHalf2(motion.xy), PackHalf2(float2(motion.z, 0.0)));
 #endif
 }

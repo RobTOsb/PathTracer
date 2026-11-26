@@ -59,10 +59,21 @@ struct LightSettings
 	uint32_t clusterCount = 0;
 };
 
-// The scene's glTF animations (RenderGPUScene::Animate), which play together and loop, except in the reference.
-// While they play, the TLAS is rebuilt every frame (the light tree is rebuilt every frame regardless).
+// The scene's glTF animations and skins (Animation::AnimationSystem), which play together and loop, except in the
+// reference. While they play, the TLAS is rebuilt every frame (the light tree is rebuilt every frame regardless), and
+// so are the skinned primitives' BLASes.
 struct AnimationSettings
 {
+	// What the animation system found in the scene, which main sets at load for the UI.
+	bool available = false; // channels to play
+	float duration = 0.0f; // seconds, the longest animation, which they loop over
+	uint32_t skinCount = 0;
+	uint32_t jointCount = 0;
+	uint32_t skinnedVertices = 0;
+	// The CPU cost of the last pose, which main sets each time it poses the scene.
+	float evaluateMs = 0.0f;
+	float skinningMs = 0.0f;
+
 	bool play = false;
 	float speed = 1.0f;
 	// Into the animations: the main loop advances it while they play, and the UI can set it.

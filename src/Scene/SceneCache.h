@@ -39,7 +39,9 @@
 // 26: every perspective glTF camera (RenderGPUScene::sceneCameras_), the still ones as views to choose from.
 // 27: the medium outside an interface (pbrt's medium_interface) in GpuMaterial, 152 bytes.
 // 28: spot lights in RenderGPUScene::punctualLights_ (direction, cone angles).
-constexpr uint32_t kSceneCacheVersion = 28;
+// 29: glTF skins (Animation::Skin, Joint, SkinnedPrimitive, VertexInfluence tables); skin joints and anchors are posed
+//     nodes.
+constexpr uint32_t kSceneCacheVersion = 29;
 
 struct SceneCacheTexture
 {

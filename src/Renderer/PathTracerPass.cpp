@@ -891,6 +891,14 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 											   : 0.0f;
 	constants.exposureBuffer = exposure != InvalidResourceHandle ? renderContext->GetResourceViewInfo(exposure).descriptorIndex
 																  : INVALIDDESCRIPTORHANDLE;
+	// After the scene's AddAccelerationStructurePasses, which wrote this frame's last frame positions.
+	const ResourceHandle skinnedBases = scene_.GetSkinnedPrimitiveBaseBuffer();
+	const ResourceHandle previousSkinned = scene_.GetPreviousSkinnedPositionBuffer();
+	const bool skinnedMotion = skinnedBases != InvalidResourceHandle && previousSkinned != InvalidResourceHandle;
+	constants.skinnedPrimitiveBases =
+			skinnedMotion ? renderContext->GetResourceViewInfo(skinnedBases).descriptorIndex : INVALIDDESCRIPTORHANDLE;
+	constants.previousSkinnedPositions =
+			skinnedMotion ? renderContext->GetResourceViewInfo(previousSkinned).descriptorIndex : INVALIDDESCRIPTORHANDLE;
 
 	if (reference_)
 	{
@@ -905,6 +913,7 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 		key.samplesPerFrame = 0; // the reference's own, set below
 		key.photons.rects = 0; // a buffer per frame in flight
 		key.exposureBuffer = 0; // the exposure copy of the frame before last, by frame parity
+		key.previousSkinnedPositions = 0; // a buffer per frame in flight
 		const ReferenceSettings &reference = settings_.reference;
 		if (accumulatedSamples_ == 0 || std::memcmp(&key, &accumulationKey_, sizeof(key)) != 0 ||
 			std::memcmp(&atmosphere_.GetParameters(), &accumulationAtmosphere_, sizeof(AtmosphereParameters)) != 0 ||
