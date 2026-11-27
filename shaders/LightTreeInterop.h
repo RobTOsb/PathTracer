@@ -124,6 +124,10 @@ struct DynamicLightConstants
 	uint transformsHandle; // StructuredBuffer<DynamicLightTransform>, per dynamic instance
 	uint punctualLightsHandle; // StructuredBuffer<GpuLight>
 	uint lightsHandle; // RWStructuredBuffer<GpuLight>, the light buffer
+	// The dynamic lights from skinnedLightStart on are skinned triangles, whose object-space corners follow the pose:
+	// they come from skinnedLightsHandle (StructuredBuffer<GpuLight>, from that light on) instead of objectLightsHandle.
+	uint skinnedLightStart; // dynamicLightCount without skinned lights
+	uint skinnedLightsHandle;
 };
 
 // Descriptor heap indices of the build's buffers, which only change when the light count does; a constant

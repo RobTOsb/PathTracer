@@ -514,12 +514,15 @@ private:
 	// Fills the emissive lights and returns the emitter buffer's contents.
 	std::vector<uint32_t> CollectEmitters(const Scene::GLTFScene &scene, const std::vector<GpuMaterial> &materials);
 	// Moves the lights of the dynamic instances to the end of the light buffer,
-	// keeping the order within each part, and renumbers them in the emitter buffer's contents. Also numbers
-	// the emissive instances and resets their emission scales.
+	// keeping the order within each part (the rigid dynamic lights before the skinned ones), and renumbers them in
+	// the emitter buffer's contents. Also numbers the emissive instances and resets their emission scales. Needs the
+	// staged indices and the skinned vertices (PrepareAnimation).
 	void PartitionDynamicLights(std::vector<uint32_t> &emitters);
 	// The dynamic lights' centroid bounds from their instances' current transforms, conservatively: each
 	// instance's object-space bounds moved as a box.
 	void UpdateDynamicLightBounds();
+	// The skinned lights' object-space corners and their instances' centroid bounds from skinnedVertices_.
+	void UpdateSkinnedLights();
 	void UploadEmitters(const std::vector<uint32_t> &emitters, UploadBatchHandle batch);
 	// Fills the opacity micromap tables from the base colour alpha of the alpha-tested primitives.
 	void BakeOpacityMicromaps(const Scene::GLTFScene &scene, const std::vector<GpuMaterial> &materials);
@@ -600,6 +603,9 @@ private:
 				InvalidResourceHandle; // DynamicLightTransform per dynamic instance, when they moved
 		ResourceHandle punctualLights = InvalidResourceHandle; // GpuLight, written whole every frame
 		ResourceHandle emissionScales = InvalidResourceHandle; // written whole every frame
+		// The skinned lights' object-space triangles (dynamicObjectLights_ from skinnedLightStart_), with transforms
+		ResourceHandle skinnedLights = InvalidResourceHandle;
+		size_t skinnedLightCapacity = 0;
 		size_t transformCapacity = 0;
 		size_t punctualLightCapacity = 0;
 		size_t emissionScaleCapacity = 0;
@@ -694,6 +700,11 @@ private:
 	std::vector<std::array<float, 12>> dynamicLastFrameTransforms_;
 	std::vector<GpuLight> dynamicObjectLights_; // per dynamic light, its triangle in object space
 	std::vector<uint32_t> dynamicLightInstance_; // per dynamic light, into dynamicInstances_
+	// The dynamic lights from skinnedLightStart_ on are triangles of skinned meshes. The anchor transform alone does
+	// not place them, so ApplyAnimationPose rewrites their object-space corners from the skinned vertices.
+	uint32_t skinnedLightStart_ = 0;
+	std::vector<uint32_t> skinnedLightCorners_; // 3 per skinned light, into skinnedVertices_, in the light's order
+	std::vector<uint32_t> skinnedLightInstances_; // the dynamic instances with skinned lights
 	// Per dynamic instance, the bounds of its lights' object-space centroids, empty (min above max) without lights.
 	std::vector<std::array<float3, 2>> dynamicObjectLightBounds_;
 	bool dynamicLightsMoved_ = false;

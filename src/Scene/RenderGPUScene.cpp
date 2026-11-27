@@ -450,7 +450,7 @@ void RenderGPUScene::DestroyLights()
 {
 	for (LightFrameBuffers &frame: lightFrames_)
 	{
-		for (ResourceHandle buffer: { frame.transforms, frame.punctualLights, frame.emissionScales })
+		for (ResourceHandle buffer: { frame.transforms, frame.punctualLights, frame.emissionScales, frame.skinnedLights })
 		{
 			if (buffer != InvalidResourceHandle)
 			{
@@ -564,6 +564,18 @@ void RenderGPUScene::UpdateLights()
 												  transforms.size(),
 												  "Scene_DynamicLightTransforms");
 		WriteLightRange<DynamicLightTransform>(renderContext_, frame.transforms, 0, transforms);
+		// The skinned lights' corners as ApplyAnimationPose last skinned them, moved with the transforms.
+		const std::span<const GpuLight> skinnedLights =
+				std::span<const GpuLight>(dynamicObjectLights_).subspan(skinnedLightStart_);
+		if (!skinnedLights.empty())
+		{
+			ReserveLightBuffer<GpuLight>(renderContext_,
+										 frame.skinnedLights,
+										 frame.skinnedLightCapacity,
+										 skinnedLights.size(),
+										 "Scene_SkinnedLights");
+			WriteLightRange<GpuLight>(renderContext_, frame.skinnedLights, 0, skinnedLights);
+		}
 		transformsWritten_ = true;
 	}
 	ReserveLightBuffer<GpuLight>(renderContext_,
@@ -610,6 +622,11 @@ void RenderGPUScene::AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights)
 				frame.DescriptorIndex(transformsWritten_ ? lightFrame.transforms : dynamicObjectLightBuffer_);
 		constants.punctualLightsHandle = frame.DescriptorIndex(lightFrame.punctualLights);
 		constants.lightsHandle = frame.DescriptorIndex(lights_);
+		// Not read without skinned lights, or when the dynamic lights are not moved this frame.
+		const bool skinned = transformsWritten_ && skinnedLightStart_ < dynamicLightCount;
+		constants.skinnedLightStart = skinned ? skinnedLightStart_ : dynamicLightCount;
+		constants.skinnedLightsHandle =
+				frame.DescriptorIndex(skinned ? lightFrame.skinnedLights : dynamicObjectLightBuffer_);
 		const uint32_t threads = dynamicLightCount + punctualLightCount - firstThread;
 		const PipelineHandle pipeline = dynamicLightsPipeline_;
 
@@ -769,6 +786,7 @@ void RenderGPUScene::ApplyAnimationPose(const Animation::Pose &pose)
 			row.tangent = float4(skinned.tangent[0], skinned.tangent[1], skinned.tangent[2], skinned.tangent[3]);
 		}
 		++skinPoseGeneration_;
+		UpdateSkinnedLights();
 	}
 }
 
@@ -977,6 +995,35 @@ void RenderGPUScene::UpdateDynamicLightBounds()
 	}
 }
 
+void RenderGPUScene::UpdateSkinnedLights()
+{
+	if (skinnedLightCorners_.empty())
+	{
+		return;
+	}
+	// A skinned instance's lights are all skinned (every primitive of its mesh is), so its bounds start afresh.
+	for (uint32_t instance: skinnedLightInstances_)
+	{
+		dynamicObjectLightBounds_[instance] = { float3(FLT_MAX, FLT_MAX, FLT_MAX),
+												float3(-FLT_MAX, -FLT_MAX, -FLT_MAX) };
+	}
+	const size_t count = skinnedLightCorners_.size() / 3;
+	for (size_t k = 0; k < count; ++k)
+	{
+		GpuLight &light = dynamicObjectLights_[skinnedLightStart_ + k];
+		float4 *corners[3] = { &light.v1, &light.v2, &light.v3 };
+		for (size_t c = 0; c < 3; ++c)
+		{
+			const float3 &p = skinnedVertices_[skinnedLightCorners_[3 * k + c]].position;
+			*corners[c] = float4(p.x, p.y, p.z, corners[c]->w);
+		}
+		const float3 centroid = LightCentroid(light);
+		std::array<float3, 2> &bounds = dynamicObjectLightBounds_[dynamicLightInstance_[skinnedLightStart_ + k]];
+		bounds[0] = MinFloat3(bounds[0], centroid);
+		bounds[1] = MaxFloat3(bounds[1], centroid);
+	}
+}
+
 void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 {
 	dynamicObjectLights_.clear();
@@ -985,13 +1032,16 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 									 { float3(FLT_MAX, FLT_MAX, FLT_MAX), float3(-FLT_MAX, -FLT_MAX, -FLT_MAX) });
 	dynamicLightsMoved_ = false;
 	emissiveInstances_.clear();
+	skinnedLightStart_ = 0;
+	skinnedLightCorners_.clear();
+	skinnedLightInstances_.clear();
 
 	const uint32_t lightCount = static_cast<uint32_t>(emissiveLights_.size());
 	staticLightCount_ = lightCount;
 	const std::vector<TLASInstanceRef> refs = EnumerateTLASInstances();
 
-	// Calls visit(scene instance, light) for each triangle light, through the emitter tables.
-	auto forEachLight = [&](auto visit)
+	// Calls visit(TLAS instance ref, triangle, light) for each triangle light, through the emitter tables.
+	auto forEachLightTriangle = [&](auto visit)
 	{
 		for (size_t i = 0; i < refs.size(); ++i)
 		{
@@ -1006,10 +1056,15 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 				uint32_t &light = emitters[table + t];
 				if (light != INVALID_LIGHT_INDEX)
 				{
-					visit(refs[i].instance, light);
+					visit(refs[i], t, light);
 				}
 			}
 		}
+	};
+	// Calls visit(scene instance, light) for each triangle light.
+	auto forEachLight = [&](auto visit)
+	{
+		forEachLightTriangle([&](const TLASInstanceRef &ref, uint32_t, uint32_t &light) { visit(ref.instance, light); });
 	};
 
 	std::vector<uint32_t> instanceLights(instances.size(), 0);
@@ -1069,9 +1124,54 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 		return;
 	}
 
-	// Static lights first and dynamic ones after, each in their old order.
+	// Static lights first, then the rigid dynamic ones, then the skinned ones, each in their old order. A skinned
+	// light keeps the skinned vertices of its corners, in the order CollectEmitters gave them at rest.
 	std::vector<uint32_t> dynamicOfLight(lightCount, UINT32_MAX);
-	forEachLight([&](uint32_t instance, uint32_t &light) { dynamicOfLight[light] = dynamicOfInstance_[instance]; });
+	std::vector<std::array<uint32_t, 3>> skinnedCorners(lightCount, { UINT32_MAX, UINT32_MAX, UINT32_MAX });
+	std::vector<uint32_t> skinnedFirstVertex(primitiveDescs.size(), UINT32_MAX);
+	for (const Animation::SkinnedPrimitive &primitive: skinnedPrimitives_)
+	{
+		if (primitive.primitive < skinnedFirstVertex.size())
+		{
+			skinnedFirstVertex[primitive.primitive] = primitive.firstVertex;
+		}
+	}
+	uint32_t unskinnableLights = 0;
+	forEachLightTriangle(
+			[&](const TLASInstanceRef &ref, uint32_t t, uint32_t &light)
+			{
+				const uint32_t dynamicInstance = dynamicOfInstance_[ref.instance];
+				dynamicOfLight[light] = dynamicInstance;
+				const uint32_t first = skinnedFirstVertex[ref.primitive];
+				if (dynamicInstance == UINT32_MAX || first == UINT32_MAX)
+				{
+					return;
+				}
+				const PrimitiveGPUDesc &desc = primitiveDescs[ref.primitive];
+				const uint64_t index = static_cast<uint64_t>(desc.indexOffset) + 3ull * t;
+				if (index + 3 > indices_.size() ||
+					static_cast<uint64_t>(first) + desc.vertexCount > skinnedVertices_.size())
+				{
+					++unskinnableLights;
+					return;
+				}
+				const uint32_t *triangle = &indices_[index];
+				if (triangle[0] >= desc.vertexCount || triangle[1] >= desc.vertexCount ||
+					triangle[2] >= desc.vertexCount)
+				{
+					++unskinnableLights;
+					return;
+				}
+				const bool mirrored = dynamicRestMirrored_[dynamicInstance] != 0;
+				skinnedCorners[light] = { first + triangle[0],
+										  first + triangle[mirrored ? 2 : 1],
+										  first + triangle[mirrored ? 1 : 2] };
+			});
+	if (unskinnableLights > 0)
+	{
+		logw("GPUScene: {} skinned triangle light(s) without their staged indices only follow the skin's anchor",
+			 unskinnableLights);
+	}
 	std::vector<uint32_t> newIndex(lightCount);
 	uint32_t next = 0;
 	for (uint32_t light = 0; light < lightCount; ++light)
@@ -1089,20 +1189,47 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 	{
 		objectFromWorld.push_back(InvertAffine(instances[instance].worldMatrix));
 	}
-	for (uint32_t light = 0; light < lightCount; ++light)
+	for (const bool skinnedPart: { false, true })
 	{
-		const uint32_t dynamicInstance = dynamicOfLight[light];
-		if (dynamicInstance != UINT32_MAX)
+		if (skinnedPart)
 		{
+			skinnedLightStart_ = static_cast<uint32_t>(dynamicObjectLights_.size());
+		}
+		for (uint32_t light = 0; light < lightCount; ++light)
+		{
+			const uint32_t dynamicInstance = dynamicOfLight[light];
+			const bool skinned = skinnedCorners[light][0] != UINT32_MAX;
+			if (dynamicInstance == UINT32_MAX || skinned != skinnedPart)
+			{
+				continue;
+			}
 			newIndex[light] = next++;
 			dynamicLightInstance_.push_back(dynamicInstance);
+			// At rest a skinned mesh's instance is still at its own node, which these corners are in until the
+			// first pose moves both to the anchor (UpdateSkinnedLights).
 			dynamicObjectLights_.push_back(
 					TransformLight(emissiveLights_[light], objectFromWorld[dynamicInstance].data()));
 			const float3 centroid = LightCentroid(dynamicObjectLights_.back());
 			std::array<float3, 2> &bounds = dynamicObjectLightBounds_[dynamicInstance];
 			bounds[0] = MinFloat3(bounds[0], centroid);
 			bounds[1] = MaxFloat3(bounds[1], centroid);
+			if (skinned)
+			{
+				skinnedLightCorners_.insert(skinnedLightCorners_.end(),
+											skinnedCorners[light].begin(),
+											skinnedCorners[light].end());
+				skinnedLightInstances_.push_back(dynamicInstance);
+			}
 		}
+	}
+	std::sort(skinnedLightInstances_.begin(), skinnedLightInstances_.end());
+	skinnedLightInstances_.erase(std::unique(skinnedLightInstances_.begin(), skinnedLightInstances_.end()),
+								 skinnedLightInstances_.end());
+	if (!skinnedLightCorners_.empty())
+	{
+		logi("GPUScene: {} skinned triangle light(s) over {} skinned instance(s) follow the pose",
+			 skinnedLightCorners_.size() / 3,
+			 skinnedLightInstances_.size());
 	}
 
 	std::vector<GpuLight> lights(lightCount);
