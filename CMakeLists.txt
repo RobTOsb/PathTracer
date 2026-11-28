@@ -7,6 +7,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
 
 include(cmake/CPM.cmake)
+include(cmake/streamline.cmake)
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64")
     if(MSVC)

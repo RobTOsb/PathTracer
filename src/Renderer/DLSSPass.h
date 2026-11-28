@@ -2,11 +2,10 @@
 
 #include "RenderPass.h"
 
-#include "DLSSCommon.h"
 #include "RenderContext.h"
+#include "Streamline.h"
 
 class Camera;
-class NGXContext;
 class PathTracerPass;
 struct RenderSettings;
 
@@ -14,7 +13,7 @@ class DLSSPass final : public RenderPass
 {
 public:
 	DLSSPass(RenderContext *renderContext,
-			 NGXContext &ngx,
+			 Streamline &streamline,
 			 const PathTracerPass &pathTracer,
 			 const Camera &camera,
 			 const RenderSettings &settings);
@@ -30,12 +29,14 @@ public:
 
 private:
 	RenderContext *renderContext_ = nullptr;
-	NGXContext &ngx_;
+	Streamline &streamline_;
 	const PathTracerPass &pathTracer_;
 	const Camera &camera_;
 	const RenderSettings &settings_;
 
-	DLSSFeatureParams featureParams_;
+	// main rebuilds the pass when the mode, preset or sizes change.
+	DLSSMode mode_ = DLSSMode::Off;
+	DLSSRayReconstructionPreset preset_ = DLSSRayReconstructionPreset::Default;
 	rg::ResourceId output_;
 	TextureDesc outputDesc_;
 	bool reset_ = true; // no history yet

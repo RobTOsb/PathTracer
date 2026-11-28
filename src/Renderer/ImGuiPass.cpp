@@ -2,6 +2,7 @@
 
 #include "Camera.h"
 #include "FilmLut.h"
+#include "FrameGenerationPass.h"
 #include "FrameGraph.h"
 #include "LensFlarePass.h"
 #include "LightTreeInterop.h"
@@ -9,6 +10,7 @@
 #include "RenderContext.h"
 #include "RenderSettings.h"
 #include "Scene/RenderGPUScene.h"
+#include "Streamline.h"
 
 #include "imgui.h"
 
@@ -77,6 +79,12 @@ namespace
 		{ DLSSRayReconstructionPreset::PresetD, "D" },
 		{ DLSSRayReconstructionPreset::PresetE, "E" },
 		{ DLSSRayReconstructionPreset::PresetF, "F" },
+	};
+
+	constexpr ComboEntry<ReflexMode> kReflexModes[] = {
+		{ ReflexMode::Off, "Off" },
+		{ ReflexMode::LowLatency, "On" },
+		{ ReflexMode::LowLatencyWithBoost, "On + Boost" },
 	};
 
 	// The reference's paths per pixel to stop at, 0 = never stop.
@@ -387,17 +395,26 @@ namespace
 
 ImGuiPass::ImGuiPass(RenderSettings &settings,
 					 const Camera &camera,
-					 bool rayReconstructionSupported,
+					 const Streamline &streamline,
+					 std::unique_ptr<FrameGenerationPass> frameGeneration,
 					 const RenderGPUScene &scene,
 					 const PathTracerPass &pathTracer,
 					 const rg::RenderGraph &graph) :
-	settings_(settings), camera_(camera), rayReconstructionSupported_(rayReconstructionSupported), scene_(scene),
-	pathTracer_(pathTracer), graph_(graph)
+	settings_(settings), camera_(camera), streamline_(streamline),
+	rayReconstructionSupported_(streamline.IsRayReconstructionSupported()), frameGeneration_(std::move(frameGeneration)),
+	scene_(scene), pathTracer_(pathTracer), graph_(graph)
 {
 }
 
+ImGuiPass::~ImGuiPass() = default;
+
 void ImGuiPass::AddPasses(FrameGraph &frame)
 {
+	if (frameGeneration_ && streamline_.IsFrameGenerationOn())
+	{
+		frameGeneration_->AddPasses(frame);
+		return;
+	}
 	const rg::ResourceId backBuffer = frame.backBuffer;
 	frame.AddPass(rg::Pass::Graphics("ImGui")
 								.Use(backBuffer, rg::Access::ColourAttachment)
@@ -408,6 +425,106 @@ void ImGuiPass::AddPasses(FrameGraph &frame)
 											ctx.rc.SetRenderTargets(&renderTarget, 1);
 											ctx.rc.ImguiRender();
 										}));
+}
+
+void ImGuiPass::BuildFrameGenerationUI(bool reference)
+{
+	if (!ImGui::CollapsingHeader("DLSS Frame Generation", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		return;
+	}
+
+	const bool supported = streamline_.IsFrameGenerationSupported();
+	// BuildPasses turns the DLSS mode off where DLSS-RR can't run.
+	const bool rayReconstruction = settings_.dlssMode != DLSSMode::Off;
+	if (!supported)
+	{
+		ImGui::TextDisabled("Not supported on this GPU/driver/OS (see the Streamline log)");
+	}
+	else if (reference)
+	{
+		ImGui::TextDisabled("Off while rendering the reference");
+	}
+	else if (!rayReconstruction)
+	{
+		ImGui::TextDisabled("Needs DLSS Ray Reconstruction, whose depth and motion vectors it reads");
+	}
+
+	const FrameGenerationState &state = streamline_.GetFrameGenerationState();
+	ImGui::BeginDisabled(!supported || reference || !rayReconstruction);
+	ImGui::Checkbox("Frame generation", &settings_.frameGeneration);
+	ImGui::SetItemTooltip("Presents frames that DLSS-G generates between the rendered ones, from their motion vectors "
+						  "and optical flow. Smoother motion at the cost of some latency; the path tracer's own frame "
+						  "rate is unchanged");
+	ImGui::BeginDisabled(!settings_.frameGeneration);
+	const int maxFrames = static_cast<int>(std::max(state.maxFramesToGenerate, 1u));
+	settings_.framesToGenerate = std::clamp(settings_.framesToGenerate, 1, maxFrames);
+	if (maxFrames > 1)
+	{
+		int multiplier = settings_.framesToGenerate + 1;
+		if (ImGui::SliderInt("Multiplier", &multiplier, 2, maxFrames + 1, "%dx"))
+		{
+			settings_.framesToGenerate = std::clamp(multiplier - 1, 1, maxFrames);
+		}
+		ImGui::SetItemTooltip("Frames presented per rendered frame: one rendered, the rest generated");
+	}
+	else
+	{
+		ImGui::TextDisabled("2x: this GPU generates one frame between rendered ones");
+	}
+	if (state.dynamicSupported)
+	{
+		ImGui::Checkbox("Dynamic multiplier", &settings_.dynamicFrameGeneration);
+		ImGui::SetItemTooltip("DLSS-G picks the multiplier each frame, up to the one above, to match the display's "
+							  "refresh rate");
+	}
+	ImGui::EndDisabled();
+	ImGui::EndDisabled();
+
+	if (streamline_.IsFrameGenerationOn())
+	{
+		if (state.error)
+		{
+			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "Not generating: %s", state.error);
+		}
+		else
+		{
+			ImGui::Text("%.0f fps output from %.1f fps rendered (%.2fx)",
+						outputFps_,
+						renderedFps_,
+						renderedFps_ > 0.0f ? outputFps_ / renderedFps_ : 0.0f);
+		}
+	}
+
+	const bool reflexAvailable = streamline_.IsReflexAvailable();
+	ImGui::BeginDisabled(!reflexAvailable);
+	EnumCombo("Reflex", kReflexModes, settings_.reflexMode);
+	ImGui::SetItemTooltip("NVIDIA Reflex low latency: starts each frame just in time for the GPU, rather than queuing "
+						  "frames ahead of it, so the image answers input sooner. Boost also keeps the GPU's clocks "
+						  "up when it is not the bottleneck. Frame generation keeps it on whatever this says");
+	ImGui::EndDisabled();
+	if (!reflexAvailable)
+	{
+		ImGui::TextDisabled("Reflex low latency is not available on this GPU/driver");
+	}
+}
+
+void ImGuiPass::UpdateFrameRates()
+{
+	// DLSS-G's count for the last present: the rendered frame and the generated ones it actually showed, which may be
+	// fewer than asked for when it drops one. 1 without frame generation.
+	++renderedInWindow_;
+	presentedInWindow_ += streamline_.IsFrameGenerationOn() ? streamline_.GetFrameGenerationState().framesPresented : 1u;
+	const auto now = std::chrono::steady_clock::now();
+	const float seconds = std::chrono::duration<float>(now - rateWindowStart_).count();
+	if (seconds >= 0.5f)
+	{
+		renderedFps_ = static_cast<float>(renderedInWindow_) / seconds;
+		outputFps_ = static_cast<float>(presentedInWindow_) / seconds;
+		renderedInWindow_ = 0;
+		presentedInWindow_ = 0;
+		rateWindowStart_ = now;
+	}
 }
 
 void ImGuiPass::BuildStatsWindow(RenderContext *renderContext)
@@ -430,6 +547,22 @@ void ImGuiPass::BuildStatsWindow(RenderContext *renderContext)
 				renderContext->GetWindowHeight(),
 				pathTracer_.IsReference() ? pathTracer_.GetAccumulatedSamples()
 										  : static_cast<uint>(settings_.samplesPerPixel));
+	// The line above is the rendered rate; with frame generation the display shows more.
+	if (streamline_.IsFrameGenerationOn())
+	{
+		const FrameGenerationState &state = streamline_.GetFrameGenerationState();
+		if (state.error)
+		{
+			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "Frame generation not running: %s", state.error);
+		}
+		else
+		{
+			ImGui::Text("Output %.0f fps from %.1f fps rendered (%.2fx, frame generation)",
+						outputFps_,
+						renderedFps_,
+						renderedFps_ > 0.0f ? outputFps_ / renderedFps_ : 0.0f);
+		}
+	}
 	const GPUMemoryStats memoryStats = renderContext->GetMemoryStats();
 	ImGui::Text("VRAM %s / %s (allocator %s)",
 				FormatBytes(memoryStats.local.usageBytes).text,
@@ -453,6 +586,7 @@ void ImGuiPass::BuildStatsWindow(RenderContext *renderContext)
 void ImGuiPass::BuildUI(RenderContext *renderContext)
 {
 	renderContext->ImguiNewFrame();
+	UpdateFrameRates();
 	BuildStatsWindow(renderContext);
 
 	ImGui::SetNextWindowPos(ImVec2(16.0f, 16.0f), ImGuiCond_FirstUseEver);
@@ -586,7 +720,7 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 	{
 		if (!rayReconstructionSupported_)
 		{
-			ImGui::TextDisabled("Not supported on this GPU/driver (see the NGX log)");
+			ImGui::TextDisabled("Not supported on this GPU/driver (see the Streamline log)");
 		}
 		else if (reference)
 		{
@@ -658,6 +792,8 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 	}
+
+	BuildFrameGenerationUI(reference);
 
 	if (ImGui::CollapsingHeader("Sun", ImGuiTreeNodeFlags_DefaultOpen))
 	{

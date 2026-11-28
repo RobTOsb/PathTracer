@@ -12,26 +12,18 @@
 #include <cstring>
 
 DLSSPass::DLSSPass(RenderContext *renderContext,
-				   NGXContext &ngx,
+				   Streamline &streamline,
 				   const PathTracerPass &pathTracer,
 				   const Camera &camera,
 				   const RenderSettings &settings) :
-	renderContext_(renderContext), ngx_(ngx), pathTracer_(pathTracer), camera_(camera), settings_(settings)
+	renderContext_(renderContext), streamline_(streamline), pathTracer_(pathTracer), camera_(camera),
+	settings_(settings)
 {
-	// main rebuilds the pass when the mode or preset changes.
-	featureParams_.kind = DLSSFeatureKind::RayReconstruction;
-	featureParams_.mode = settings.dlssMode;
-	featureParams_.rrPreset = settings.rrPreset;
-	featureParams_.renderWidth = pathTracer.GetWidth();
-	featureParams_.renderHeight = pathTracer.GetHeight();
-	featureParams_.outputWidth = renderContext->GetWindowWidth();
-	featureParams_.outputHeight = renderContext->GetWindowHeight();
-	featureParams_.hdr = true; // linear radiance, exposed by the tonemapper afterwards
-	featureParams_.depthInverted = true; // the camera uses reversed Z
-	featureParams_.packedNormalRoughness = true; // roughness in normalRoughness.w
+	mode_ = settings.dlssMode;
+	preset_ = settings.rrPreset;
 
-	outputDesc_.width = featureParams_.outputWidth;
-	outputDesc_.height = featureParams_.outputHeight;
+	outputDesc_.width = renderContext->GetWindowWidth();
+	outputDesc_.height = renderContext->GetWindowHeight();
 	outputDesc_.format = Format::R16G16B16A16_FLOAT;
 	outputDesc_.usageFlags = ResourceUsageFlags::UnorderedAccess;
 	outputDesc_.debugName = "DLSS_Output";
@@ -41,10 +33,10 @@ DLSSPass::~DLSSPass() = default;
 
 void DLSSPass::AddPasses(FrameGraph &frame)
 {
-	// DLSS reads its inputs from compute shaders and writes the output as a UAV, and returns every
-	// resource to these states when it is done.
+	// DLSS reads its inputs from compute shaders and writes the output as a UAV; Streamline is told they are in those
+	// states, so it transitions nothing and leaves them as they were.
 	// The reflections' motion comes as motion vectors, never as a hit distance for RR to derive it from.
-	// NGX is handed the resources themselves, so it reads the frame's transients wherever the graph placed them.
+	// Streamline is handed the resources themselves, so it reads the frame's transients wherever the graph placed them.
 	const PathTracerGuides guides = pathTracer_.GetGuides();
 	const rg::ResourceId radiance = pathTracer_.GetOutput();
 	output_ = frame.graph.CreateTexture(outputDesc_, ResourceViewType::UnorderedAccess);
@@ -64,56 +56,72 @@ void DLSSPass::AddPasses(FrameGraph &frame)
 	}
 	pass.Use(output, rg::Access::ComputeShaderWrite);
 
+	RayReconstructionInputs eval;
+	eval.mode = mode_;
+	eval.preset = preset_;
+	eval.renderWidth = pathTracer_.GetWidth();
+	eval.renderHeight = pathTracer_.GetHeight();
+	eval.outputWidth = outputDesc_.width;
+	eval.outputHeight = outputDesc_.height;
 	// DLSS wants the jitter as applied to the projection, which shifts the image the opposite
 	// way to the offset the camera rays were sampled at. The projection is unjittered.
 	const float2 jitter = pathTracer_.GetJitter();
+	eval.jitterX = -jitter.x;
+	eval.jitterY = -jitter.y;
+	// Row-major with row vectors, as DirectXMath stores them.
 	const float4x4 view = camera_.GetViewMatrix();
 	const float4x4 projection = camera_.GetProjectionMatrix();
+	const float4x4 prevView = camera_.GetPreviousViewMatrix();
+	const float4x4 prevProjection = camera_.GetPreviousProjectionMatrix();
+	static_assert(sizeof(view) == sizeof(eval.worldToView));
+	std::memcpy(eval.worldToView, &view, sizeof(eval.worldToView));
+	std::memcpy(eval.viewToClip, &projection, sizeof(eval.viewToClip));
+	std::memcpy(eval.prevWorldToView, &prevView, sizeof(eval.prevWorldToView));
+	std::memcpy(eval.prevViewToClip, &prevProjection, sizeof(eval.prevViewToClip));
+	const float3 position = camera_.GetPosition();
+	const float3 up = camera_.GetUp();
+	const float3 right = camera_.GetRight();
+	const float3 forward = camera_.GetFront();
+	std::memcpy(eval.cameraPosition, &position, sizeof(eval.cameraPosition));
+	std::memcpy(eval.cameraUp, &up, sizeof(eval.cameraUp));
+	std::memcpy(eval.cameraRight, &right, sizeof(eval.cameraRight));
+	std::memcpy(eval.cameraForward, &forward, sizeof(eval.cameraForward));
+	eval.nearZ = camera_.GetNearZ();
+	eval.farZ = camera_.GetFarZ();
+	eval.fovY = camera_.GetFovY();
 	const bool responsivity =
-			featureParams_.rrPreset == DLSSRayReconstructionPreset::PresetF && settings_.reflectionResponsivity != 0.0f;
+			preset_ == DLSSRayReconstructionPreset::PresetF && settings_.reflectionResponsivity != 0.0f;
 	const bool cameraCut = settings_.cameraCut;
 
 	frame.AddPass(std::move(pass.Executes(
-			[this, &graph = frame.graph, jitter, view, projection, responsivity, cameraCut, guides, radiance,
-			 output](rg::PassContext &ctx)
+			[this, &graph = frame.graph, eval, responsivity, cameraCut, guides, radiance, output](
+					rg::PassContext &ctx) mutable
 			{
-				// NGX records straight into the native command list, and main only ever creates the D3D12 backend.
+				// Streamline records into the native command list (its proxy), and main only ever creates the D3D12
+				// backend.
 				D3D12RenderContext *d3dContext = static_cast<D3D12RenderContext *>(&ctx.rc);
 				ID3D12GraphicsCommandList *commandList = d3dContext->GetNativeGraphicsCommandList();
-				auto native = [&](rg::ResourceId resource) { return d3dContext->GetNativeResource(graph.GetHandle(resource)); };
+				auto native = [&](rg::ResourceId resource)
+				{ return d3dContext->GetNativeResource(graph.GetHandle(resource)); };
 
-				bool evaluated = ngx_.EnsureFeature(featureParams_, commandList);
-				if (evaluated)
+				eval.colourInput = native(radiance);
+				eval.colourOutput = native(output);
+				eval.depth = native(guides.depth);
+				eval.motionVectors = native(guides.motionVectors);
+				eval.diffuseAlbedo = native(guides.diffuseAlbedo);
+				eval.specularAlbedo = native(guides.specularAlbedo);
+				eval.normalRoughness = native(guides.normalRoughness);
+				eval.specularMotionVectors = native(guides.specularMotionVectors);
+				eval.biasCurrentColourMask = native(guides.shadowChanges);
+				if (responsivity)
 				{
-					DLSSEvalInputs eval = {};
-					eval.colourInput = native(radiance);
-					eval.colourOutput = native(output);
-					eval.depth = native(guides.depth);
-					eval.motionVectors = native(guides.motionVectors);
-					eval.diffuseAlbedo = native(guides.diffuseAlbedo);
-					eval.specularAlbedo = native(guides.specularAlbedo);
-					eval.normalRoughness = native(guides.normalRoughness);
-					eval.specularMotionVectors = native(guides.specularMotionVectors);
-					eval.biasCurrentColourMask = native(guides.shadowChanges);
-					if (responsivity)
-					{
-						eval.responsivityMask = native(guides.responsivity);
-					}
-					eval.renderWidth = featureParams_.renderWidth;
-					eval.renderHeight = featureParams_.renderHeight;
-					eval.reset = reset_ || cameraCut;
-					eval.jitterOffsetX = -jitter.x;
-					eval.jitterOffsetY = -jitter.y;
-
-					// Row-major with row vectors, as DirectXMath stores them.
-					static_assert(sizeof(view) == sizeof(eval.worldToView));
-					std::memcpy(eval.worldToView, &view, sizeof(eval.worldToView));
-					std::memcpy(eval.viewToClip, &projection, sizeof(eval.viewToClip));
-
-					evaluated = ngx_.EvaluateFeature(eval, commandList);
+					eval.responsivityMask = native(guides.responsivity);
 				}
+				eval.reset = reset_ || cameraCut;
 
-				// NGX binds its own descriptor heaps, root signature and pipeline. Every later pass binds its
+				const bool evaluated = streamline_.EvaluateRayReconstruction(eval, commandList);
+
+				// DLSS binds its own descriptor heaps, root signature and pipeline. Every later pass binds its
 				// own pipeline, but the heaps are only set once per frame.
 				ctx.rc.SetDescriptorHeaps();
 
@@ -123,7 +131,8 @@ void DLSSPass::AddPasses(FrameGraph &frame)
 				}
 				else if (!reportedFailure_)
 				{
-					loge("DLSS Ray Reconstruction failed to run (see the NGX log above); the output will be stale.");
+					loge("DLSS Ray Reconstruction failed to run (see the Streamline log above); the output will be "
+						 "stale.");
 					reportedFailure_ = true;
 				}
 			})));

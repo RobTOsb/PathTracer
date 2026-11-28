@@ -1,9 +1,6 @@
 [submodule "external/GLTFScene"]
 	path = external/GLTFScene
 	url = https://github.com/RobTOsb/GLTFScene
-[submodule "external/DLSS"]
-	path = external/DLSS
-	url = https://github.com/NVIDIA/DLSS
 [submodule "external/RenderGraph"]
 	path = external/RenderGraph
 	url = https://github.com/RobTOsb/RenderGraph.git

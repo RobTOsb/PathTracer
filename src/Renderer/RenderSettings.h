@@ -1,7 +1,7 @@
 #pragma once
 
-#include "DLSSCommon.h"
 #include "PathTracerInterop.h"
+#include "Streamline.h"
 
 #include <math.h>
 
@@ -143,9 +143,9 @@ struct AtmosphereSettings
 	// How far the sky visibility ray looks for occluders, metres; 0 for all the way to the sky. Most of what keeps an
 	// enclosed space clear is close by, and a ray through all of a large scene costs as much as a light's shadow ray.
 	float skyVisibilityDistance = 250.0f;
-	// DLSS-RR's guides fade with the air's transmittance to the surface they describe, towards a white albedo (the air's
-	// in-scattered light, which no surface colours) and a rough, reflectionless surface, so thick haze is denoised as the
-	// smooth signal it is rather than as lighting on the surface behind it.
+	// DLSS-RR's guides fade with the air's transmittance to the surface they describe, towards a white albedo (the
+	// air's in-scattered light, which no surface colours) and a rough, reflectionless surface, so thick haze is
+	// denoised as the smooth signal it is rather than as lighting on the surface behind it.
 	bool fogGuides = true;
 	// Next event estimation also samples the sky without the sun disc, in proportion to its luminance (an importance
 	// map rebuilt each frame), and weighs it against BSDF sampling, rather than leaving the sky to BSDF sampling alone.
@@ -358,8 +358,8 @@ struct RenderSettings
 	float peakNits = 1000.0f; // overwritten with the display's reported peak at startup
 	bool hdrGammaCorrection = true; // match the 2.2 gamma SDR displays decode with
 
-	// Film look LUT on the display-encoded SDR image after the tone mapper; in HDR the graded SDR image is carried up to
-	// the peak. 0 = none, i = GetFilmLutFiles()[i - 1] (FilmLut.h, the .dds files in assets/luts).
+	// Film look LUT on the display-encoded SDR image after the tone mapper; in HDR the graded SDR image is carried up
+	// to the peak. 0 = none, i = GetFilmLutFiles()[i - 1] (FilmLut.h, the .dds files in assets/luts).
 	int filmLut = 0;
 	float filmLutStrength = 1.0f; // blend from the tone mapper's output (0) to the LUT's (1)
 
@@ -386,6 +386,14 @@ struct RenderSettings
 
 	DLSSMode dlssMode = DLSSMode::MaxQuality;
 	DLSSRayReconstructionPreset rrPreset = DLSSRayReconstructionPreset::PresetF;
+	// DLSS Frame Generation, which runs only with DLSS-RR (its depth and motion vectors are RR's guides) and never for
+	// the reference. framesToGenerate generated frames follow each rendered one: 1 = 2x.
+	bool frameGeneration = false;
+	int framesToGenerate = 1;
+	// DLSS-G picks the multiplier each frame, up to framesToGenerate's, to hold the display's refresh rate.
+	bool dynamicFrameGeneration = false;
+	// NVIDIA Reflex, which frame generation needs; on by default as NVIDIA asks.
+	ReflexMode reflexMode = ReflexMode::LowLatency;
 	// Primary surface replacement: the guides of a mirror or pane of glass (at most this rough, and
 	// reflecting or transmitting mostly through its specular lobe) describe the surface it reflects or
 	// refracts, so RR denoises that surface's texture detail as it would on screen instead of blurring

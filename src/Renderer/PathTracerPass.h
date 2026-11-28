@@ -147,6 +147,12 @@ public:
 		return reference_;
 	}
 
+	// Whether it writes the guides (for DLSS-RR) each frame.
+	bool HasGuides() const
+	{
+		return rayReconstruction_;
+	}
+
 	// The reference's paths per pixel so far, and the wall-clock seconds they took.
 	uint GetAccumulatedSamples() const
 	{
@@ -171,17 +177,28 @@ private:
 	const Pipeline *SelectPipeline();
 	// Binds the root arguments every DispatchRays of the pipeline takes, from a pass that read the scene and the sky
 	// (RenderGPUScene::UseForTracing, SkyAtmospherePass::UseForTracing).
-	void BindRaytracing(rg::PassContext &ctx, const Pipeline &pipeline, ResourceHandle constantBuffer, bool atmosphere) const;
+	void BindRaytracing(rg::PassContext &ctx,
+						const Pipeline &pipeline,
+						ResourceHandle constantBuffer,
+						bool atmosphere) const;
 	// The real handle of one of this frame's graph resources, or none.
 	ResourceHandle Handle(rg::ResourceId resource) const
 	{
 		return resource.IsValid() ? graph_->GetHandle(resource) : InvalidResourceHandle;
 	}
 	uint DescriptorIndex(rg::ResourceId resource) const;
-	const Pipeline *GetPipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps,
-								bool psr, bool sgLightTree);
-	Pipeline CreatePipeline(bool shaderExecutionReordering, bool atmosphere, bool inlineShadows, bool opacityMicromaps,
-							bool psr, bool sgLightTree) const;
+	const Pipeline *GetPipeline(bool shaderExecutionReordering,
+								bool atmosphere,
+								bool inlineShadows,
+								bool opacityMicromaps,
+								bool psr,
+								bool sgLightTree);
+	Pipeline CreatePipeline(bool shaderExecutionReordering,
+							bool atmosphere,
+							bool inlineShadows,
+							bool opacityMicromaps,
+							bool psr,
+							bool sgLightTree) const;
 	ResourceHandle CreateTarget(Format format, const char *debugName) const;
 	// A render-resolution target of this frame's graph.
 	rg::ResourceId CreateTransientTarget(FrameGraph &frame, Format format, const char *debugName) const;
@@ -199,7 +216,8 @@ private:
 	const bool rayReconstruction_;
 	const bool reference_;
 
-	// Indexed by shaderExecutionReordering, atmosphere, inline shadows, opacity micromaps, then primary surface replacement.
+	// Indexed by shaderExecutionReordering, atmosphere, inline shadows, opacity micromaps, then primary surface
+	// replacement.
 	Pipeline pipelines_[2][2][2][2][2][2];
 	bool serSupported_ = false;
 	bool serFailed_ = false; // the SER pipeline did not compile, so stay on the plain one
@@ -231,12 +249,17 @@ private:
 	PipelineHandle photonPipelines_[PhotonPassCount] = {};
 	PhotonPassConstants PhotonPassConstantsForFrame() const;
 	// Binds a photon map pass, with this frame's transients' descriptors in its constants.
-	void BindPhotonPass(RenderContext &rc, PhotonPass pass, ResourceHandle constantBuffer,
+	void BindPhotonPass(RenderContext &rc,
+						PhotonPass pass,
+						ResourceHandle constantBuffer,
 						const PhotonPassConstants &constants) const;
 	// PhotonMap.slang's passes before the photons are traced: the map adapted, then scanned.
 	// writeConstants writes the frame constants if no pass has yet. Without active, the passes do nothing.
-	void AddPhotonMapPasses(FrameGraph &frame, ResourceHandle constantBuffer, const PhotonPassConstants &constants,
-							const std::function<void(RenderContext &)> &writeConstants, bool active);
+	void AddPhotonMapPasses(FrameGraph &frame,
+							ResourceHandle constantBuffer,
+							const PhotonPassConstants &constants,
+							const std::function<void(RenderContext &)> &writeConstants,
+							bool active);
 	// Kept from frame to frame: the shares, the block sums (whose total the next update reads), the feedback and the
 	// coverage.
 	ResourceHandle photonDensity_[2] = { InvalidResourceHandle, InvalidResourceHandle };

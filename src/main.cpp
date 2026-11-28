@@ -1,14 +1,15 @@
 #include "Camera.h"
 #include "D3D12RenderContext.h"
-#include "DLSSCommon.h"
 #include "GLTFScene.h"
 #include "RenderContext.h"
+#include "Streamline.h"
 #include "Window.h"
 
 #include "Animation/AnimationSystem.h"
 #include "Renderer/AutoExposurePass.h"
 #include "Renderer/BloomPass.h"
 #include "Renderer/DLSSPass.h"
+#include "Renderer/FrameGenerationPass.h"
 #include "Renderer/FrameGraph.h"
 #include "Renderer/GuideViewPass.h"
 #include "Renderer/ImGuiPass.h"
@@ -39,8 +40,6 @@
 #include <Windows.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
-
-#pragma comment(lib, "dxgi.lib")
 
 #undef min
 #undef max
@@ -194,11 +193,13 @@ struct BuiltPasses
 	// The passes at the front of the list (the sky and clouds) that run on the async compute queue when it is on,
 	// alongside the acceleration structure and light tree on graphics.
 	size_t onAsyncCompute = 0;
+	// DLSS Frame Generation can run: DLSS-RR is on, so the path tracer writes the depth and motion vectors it reads.
+	bool frameGeneration = false;
 };
 
 // Makes the passes in the order they add their graph passes.
 BuiltPasses BuildPasses(RenderContext *renderContext,
-					   NGXContext &ngx,
+					   Streamline &streamline,
 					   const RenderGPUScene &gpuScene,
 					   const Camera &camera,
 					   RenderSettings &settings,
@@ -209,17 +210,18 @@ BuiltPasses BuildPasses(RenderContext *renderContext,
 
 	// The reference renders at the window's resolution without DLSS, leaving the DLSS mode for when it ends.
 	const bool reference = settings.renderMode == RenderMode::Reference;
-	DLSSOptimalSettings optimal;
+	uint32_t renderWidth = 0;
+	uint32_t renderHeight = 0;
 	const bool rayReconstruction = !reference && settings.dlssMode != DLSSMode::Off &&
-								   ngx.IsRayReconstructionSupported() &&
-								   ngx.GetOptimalSettings(DLSSFeatureKind::RayReconstruction,
-														  settings.dlssMode,
-														  renderContext->GetWindowWidth(),
-														  renderContext->GetWindowHeight(),
-														  optimal);
+								   streamline.IsRayReconstructionSupported() &&
+								   streamline.GetOptimalRenderSize(settings.dlssMode,
+																   renderContext->GetWindowWidth(),
+																   renderContext->GetWindowHeight(),
+																   renderWidth,
+																   renderHeight);
 	if (rayReconstruction)
 	{
-		renderContext->SetRenderResolution(optimal.optimalRenderWidth, optimal.optimalRenderHeight);
+		renderContext->SetRenderResolution(renderWidth, renderHeight);
 	}
 	else
 	{
@@ -245,7 +247,7 @@ BuiltPasses BuildPasses(RenderContext *renderContext,
 	passes.push_back(std::move(atmosphere));
 	if (rayReconstruction)
 	{
-		auto dlss = std::make_unique<DLSSPass>(renderContext, ngx, *pathTracer, camera, settings);
+		auto dlss = std::make_unique<DLSSPass>(renderContext, streamline, *pathTracer, camera, settings);
 		radiance = [&dlssPass = *dlss] { return dlssPass.GetOutput(); };
 		passes.push_back(std::move(pathTracer));
 		passes.push_back(std::move(dlss));
@@ -271,11 +273,19 @@ BuiltPasses BuildPasses(RenderContext *renderContext,
 	{
 		passes.push_back(std::make_unique<GuideViewPass>(renderContext, pathTracerPass, settings));
 	}
+	const bool frameGeneration = rayReconstruction && streamline.IsFrameGenerationSupported();
 	auto imgui = std::make_unique<ImGuiPass>(
-			settings, camera, ngx.IsRayReconstructionSupported(), gpuScene, pathTracerPass, graph);
+			settings,
+			camera,
+			streamline,
+			frameGeneration ? std::make_unique<FrameGenerationPass>(renderContext, streamline, pathTracerPass) : nullptr,
+			gpuScene,
+			pathTracerPass,
+			graph);
 	BuiltPasses built;
 	built.ui = imgui.get();
 	built.onAsyncCompute = 1;
+	built.frameGeneration = frameGeneration;
 	passes.push_back(std::move(imgui));
 	return built;
 }
@@ -473,8 +483,21 @@ int Run(const char *scenePath)
 {
 	Window window(WindowDesc{ "PathTracer", 1920, 1080, true });
 
-	std::unique_ptr<RenderContext> renderContext(
-			CreateRenderContext(&window, RenderAPI::D3D12, kFramesInFlight, kSwapchainImageCount, false, true));
+	// Before the first D3D12 or DXGI call, so that the device, factory and swap chain the render context makes are
+	// Streamline's proxies.
+	Streamline::Initialise();
+	std::unique_ptr<RenderContext> renderContext(CreateRenderContext(
+			&window,
+			RenderAPI::D3D12,
+			kFramesInFlight,
+			kSwapchainImageCount,
+			false,
+			true,
+			[](void *device) { Streamline::AttachDevice(static_cast<ID3D12Device *>(device)); }));
+	// Declared after the render context, so it shuts Streamline down before the device goes, and before everything
+	// else here, so it outlives the DLSS-RR feature the passes use. Without an NVIDIA GPU and a driver that runs it, or
+	// without nvngx_dlssd.dll, DLSS-RR is simply unavailable.
+	Streamline streamline(static_cast<D3D12RenderContext *>(renderContext.get())->GetDevice()->GetNativeDevice().Get());
 	renderContext->CreatePerFrameResources();
 	renderContext->InitialiseImgui(window.GetNativeWindow());
 
@@ -533,13 +556,8 @@ int Run(const char *scenePath)
 		logi("Camera restored from '{}'", bookmarkPath.string());
 	}
 
-	// Declared before the passes so it outlives the DLSS feature they use. Without it (no NVIDIA
-	// GPU, old driver, missing nvngx_dlssd.dll) DLSS-RR is simply unavailable.
-	NGXContext ngx;
-	ngx.Initialise(static_cast<D3D12RenderContext *>(renderContext.get())->GetDevice());
-
 	std::vector<std::unique_ptr<RenderPass>> passes;
-	BuiltPasses built = BuildPasses(renderContext.get(), ngx, gpuScene, camera, settings, graph, passes);
+	BuiltPasses built = BuildPasses(renderContext.get(), streamline, gpuScene, camera, settings, graph, passes);
 	RenderMode builtRenderMode = settings.renderMode;
 	DLSSMode builtMode = settings.dlssMode;
 	DLSSRayReconstructionPreset builtPreset = settings.rrPreset;
@@ -564,8 +582,14 @@ int Run(const char *scenePath)
 	float3 userPosition = camera.GetPosition();
 	float userYaw = camera.GetYaw();
 	float userPitch = camera.GetPitch();
-	while (window.ProcessEvents())
+	while (true)
 	{
+		// The frame starts with the Reflex sleep, before the input it answers is read.
+		streamline.BeginFrame();
+		if (!window.ProcessEvents())
+		{
+			break;
+		}
 		const auto now = std::chrono::steady_clock::now();
 		const float deltaSeconds = std::chrono::duration<float>(now - lastTime).count();
 		lastTime = now;
@@ -576,12 +600,22 @@ int Run(const char *scenePath)
 		if (settings.renderMode != builtRenderMode || settings.dlssMode != builtMode || settings.rrPreset != builtPreset)
 		{
 			renderContext->WaitForGPUIdle();
-			ngx.ReleaseFeature();
-			built = BuildPasses(renderContext.get(), ngx, gpuScene, camera, settings, graph, passes);
+			streamline.FreeRayReconstruction();
+			built = BuildPasses(renderContext.get(), streamline, gpuScene, camera, settings, graph, passes);
 			builtRenderMode = settings.renderMode;
 			builtMode = settings.dlssMode;
 			builtPreset = settings.rrPreset;
 		}
+		// Before the frame tags anything: whether ImGuiPass hands this frame to DLSS-G follows from it. Frame generation
+		// needs Reflex, so it keeps it on.
+		FrameGenerationOptions frameGeneration;
+		frameGeneration.enabled = built.frameGeneration && settings.frameGeneration;
+		frameGeneration.framesToGenerate = static_cast<uint32_t>(std::max(settings.framesToGenerate, 1));
+		frameGeneration.dynamic = settings.dynamicFrameGeneration;
+		streamline.SetFrameGeneration(frameGeneration);
+		streamline.SetReflexMode(streamline.IsFrameGenerationOn() && settings.reflexMode == ReflexMode::Off
+										 ? ReflexMode::LowLatency
+										 : settings.reflexMode);
 
 		// Last frame's matrices, for the motion vectors.
 		camera.UpdatePreviousMatrices();
@@ -734,6 +768,8 @@ int Run(const char *scenePath)
 			}
 		}
 
+		streamline.MarkSimulationEnd();
+		streamline.MarkRenderSubmitStart();
 		renderContext->BeginFrame();
 
 		// After BeginFrame, which frees this frame's light buffers.
@@ -819,7 +855,13 @@ int Run(const char *scenePath)
 
 		renderContext->EndGraphicsCommandList();
 		renderContext->EndFrame();
+		streamline.MarkRenderSubmitEnd();
+		// With frame generation on, Streamline's swap chain queues the frame and its generated ones to present on its
+		// own queue.
+		streamline.MarkPresentStart();
 		renderContext->Present();
+		streamline.MarkPresentEnd();
+		streamline.UpdateFrameGenerationState();
 
 		fmtlog::poll();
 	}
