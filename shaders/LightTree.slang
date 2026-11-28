@@ -7,9 +7,11 @@
 // - under SG_LIGHT_TREE, their SG lighting (Sections 3 to 6, SGLighting.slang): the cluster as an SG light, the
 //   diffuse importance by interpolation (Eq. 7) and the glossy one by filtered anisotropic GGX (Eq. 12), with their
 //   point light forms for small, distant clusters wholly above the horizon. More accurate, far more code.
-// LightTreeBuild.slang builds the tree on the GPU every frame, Morton sorted after Lin and Yuksel 2020. Its links are
-// implicit (LightTreeShape) and its nodes 16 bytes (GpuLightTreeNode), a group of four half a cache line, so that
-// the walks, which take a line per level in every lane, move as little as they can through the L2.
+// LightTreeBuild.slang builds the tree on the GPU, either as one tree Morton sorted every frame after Lin and Yuksel
+// 2020, or as the two-level hierarchy of Moreau, Pharr and Clarberg 2019: a TLAS rebuilt every frame over BLASes
+// that are refit (GpuLightBlas), which one walk goes down in turn. Its links are implicit (LightTreeShape) and its
+// nodes 16 bytes (GpuLightTreeNode), a group of four half a cache line, so that the walks, which take a line per
+// level in every lane, move as little as they can through the L2.
 
 #include "LightTreeInterop.h"
 
@@ -310,48 +312,80 @@ uint LightTreePickChild(float4 importance, float sum, inout float u)
 // lights in Morton order, leafSize at a time, all on level leafLevel; each level above has a quarter as many nodes,
 // rounded up, and every level is padded to whole groups and stored from the root group down, so node j of a level
 // has its children at 4j of the level below.
+//
+// With the two-level hierarchy (blasLeafSize > 0, see GpuLightBlas) that shape is the TLAS's, over lightCount BLASes
+// with a leaf each: TLAS leaf j is BLAS leafLights[tlasEntryOffset + j].index, and the walk carries on down that
+// BLAS, an implicit tree of the same shape over its own lights, leaves of blasLeafSize, from its nodeOffset.
 struct LightTreeShape
 {
     uint leafLevel;
     uint lightCount;
     uint leafSize;
-
-    uint LeafCount()
-    {
-        return (lightCount + leafSize - 1) / leafSize;
-    }
+    uint blasLeafSize; // 0 for the single-level tree
+    uint tlasEntryOffset; // where the TLAS's entries start in the leaf buffers: the light count
 };
 
-// Where a light sits in the tree, for following it down: its leaf's position along the leaf level and its PMF within
-// the leaf. The position's base-4 digits, from the top, are the child taken in each group on the way down. A light
-// without a leaf has position 0 and a PMF of 0, so its path is meaningless but its PMF comes out 0.
+// Where a light sits in the hierarchy, for following it down: its leaf's position along its tree's leaf level and its
+// PMF within the leaf. The position's base-4 digits, from the top, are the child taken in each group on the way
+// down. In the two-level hierarchy, tlasPosition is its BLAS's leaf along the TLAS's, and leafPmf takes in that
+// TLAS leaf's PMF too (1, or 0 for a BLAS without flux). A light without a leaf has a PMF of 0, so its path is
+// meaningless but its PMF comes out 0.
 struct LightTreePath
 {
+    uint tlasPosition;
     uint leafPosition;
     float leafPmf;
 };
 
-LightTreePath LightTreeFindLight(StructuredBuffer<GpuLightTreeLeafEntry> leafOfLight, uint lightIndex)
+LightTreePath LightTreeFindLight(StructuredBuffer<GpuLightTreeLeafEntry> leafOfLight, StructuredBuffer<uint> lightBlas,
+                                 LightTreeShape shape, uint lightIndex)
 {
     GpuLightTreeLeafEntry leaf = leafOfLight[lightIndex];
     LightTreePath path;
+    path.tlasPosition = 0;
     path.leafPosition = leaf.index;
     path.leafPmf = leaf.pmf;
+    if (shape.blasLeafSize > 0)
+    {
+        GpuLightTreeLeafEntry tlasLeaf = leafOfLight[shape.tlasEntryOffset + lightBlas[lightIndex]];
+        path.tlasPosition = tlasLeaf.index;
+        path.leafPmf *= tlasLeaf.pmf;
+    }
+    // Without a leaf the path may lead out of its tree; leaf 0 of the first BLAS is in every tree.
+    if (!(path.leafPmf > 0.0))
+    {
+        path.tlasPosition = 0;
+        path.leafPosition = 0;
+    }
     return path;
 }
 
+// The lights of one leaf: its slots in the leaf light buffer.
+struct LightTreeLeaf
+{
+    uint firstSlot;
+    uint count;
+};
+
 // One walk from the root down to a leaf, both for drawing a sample and for the PMF of a known light, so that a wave
 // whose lanes need either runs the node importance once per level rather than in two walks. follow: take the child on
-// the way to leafPosition; otherwise pick each child in proportion to its importance with u, which is rescaled at each
-// level. leaf is the leaf's position along its level, pmf the product of the taken children's shares of their group's
-// importance. False, with a pmf of 0, where the lane's child has no importance: an empty group when sampling, a light
-// the shading point cannot see the cluster of when following.
-bool WalkLightTree(StructuredBuffer<GpuLightTreeNode> nodes, LightTreeShadingContext ctx, LightTreeShape shape, bool follow,
-                   uint leafPosition, inout float u, out uint leaf, out float pmf)
+// the way to path's leaf; otherwise pick each child in proportion to its importance with u, which is rescaled at each
+// level. pmf is the product of the taken children's shares of their group's importance. In the two-level hierarchy
+// the same loop goes on from the TLAS leaf into its BLAS, so the node importance is compiled once. False, with a pmf
+// of 0, where the lane's child has no importance: an empty group when sampling, a light the shading point cannot see
+// the cluster of when following.
+bool WalkLightTree(StructuredBuffer<GpuLightTreeNode> nodes, StructuredBuffer<GpuLightTreeLeafEntry> leafLights,
+                   StructuredBuffer<GpuLightBlas> blases, LightTreeShadingContext ctx, LightTreeShape shape, bool follow,
+                   LightTreePath path, inout float u, out LightTreeLeaf leaf, out float pmf)
 {
     pmf = 1.0;
-    leaf = 0;
-    uint leafCount = shape.LeafCount();
+    leaf.firstSlot = 0;
+    leaf.count = 0;
+    bool inTlas = shape.blasLeafSize > 0;
+    uint lightCount = shape.lightCount; // of the tree being walked
+    uint leafSize = shape.leafSize;
+    uint firstSlot = 0; // the tree's first leaf slot
+    uint position = inTlas ? path.tlasPosition : path.leafPosition; // the leaf followed in this tree
     uint shift = 2 * shape.leafLevel; // of the digit of the child taken at this level, 2 less each level down
     uint levelFirst = 0; // the level's first node
     uint group = 0; // the group's first node along the level
@@ -361,7 +395,7 @@ bool WalkLightTree(StructuredBuffer<GpuLightTreeNode> nodes, LightTreeShadingCon
         float4 importance = LightTreeGroupImportance(nodes, levelFirst + group, ctx);
         float sum = LightTreeImportanceSum(importance);
         // A sampled child never lacks importance when the group has some (LightTreePickChild).
-        uint chosen = follow ? (leafPosition >> shift) & (LIGHT_TREE_WIDTH - 1) : LightTreePickChild(importance, sum, u);
+        uint chosen = follow ? (position >> shift) & (LIGHT_TREE_WIDTH - 1) : LightTreePickChild(importance, sum, u);
         float share = importance[chosen];
         if (!(share > 0.0 && sum > 0.0))
         {
@@ -369,34 +403,49 @@ bool WalkLightTree(StructuredBuffer<GpuLightTreeNode> nodes, LightTreeShadingCon
             return false;
         }
         pmf *= share / sum;
-        uint position = group + chosen;
+        uint node = group + chosen;
         if (shift == 0)
         {
-            leaf = position;
-            return true;
+            if (!inTlas)
+            {
+                uint begin = node * leafSize;
+                leaf.firstSlot = firstSlot + begin;
+                leaf.count = min(leafSize, lightCount - begin);
+                return true;
+            }
+            // Down into the BLAS of the TLAS leaf, from its root group.
+            GpuLightBlas blas = blases[leafLights[shape.tlasEntryOffset + node].index];
+            inTlas = false;
+            lightCount = blas.lightCount;
+            leafSize = shape.blasLeafSize;
+            firstSlot = blas.firstLight;
+            position = path.leafPosition;
+            shift = 2 * blas.leafLevel;
+            levelFirst = blas.nodeOffset;
+            group = 0;
+            continue;
         }
         // Past this level's nodes, padded to whole groups, to the chosen node's children.
+        uint leafCount = (lightCount + leafSize - 1) / leafSize;
         uint width = (leafCount + (1u << shift) - 1) >> shift;
         levelFirst += (width + LIGHT_TREE_WIDTH - 1) & ~(LIGHT_TREE_WIDTH - 1);
-        group = position * LIGHT_TREE_WIDTH;
+        group = node * LIGHT_TREE_WIDTH;
         shift -= 2;
     }
     return false;
 }
 
-// A light of leaf (its position along the leaf level) in proportion to its share of the leaf's flux, picked with u,
-// and that share.
-void PickLeafLight(StructuredBuffer<GpuLightTreeLeafEntry> leafLights, LightTreeShape shape, uint leaf, float u,
-                   out uint lightIndex, out float pmf)
+// A light of leaf in proportion to its share of the leaf's flux, picked with u, and that share.
+void PickLeafLight(StructuredBuffer<GpuLightTreeLeafEntry> leafLights, LightTreeLeaf leaf, float u, out uint lightIndex,
+                   out float pmf)
 {
-    // The leaf's entries are loaded together; past its count they repeat its last one. Lights without flux, sorted
-    // to the end, keep a slot with a PMF of 0, which is never picked.
-    uint begin = leaf * shape.leafSize;
-    uint last = min(shape.leafSize, shape.lightCount - begin) - 1;
+    // The leaf's entries are loaded together; past its count they repeat its last one. Lights without flux keep a
+    // slot with a PMF of 0, which is never picked.
+    uint last = leaf.count - 1;
     GpuLightTreeLeafEntry entries[LIGHT_TREE_MAX_LEAF_LIGHTS];
     [unroll]
     for (uint i = 0; i < LIGHT_TREE_MAX_LEAF_LIGHTS; ++i)
-        entries[i] = leafLights[begin + min(i, last)];
+        entries[i] = leafLights[leaf.firstSlot + min(i, last)];
 
     uint chosen = 0;
     float before = 0.0;
@@ -415,26 +464,29 @@ void PickLeafLight(StructuredBuffer<GpuLightTreeLeafEntry> leafLights, LightTree
 // flux. u is a uniform random number in [0, 1) which is rescaled at each level.
 // Returns false when no light can contribute.
 bool SampleLightTree(StructuredBuffer<GpuLightTreeNode> nodes, StructuredBuffer<GpuLightTreeLeafEntry> leafLights,
-                     LightTreeShadingContext ctx, LightTreeShape shape, float u, out uint lightIndex, out float pmf)
+                     StructuredBuffer<GpuLightBlas> blases, LightTreeShadingContext ctx, LightTreeShape shape, float u,
+                     out uint lightIndex, out float pmf)
 {
     lightIndex = 0;
-    uint leaf;
-    if (!WalkLightTree(nodes, ctx, shape, false, 0, u, leaf, pmf))
+    LightTreeLeaf leaf;
+    LightTreePath path = { 0, 0, 1.0 };
+    if (!WalkLightTree(nodes, leafLights, blases, ctx, shape, false, path, u, leaf, pmf))
         return false;
     float leafPmf;
-    PickLeafLight(leafLights, shape, leaf, u, lightIndex, leafPmf);
+    PickLeafLight(leafLights, leaf, u, lightIndex, leafPmf);
     pmf *= leafPmf;
     return true;
 }
 
 // Probability of SampleLightTree selecting lightIndex. Needed for MIS when BRDF sampling hits an emitter.
-float LightTreePmf(StructuredBuffer<GpuLightTreeNode> nodes, StructuredBuffer<GpuLightTreeLeafEntry> leafOfLight,
-                   LightTreeShadingContext ctx, LightTreeShape shape, uint lightIndex)
+float LightTreePmf(StructuredBuffer<GpuLightTreeNode> nodes, StructuredBuffer<GpuLightTreeLeafEntry> leafLights,
+                   StructuredBuffer<GpuLightTreeLeafEntry> leafOfLight, StructuredBuffer<GpuLightBlas> blases,
+                   StructuredBuffer<uint> lightBlas, LightTreeShadingContext ctx, LightTreeShape shape, uint lightIndex)
 {
-    LightTreePath path = LightTreeFindLight(leafOfLight, lightIndex);
+    LightTreePath path = LightTreeFindLight(leafOfLight, lightBlas, shape, lightIndex);
     float u = 0.0;
-    uint leaf;
+    LightTreeLeaf leaf;
     float pmf;
-    WalkLightTree(nodes, ctx, shape, true, path.leafPosition, u, leaf, pmf);
+    WalkLightTree(nodes, leafLights, blases, ctx, shape, true, path, u, leaf, pmf);
     return pmf * path.leafPmf;
 }

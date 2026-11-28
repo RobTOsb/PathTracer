@@ -751,8 +751,18 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::Text("%u emissive triangle(s), %u of them dynamic",
 					scene_.GetTriangleLightCount(),
 					scene_.GetTriangleLightCount() - scene_.GetStaticLightCount());
-		ImGui::Text("%u point / spot light(s)", scene_.GetPunctualLightCount());
-		ImGui::Text("Tree depth: %u (4-wide), rebuilt on the GPU every frame", scene_.GetLightTreeDepth());
+		ImGui::Text("%u point / spot light(s), %u swarm light(s)", scene_.GetPunctualLightCount(), scene_.GetSwarmLightCount());
+		if (scene_.IsLightTreeTwoLevel())
+		{
+			ImGui::Text("TLAS over %u BLAS(es), depth %u; deepest BLAS %u (4-wide)",
+						scene_.GetLightTreeBlasCount(),
+						scene_.GetLightTreeDepth(),
+						scene_.GetLightTreeMaxBlasDepth());
+		}
+		else
+		{
+			ImGui::Text("Tree depth: %u (4-wide), rebuilt on the GPU every frame", scene_.GetLightTreeDepth());
+		}
 		if (lights.bunnyCount > 0)
 		{
 			ImGui::Checkbox("Flash bunnies", &lights.flashBunnies);
@@ -796,12 +806,68 @@ void ImGuiPass::BuildUI(RenderContext *renderContext)
 		ImGui::EndDisabled();
 		ImGui::EndDisabled();
 		ImGui::SliderInt("Lights per leaf", &lights.maxLeafLights, 1, static_cast<int>(LIGHT_TREE_MAX_LEAF_LIGHTS));
-		ImGui::SetItemTooltip("Light tree leaf size; a leaf's lights are picked in proportion to their flux");
+		ImGui::SetItemTooltip("Light tree leaf size; a leaf's lights are picked in proportion to their flux. In the "
+							  "two-level tree a change rebuilds the BLASes' topology");
+		ImGui::Checkbox("Two-level tree", &lights.twoLevelTree);
+		ImGui::SetItemTooltip("A bottom-level tree per emissive mesh, punctual light and swarm, built once and refit "
+							  "every frame, under a top-level tree rebuilt every frame (Moreau, Pharr and Clarberg "
+							  "2019). Off: one tree over every light, Morton sorted and rebuilt every frame");
 		ImGui::SliderFloat("Power mix", &lights.treePowerMix, 0.0f, 1.0f, "%.2f");
 		ImGui::SetItemTooltip("Share of the tree's light samples that select by power instead, weighed by both "
 							  "PMFs: caps the noise of lights the tree underrates (point lights off glossy lobes "
 							  "or right next to a surface). 0 = the tree alone");
 		ImGui::EndDisabled();
+		ImGui::EndDisabled();
+	}
+
+	if (ImGui::CollapsingHeader("Light swarms", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		LightSwarmSettings &swarms = settings_.swarms;
+		ImGui::Checkbox("Enabled##swarms", &swarms.enabled);
+		ImGui::SetItemTooltip("Swarms of point lights that wander the scene and flash, each a BLAS of the two-level "
+							  "light tree, to stress it with millions of moving lights while no geometry moves");
+		ImGui::BeginDisabled(!swarms.enabled);
+		// A new count makes new light buffers and a new tree, so it applies when the slider is let go.
+		static int swarmCount = 0;
+		static int lightsPerSwarm = 0;
+		static bool editingCount = false;
+		static bool editingLights = false;
+		if (!editingCount)
+		{
+			swarmCount = swarms.swarmCount;
+		}
+		if (!editingLights)
+		{
+			lightsPerSwarm = swarms.lightsPerSwarm;
+		}
+		ImGui::SliderInt("Swarms", &swarmCount, 1, 8192, "%d", ImGuiSliderFlags_Logarithmic);
+		editingCount = ImGui::IsItemActive();
+		if (ImGui::IsItemDeactivatedAfterEdit())
+		{
+			swarms.swarmCount = swarmCount;
+		}
+		ImGui::SliderInt("Lights per swarm", &lightsPerSwarm, 1, 4096, "%d", ImGuiSliderFlags_Logarithmic);
+		editingLights = ImGui::IsItemActive();
+		if (ImGui::IsItemDeactivatedAfterEdit())
+		{
+			swarms.lightsPerSwarm = lightsPerSwarm;
+		}
+		ImGui::Text("%.2f million lights (at most 16.8)",
+					static_cast<double>(swarmCount) * static_cast<double>(lightsPerSwarm) * 1.0e-6);
+		ImGui::Checkbox("Animate##swarms", &swarms.animate);
+		ImGui::SetItemTooltip("Move and flash; held still in the reference");
+		ImGui::SliderFloat("Speed##swarms", &swarms.speed, 0.0f, 10.0f, "%.2f");
+		ImGui::SliderFloat("Flash rate", &swarms.flashRate, 0.0f, 10.0f, "%.2f / s");
+		ImGui::SetItemTooltip("Flashes per second of a light, on average; each light keeps its own clock. 0 holds "
+							  "each light where its flash is");
+		ImGui::SliderFloat("Intensity##swarms", &swarms.intensity, 1.0e-4f, 10.0f, "%.4f W/sr", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Radiant intensity of a light at the peak of its flash");
+		ImGui::SliderFloat("Radius##swarms", &swarms.radius, 0.001f, 0.2f, "%.3f", ImGuiSliderFlags_Logarithmic);
+		ImGui::SetItemTooltip("Of a swarm, as a share of the scene's larger horizontal extent");
+		ImGui::SliderFloat("Spread##swarms", &swarms.spread, 0.0f, 1.0f, "%.2f");
+		ImGui::SetItemTooltip("Share of the scene across, around its centre, that the swarms wander");
+		ImGui::SliderFloat("Height##swarms", &swarms.height, 0.0f, 1.0f, "%.2f");
+		ImGui::SetItemTooltip("Share of the scene's height, from its floor, that the swarms fly through");
 		ImGui::EndDisabled();
 	}
 

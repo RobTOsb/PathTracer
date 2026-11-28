@@ -387,6 +387,11 @@ RenderGPUScene::RenderGPUScene(RenderContext *renderContext) :
 	{
 		throw std::runtime_error("Failed to create the dynamic lights pipeline (see the shader log above).");
 	}
+	swarmPipeline_ = renderContext->CreateComputePipeline(PATHTRACER_SHADER_DIR "LightSwarms.slang", "AnimateLightSwarms");
+	if (swarmPipeline_ == InvalidPipelineHandle)
+	{
+		throw std::runtime_error("Failed to create the light swarm pipeline (see the shader log above).");
+	}
 }
 
 RenderGPUScene::~RenderGPUScene()
@@ -450,7 +455,7 @@ void RenderGPUScene::DestroyLights()
 {
 	for (LightFrameBuffers &frame: lightFrames_)
 	{
-		for (ResourceHandle buffer: { frame.transforms, frame.punctualLights, frame.emissionScales })
+		for (ResourceHandle buffer: { frame.transforms, frame.punctualLights, frame.emissionScales, frame.skinnedLights })
 		{
 			if (buffer != InvalidResourceHandle)
 			{
@@ -466,7 +471,7 @@ void RenderGPUScene::DestroyLights()
 
 void RenderGPUScene::DestroyLightBuffers()
 {
-	for (ResourceHandle *buffer: { &lights_, &dynamicObjectLightBuffer_, &dynamicLightInstanceBuffer_ })
+	for (ResourceHandle *buffer: { &lights_, &dynamicObjectLightBuffer_, &dynamicLightInstanceBuffer_, &allLightEmitters_ })
 	{
 		if (*buffer != InvalidResourceHandle)
 		{
@@ -475,16 +480,21 @@ void RenderGPUScene::DestroyLightBuffers()
 		}
 	}
 	lightsPose_ = UINT32_MAX;
+	swarmLightsWritten_ = false;
 }
 
 void RenderGPUScene::CreateLightBuffers(std::span<const GpuLight> punctualLights)
 {
 	DestroyLightBuffers();
 	// At least one element each, so the bindings stay valid without lights. The dynamic lights start at rest,
-	// and the first BuildLightTree moves them.
+	// and the first BuildLightTree moves them. The swarms' lights are left for their first Lights/Swarms.
 	std::vector<GpuLight> lights(emissiveLights_.begin(), emissiveLights_.end());
 	lights.insert(lights.end(), punctualLights.begin(), punctualLights.end());
-	lights.resize(std::max<size_t>(lights.size(), 1), GpuLight{});
+	lights.resize(std::max<size_t>(lights.size() + swarmLightCount_, 1), GpuLight{});
+	// Every swarm light's emission scale is the one slot after the scene's, always 1.
+	std::vector<uint32_t> allEmitters = lightEmitters_;
+	allEmitters.resize(emissiveLights_.size() + punctualLights.size(), 0);
+	allEmitters.resize(lights.size(), static_cast<uint32_t>(emissionScales_.size()));
 	std::vector<GpuLight> objectLights = dynamicObjectLights_;
 	objectLights.resize(std::max<size_t>(objectLights.size(), 1), GpuLight{});
 	std::vector<uint32_t> lightInstances = dynamicLightInstance_;
@@ -511,25 +521,95 @@ void RenderGPUScene::CreateLightBuffers(std::span<const GpuLight> punctualLights
 	lights_ = create(lights, true, "Scene_Lights", batch);
 	dynamicObjectLightBuffer_ = create(objectLights, false, "Scene_DynamicObjectLights", batch);
 	dynamicLightInstanceBuffer_ = create(lightInstances, false, "Scene_DynamicLightInstances", batch);
+	allLightEmitters_ = create(allEmitters, false, "Scene_AllLightEmitters", batch);
 	renderContext_->EndUpload(batch);
 }
 
-void RenderGPUScene::UpdateLights()
+std::vector<LightBlasDesc> RenderGPUScene::MakeLightBlases() const
+{
+	// As the paper finds, a BLAS per emissive mesh balances the TLAS's work against loose BLAS bounds: here a run of
+	// the light buffer's triangles of one emissive instance, all static or all dynamic. Punctual lights get one each,
+	// and every swarm is one, its lights orbiting within it so that its refit topology stays good.
+	std::vector<LightBlasDesc> blases;
+	const uint32_t triangles = static_cast<uint32_t>(emissiveLights_.size());
+	auto emitter = [&](uint32_t i) { return i < lightEmitters_.size() ? lightEmitters_[i] : 0u; };
+	for (uint32_t i = 0; i < triangles;)
+	{
+		const bool dynamic = i >= staticLightCount_;
+		uint32_t j = i + 1;
+		while (j < triangles && emitter(j) == emitter(i) && (j >= staticLightCount_) == dynamic)
+		{
+			++j;
+		}
+		blases.push_back({ i, j - i, dynamic });
+		i = j;
+	}
+	const uint32_t punctual = static_cast<uint32_t>(punctualLights_.size());
+	for (uint32_t k = 0; k < punctual; ++k)
+	{
+		blases.push_back({ triangles + k, 1, true });
+	}
+	for (uint32_t s = 0; s < swarms_.swarmCount && swarms_.lightsPerSwarm > 0; ++s)
+	{
+		blases.push_back({ swarmFirstLight_ + s * swarms_.lightsPerSwarm, swarms_.lightsPerSwarm, true });
+	}
+	return blases;
+}
+
+void RenderGPUScene::UpdateLights(const LightTreeOptions &tree, const LightSwarmDesc &swarms)
 {
 	const std::span<const GpuLight> lights = emissiveLights_;
 	const std::vector<GpuLight> punctualLights = MakePunctualLights();
+	// Without geometry there is nowhere to put them.
+	const uint64_t swarmLights = boundsMin_.x <= boundsMax_.x && swarms.lightsPerSwarm > 0
+										 ? std::min<uint64_t>(uint64_t(swarms.swarmCount) * swarms.lightsPerSwarm, 1u << 24)
+										 : 0;
+	if (swarmLights != swarmLightCount_ || (swarmLights > 0 && swarms.lightsPerSwarm != swarms_.lightsPerSwarm))
+	{
+		lightTreeBuilt_ = false;
+	}
+	swarms_ = swarms;
+	swarms_.swarmCount = swarmLights > 0 ? static_cast<uint32_t>(swarmLights / swarms.lightsPerSwarm) : 0;
 	if (!lightTreeBuilt_)
 	{
-		// The punctual lights have no texture to average, so their flux scale is 1.
+		swarmLightCount_ = swarms_.swarmCount * swarms_.lightsPerSwarm;
+		swarmFirstLight_ = static_cast<uint32_t>(lights.size() + punctualLights.size());
+		// The punctual and swarm lights have no texture to average, so their flux scale is 1.
 		std::vector<float> fluxScales = emissiveFluxScales_;
-		fluxScales.resize(lights.size() + punctualLights.size(), 1.0f);
-		// Waits for the GPU, so the old light buffers can go.
-		lightTreeBuilder_->Reset(fluxScales, lightEmitterBuffer_);
-		lightTreeBuilt_ = true;
+		fluxScales.resize(lights.size() + punctualLights.size() + swarmLightCount_, 1.0f);
+		// So the old light buffers can go.
+		renderContext_->WaitForGPUIdle();
 		CreateLightBuffers(punctualLights);
+		lightTreeBuilder_->Reset(fluxScales, allLightEmitters_, MakeLightBlases());
+		lightTreeBuilt_ = true;
+		refitEmissionScales_.clear();
 		CentroidBounds(lights.first(staticLightCount_), staticLightBoundsMin_, staticLightBoundsMax_);
 		// The dynamic lights where the scene loaded them, until they first move.
 		CentroidBounds(lights.subspan(staticLightCount_), dynamicLightBoundsMin_, dynamicLightBoundsMax_);
+		logi("Lights: {} triangle(s), {} punctual, {} in {} swarm(s)",
+			 lights.size(),
+			 punctualLights.size(),
+			 swarmLightCount_,
+			 swarms_.swarmCount);
+	}
+	lightTreeOptions_ = tree;
+	// May upload a new two-level layout, which waits for the GPU.
+	lightTreeBuilder_->Prepare(tree.twoLevel, tree.maxLeafLights);
+
+	// The swarms' flight: the middle spread of the scene across, its lower height up, kept in by the swarm's reach (its
+	// radius and its lights' orbits, a third of it).
+	if (swarmLightCount_ > 0)
+	{
+		const float3 size = boundsMax_ - boundsMin_;
+		swarmRadius_ = std::max(swarms_.radius, 0.0f) * std::max(size.x, size.z);
+		const float reach = swarmRadius_ * (4.0f / 3.0f);
+		const float spread = std::clamp(swarms_.spread, 0.0f, 1.0f);
+		const float3 centre = (boundsMin_ + boundsMax_) * 0.5f;
+		const float halfX = std::max(0.5f * size.x * spread - reach, 0.0f);
+		const float halfZ = std::max(0.5f * size.z * spread - reach, 0.0f);
+		const float height = std::max(std::clamp(swarms_.height, 0.0f, 1.0f) * size.y - 2.0f * reach, 0.0f);
+		swarmRegionMin_ = float3(centre.x - halfX, boundsMin_.y + reach, centre.z - halfZ);
+		swarmRegionSize_ = float3(2.0f * halfX, height, 2.0f * halfZ);
 	}
 	if (dynamicLightsMoved_)
 	{
@@ -538,7 +618,7 @@ void RenderGPUScene::UpdateLights()
 		dynamicLightsMoved_ = false;
 	}
 	CentroidBounds(punctualLights, punctualLightBoundsMin_, punctualLightBoundsMax_);
-	lightCount_ = static_cast<uint32_t>(lights.size() + punctualLights.size());
+	lightCount_ = static_cast<uint32_t>(lights.size() + punctualLights.size() + swarmLightCount_);
 
 	// BeginFrame has waited for the frame that last read this slot, so it can be overwritten. The dynamic
 	// instances' transforms are only needed while the light buffer does not hold their pose yet; the point
@@ -564,6 +644,18 @@ void RenderGPUScene::UpdateLights()
 												  transforms.size(),
 												  "Scene_DynamicLightTransforms");
 		WriteLightRange<DynamicLightTransform>(renderContext_, frame.transforms, 0, transforms);
+		// The skinned lights' corners as ApplyAnimationPose last skinned them, moved with the transforms.
+		const std::span<const GpuLight> skinnedLights =
+				std::span<const GpuLight>(dynamicObjectLights_).subspan(skinnedLightStart_);
+		if (!skinnedLights.empty())
+		{
+			ReserveLightBuffer<GpuLight>(renderContext_,
+										 frame.skinnedLights,
+										 frame.skinnedLightCapacity,
+										 skinnedLights.size(),
+										 "Scene_SkinnedLights");
+			WriteLightRange<GpuLight>(renderContext_, frame.skinnedLights, 0, skinnedLights);
+		}
 		transformsWritten_ = true;
 	}
 	ReserveLightBuffer<GpuLight>(renderContext_,
@@ -572,15 +664,18 @@ void RenderGPUScene::UpdateLights()
 								 punctualLights.size(),
 								 "Scene_PunctualLights");
 	WriteLightRange<GpuLight>(renderContext_, frame.punctualLights, 0, punctualLights);
+	// With the swarms' slot, at 1, after the scene's.
+	std::vector<float> emissionScales = emissionScales_;
+	emissionScales.push_back(1.0f);
 	ReserveLightBuffer<float>(renderContext_,
 							  frame.emissionScales,
 							  frame.emissionScaleCapacity,
-							  emissionScales_.size(),
+							  emissionScales.size(),
 							  "Scene_EmissionScales");
-	WriteLightRange<float>(renderContext_, frame.emissionScales, 0, emissionScales_);
+	WriteLightRange<float>(renderContext_, frame.emissionScales, 0, emissionScales);
 }
 
-void RenderGPUScene::AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights)
+void RenderGPUScene::AddLightPasses(FrameGraph &frame)
 {
 	if (lightFrames_.empty())
 	{
@@ -610,6 +705,11 @@ void RenderGPUScene::AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights)
 				frame.DescriptorIndex(transformsWritten_ ? lightFrame.transforms : dynamicObjectLightBuffer_);
 		constants.punctualLightsHandle = frame.DescriptorIndex(lightFrame.punctualLights);
 		constants.lightsHandle = frame.DescriptorIndex(lights_);
+		// Not read without skinned lights, or when the dynamic lights are not moved this frame.
+		const bool skinned = transformsWritten_ && skinnedLightStart_ < dynamicLightCount;
+		constants.skinnedLightStart = skinned ? skinnedLightStart_ : dynamicLightCount;
+		constants.skinnedLightsHandle =
+				frame.DescriptorIndex(skinned ? lightFrame.skinnedLights : dynamicObjectLightBuffer_);
 		const uint32_t threads = dynamicLightCount + punctualLightCount - firstThread;
 		const PipelineHandle pipeline = dynamicLightsPipeline_;
 
@@ -633,9 +733,50 @@ void RenderGPUScene::AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights)
 		}
 	}
 
+	// The swarms move every frame their time does, and are written once after the light buffer is made and whenever
+	// a setting changes. The pass is there every frame, so that pausing them does not change the graph.
+	if (swarmLightCount_ > 0)
+	{
+		LightSwarmConstants constants = {};
+		constants.regionMin = swarmRegionMin_;
+		constants.time = swarms_.seconds;
+		constants.regionSize = swarmRegionSize_;
+		constants.radius = swarmRadius_;
+		constants.firstLight = swarmFirstLight_;
+		constants.lightsPerSwarm = swarms_.lightsPerSwarm;
+		constants.lightCount = swarmLightCount_;
+		constants.lightsHandle = frame.DescriptorIndex(lights_);
+		constants.intensity = std::max(swarms_.intensity, 0.0f);
+		constants.flashRate = std::max(swarms_.flashRate, 0.0f);
+		constants.speed = swarms_.speed;
+		constants.seed = swarms_.seed;
+		const bool write =
+				!swarmLightsWritten_ || std::memcmp(&constants, &swarmWrittenConstants_, sizeof(constants)) != 0;
+		swarmLightsWritten_ = true;
+		swarmWrittenConstants_ = constants;
+		const PipelineHandle pipeline = swarmPipeline_;
+		const uint32_t groups = (swarmLightCount_ + LIGHT_SWARM_GROUP_SIZE - 1) / LIGHT_SWARM_GROUP_SIZE;
+		frame.AddPass(rg::Pass::Compute("Lights/Swarms")
+									.Use(lights, rg::Access::ComputeShaderReadWrite)
+									.Executes(
+											[pipeline, constants, groups, write](rg::PassContext &ctx)
+											{
+												if (!write)
+												{
+													return;
+												}
+												ctx.rc.SetComputePipeline(pipeline);
+												ctx.rc.SetCompute32BitConstants(&constants, sizeof(constants) / sizeof(uint32_t));
+												ctx.rc.Dispatch(groups, 1, 1);
+											}));
+	}
+
 	LightTreeBuilder::Inputs inputs;
 	inputs.lights = lights_;
 	inputs.emissionScales = lightFrame.emissionScales;
+	// A change in the scene's emission scales reaches the static BLASes too.
+	inputs.refitStatic = refitEmissionScales_ != emissionScales_;
+	refitEmissionScales_ = emissionScales_;
 	// Over the parts that have lights, as an empty part's bounds are inverted.
 	struct Part
 	{
@@ -644,9 +785,13 @@ void RenderGPUScene::AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights)
 		float3 boundsMax;
 	};
 	const uint32_t triangleLights = static_cast<uint32_t>(emissiveLights_.size());
+	const float reach = swarmRadius_ * (4.0f / 3.0f);
 	const Part parts[] = { { staticLightCount_, staticLightBoundsMin_, staticLightBoundsMax_ },
 						   { triangleLights - staticLightCount_, dynamicLightBoundsMin_, dynamicLightBoundsMax_ },
-						   { static_cast<uint32_t>(punctualLights_.size()), punctualLightBoundsMin_, punctualLightBoundsMax_ } };
+						   { static_cast<uint32_t>(punctualLights_.size()), punctualLightBoundsMin_, punctualLightBoundsMax_ },
+						   { swarmLightCount_,
+							 swarmRegionMin_ - float3(reach, reach, reach),
+							 swarmRegionMin_ + swarmRegionSize_ + float3(reach, reach, reach) } };
 	inputs.boundsMin = float3(FLT_MAX, FLT_MAX, FLT_MAX);
 	inputs.boundsMax = float3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
 	for (const Part &part: parts)
@@ -657,7 +802,6 @@ void RenderGPUScene::AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights)
 			inputs.boundsMax = MaxFloat3(inputs.boundsMax, part.boundsMax);
 		}
 	}
-	inputs.maxLeafLights = maxLeafLights;
 	lightTreeBuilder_->AddPasses(frame, inputs);
 }
 
@@ -769,6 +913,7 @@ void RenderGPUScene::ApplyAnimationPose(const Animation::Pose &pose)
 			row.tangent = float4(skinned.tangent[0], skinned.tangent[1], skinned.tangent[2], skinned.tangent[3]);
 		}
 		++skinPoseGeneration_;
+		UpdateSkinnedLights();
 	}
 }
 
@@ -977,6 +1122,35 @@ void RenderGPUScene::UpdateDynamicLightBounds()
 	}
 }
 
+void RenderGPUScene::UpdateSkinnedLights()
+{
+	if (skinnedLightCorners_.empty())
+	{
+		return;
+	}
+	// A skinned instance's lights are all skinned (every primitive of its mesh is), so its bounds start afresh.
+	for (uint32_t instance: skinnedLightInstances_)
+	{
+		dynamicObjectLightBounds_[instance] = { float3(FLT_MAX, FLT_MAX, FLT_MAX),
+												float3(-FLT_MAX, -FLT_MAX, -FLT_MAX) };
+	}
+	const size_t count = skinnedLightCorners_.size() / 3;
+	for (size_t k = 0; k < count; ++k)
+	{
+		GpuLight &light = dynamicObjectLights_[skinnedLightStart_ + k];
+		float4 *corners[3] = { &light.v1, &light.v2, &light.v3 };
+		for (size_t c = 0; c < 3; ++c)
+		{
+			const float3 &p = skinnedVertices_[skinnedLightCorners_[3 * k + c]].position;
+			*corners[c] = float4(p.x, p.y, p.z, corners[c]->w);
+		}
+		const float3 centroid = LightCentroid(light);
+		std::array<float3, 2> &bounds = dynamicObjectLightBounds_[dynamicLightInstance_[skinnedLightStart_ + k]];
+		bounds[0] = MinFloat3(bounds[0], centroid);
+		bounds[1] = MaxFloat3(bounds[1], centroid);
+	}
+}
+
 void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 {
 	dynamicObjectLights_.clear();
@@ -985,13 +1159,16 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 									 { float3(FLT_MAX, FLT_MAX, FLT_MAX), float3(-FLT_MAX, -FLT_MAX, -FLT_MAX) });
 	dynamicLightsMoved_ = false;
 	emissiveInstances_.clear();
+	skinnedLightStart_ = 0;
+	skinnedLightCorners_.clear();
+	skinnedLightInstances_.clear();
 
 	const uint32_t lightCount = static_cast<uint32_t>(emissiveLights_.size());
 	staticLightCount_ = lightCount;
 	const std::vector<TLASInstanceRef> refs = EnumerateTLASInstances();
 
-	// Calls visit(scene instance, light) for each triangle light, through the emitter tables.
-	auto forEachLight = [&](auto visit)
+	// Calls visit(TLAS instance ref, triangle, light) for each triangle light, through the emitter tables.
+	auto forEachLightTriangle = [&](auto visit)
 	{
 		for (size_t i = 0; i < refs.size(); ++i)
 		{
@@ -1006,10 +1183,15 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 				uint32_t &light = emitters[table + t];
 				if (light != INVALID_LIGHT_INDEX)
 				{
-					visit(refs[i].instance, light);
+					visit(refs[i], t, light);
 				}
 			}
 		}
+	};
+	// Calls visit(scene instance, light) for each triangle light.
+	auto forEachLight = [&](auto visit)
+	{
+		forEachLightTriangle([&](const TLASInstanceRef &ref, uint32_t, uint32_t &light) { visit(ref.instance, light); });
 	};
 
 	std::vector<uint32_t> instanceLights(instances.size(), 0);
@@ -1069,9 +1251,54 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 		return;
 	}
 
-	// Static lights first and dynamic ones after, each in their old order.
+	// Static lights first, then the rigid dynamic ones, then the skinned ones, each in their old order. A skinned
+	// light keeps the skinned vertices of its corners, in the order CollectEmitters gave them at rest.
 	std::vector<uint32_t> dynamicOfLight(lightCount, UINT32_MAX);
-	forEachLight([&](uint32_t instance, uint32_t &light) { dynamicOfLight[light] = dynamicOfInstance_[instance]; });
+	std::vector<std::array<uint32_t, 3>> skinnedCorners(lightCount, { UINT32_MAX, UINT32_MAX, UINT32_MAX });
+	std::vector<uint32_t> skinnedFirstVertex(primitiveDescs.size(), UINT32_MAX);
+	for (const Animation::SkinnedPrimitive &primitive: skinnedPrimitives_)
+	{
+		if (primitive.primitive < skinnedFirstVertex.size())
+		{
+			skinnedFirstVertex[primitive.primitive] = primitive.firstVertex;
+		}
+	}
+	uint32_t unskinnableLights = 0;
+	forEachLightTriangle(
+			[&](const TLASInstanceRef &ref, uint32_t t, uint32_t &light)
+			{
+				const uint32_t dynamicInstance = dynamicOfInstance_[ref.instance];
+				dynamicOfLight[light] = dynamicInstance;
+				const uint32_t first = skinnedFirstVertex[ref.primitive];
+				if (dynamicInstance == UINT32_MAX || first == UINT32_MAX)
+				{
+					return;
+				}
+				const PrimitiveGPUDesc &desc = primitiveDescs[ref.primitive];
+				const uint64_t index = static_cast<uint64_t>(desc.indexOffset) + 3ull * t;
+				if (index + 3 > indices_.size() ||
+					static_cast<uint64_t>(first) + desc.vertexCount > skinnedVertices_.size())
+				{
+					++unskinnableLights;
+					return;
+				}
+				const uint32_t *triangle = &indices_[index];
+				if (triangle[0] >= desc.vertexCount || triangle[1] >= desc.vertexCount ||
+					triangle[2] >= desc.vertexCount)
+				{
+					++unskinnableLights;
+					return;
+				}
+				const bool mirrored = dynamicRestMirrored_[dynamicInstance] != 0;
+				skinnedCorners[light] = { first + triangle[0],
+										  first + triangle[mirrored ? 2 : 1],
+										  first + triangle[mirrored ? 1 : 2] };
+			});
+	if (unskinnableLights > 0)
+	{
+		logw("GPUScene: {} skinned triangle light(s) without their staged indices only follow the skin's anchor",
+			 unskinnableLights);
+	}
 	std::vector<uint32_t> newIndex(lightCount);
 	uint32_t next = 0;
 	for (uint32_t light = 0; light < lightCount; ++light)
@@ -1089,20 +1316,47 @@ void RenderGPUScene::PartitionDynamicLights(std::vector<uint32_t> &emitters)
 	{
 		objectFromWorld.push_back(InvertAffine(instances[instance].worldMatrix));
 	}
-	for (uint32_t light = 0; light < lightCount; ++light)
+	for (const bool skinnedPart: { false, true })
 	{
-		const uint32_t dynamicInstance = dynamicOfLight[light];
-		if (dynamicInstance != UINT32_MAX)
+		if (skinnedPart)
 		{
+			skinnedLightStart_ = static_cast<uint32_t>(dynamicObjectLights_.size());
+		}
+		for (uint32_t light = 0; light < lightCount; ++light)
+		{
+			const uint32_t dynamicInstance = dynamicOfLight[light];
+			const bool skinned = skinnedCorners[light][0] != UINT32_MAX;
+			if (dynamicInstance == UINT32_MAX || skinned != skinnedPart)
+			{
+				continue;
+			}
 			newIndex[light] = next++;
 			dynamicLightInstance_.push_back(dynamicInstance);
+			// At rest a skinned mesh's instance is still at its own node, which these corners are in until the
+			// first pose moves both to the anchor (UpdateSkinnedLights).
 			dynamicObjectLights_.push_back(
 					TransformLight(emissiveLights_[light], objectFromWorld[dynamicInstance].data()));
 			const float3 centroid = LightCentroid(dynamicObjectLights_.back());
 			std::array<float3, 2> &bounds = dynamicObjectLightBounds_[dynamicInstance];
 			bounds[0] = MinFloat3(bounds[0], centroid);
 			bounds[1] = MaxFloat3(bounds[1], centroid);
+			if (skinned)
+			{
+				skinnedLightCorners_.insert(skinnedLightCorners_.end(),
+											skinnedCorners[light].begin(),
+											skinnedCorners[light].end());
+				skinnedLightInstances_.push_back(dynamicInstance);
+			}
 		}
+	}
+	std::sort(skinnedLightInstances_.begin(), skinnedLightInstances_.end());
+	skinnedLightInstances_.erase(std::unique(skinnedLightInstances_.begin(), skinnedLightInstances_.end()),
+								 skinnedLightInstances_.end());
+	if (!skinnedLightCorners_.empty())
+	{
+		logi("GPUScene: {} skinned triangle light(s) over {} skinned instance(s) follow the pose",
+			 skinnedLightCorners_.size() / 3,
+			 skinnedLightInstances_.size());
 	}
 
 	std::vector<GpuLight> lights(lightCount);

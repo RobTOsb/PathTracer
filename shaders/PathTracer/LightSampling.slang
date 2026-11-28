@@ -261,7 +261,20 @@ LightTreeShape FrameLightTreeShape()
     shape.leafLevel = g_Frame.lightTreeLeafLevel;
     shape.lightCount = g_Frame.lightTreeLightCount;
     shape.leafSize = g_Frame.lightTreeLeafSize;
+    shape.blasLeafSize = g_Frame.lightTreeBlasLeafSize;
+    shape.tlasEntryOffset = g_Frame.lightTreeTlasEntryOffset;
     return shape;
+}
+
+// The two-level hierarchy's tables (one-element stand-ins for the single-level tree, which reads neither).
+StructuredBuffer<GpuLightBlas> LightTreeBlases()
+{
+    return ResourceDescriptorHeap[g_Frame.lightTreeBlases];
+}
+
+StructuredBuffer<uint> LightTreeLightBlas()
+{
+    return ResourceDescriptorHeap[g_Frame.lightTreeLightBlas];
 }
 
 // Probability of SampleLight at v picking lightIndex from the light buffer, sun selection included.
@@ -271,8 +284,9 @@ float LightSelectPmf(LightSelectVertex v, uint lightIndex)
     if (v.selection == LIGHT_SELECT_TREE)
     {
         float mix = g_Frame.lightTreePowerMix;
-        pmf = (1.0 - mix) * LightTreePmf(g_LightTreeNodes, g_LightLeaves, MakeLightTreeShadingContext(v),
-                                         FrameLightTreeShape(), lightIndex) +
+        pmf = (1.0 - mix) * LightTreePmf(g_LightTreeNodes, g_LightTreeLeafLights, g_LightLeaves, LightTreeBlases(),
+                                         LightTreeLightBlas(), MakeLightTreeShadingContext(v), FrameLightTreeShape(),
+                                         lightIndex) +
               mix * g_LightPower[lightIndex].pmf;
     }
     else if (v.selection == LIGHT_SELECT_POWER)
@@ -382,19 +396,20 @@ LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
         LightTreeShadingContext treeCtx = MakeLightTreeShadingContext(v);
         bool byPower = uSelect < mix;
         float powerPmf = 0.0;
-        LightTreePath path = { 0, 1.0 };
+        LightTreePath path = { 0, 0, 1.0 };
+        LightTreeShape shape = FrameLightTreeShape();
         lightIndex = 0;
         if (byPower)
         {
             if (!SamplePowerLight(min(uSelect / mix, 0.99999994), u.y, lightIndex, powerPmf))
                 return ls;
-            path = LightTreeFindLight(g_LightLeaves, lightIndex);
+            path = LightTreeFindLight(g_LightLeaves, LightTreeLightBlas(), shape, lightIndex);
         }
         float uTree = byPower ? 0.0 : min((uSelect - mix) / (1.0 - mix), 0.99999994);
-        uint leaf;
+        LightTreeLeaf leaf;
         float treePmf;
-        LightTreeShape shape = FrameLightTreeShape();
-        bool found = WalkLightTree(g_LightTreeNodes, treeCtx, shape, byPower, path.leafPosition, uTree, leaf, treePmf);
+        bool found = WalkLightTree(g_LightTreeNodes, g_LightTreeLeafLights, LightTreeBlases(), treeCtx, shape, byPower,
+                                   path, uTree, leaf, treePmf);
         if (byPower)
         {
             treePmf *= path.leafPmf;
@@ -404,7 +419,7 @@ LightSample SampleLight(LightSelectVertex v, float2 u, inout uint rng)
             if (!found)
                 return ls;
             float leafPmf;
-            PickLeafLight(g_LightTreeLeafLights, shape, leaf, uTree, lightIndex, leafPmf);
+            PickLeafLight(g_LightTreeLeafLights, leaf, uTree, lightIndex, leafPmf);
             treePmf *= leafPmf;
             powerPmf = mix > 0.0 ? g_LightPower[lightIndex].pmf : 0.0;
         }

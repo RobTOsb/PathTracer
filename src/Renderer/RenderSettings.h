@@ -47,6 +47,9 @@ struct LightSettings
 	// Light tree: lights per leaf, picked by flux within it, 1 to LIGHT_TREE_MAX_LEAF_LIGHTS. More
 	// makes the tree shallower at the cost of ignoring where the leaf's lights are relative to each other.
 	int maxLeafLights = 4;
+	// Light tree: the two-level hierarchy of Moreau, Pharr and Clarberg 2019 (a BLAS per emissive mesh, punctual light
+	// and swarm, refit every frame, under a TLAS rebuilt every frame) rather than one tree rebuilt from scratch.
+	bool twoLevelTree = true;
 	// Light tree: the share of the tree's light samples that select by power instead (defensive sampling), which
 	// bounds the noise of a light the tree's importance underrates. 0 for the tree alone.
 	float treePowerMix = 0.0f;
@@ -57,6 +60,24 @@ struct LightSettings
 	uint32_t bunnyCount = 0;
 	bool flashClusters = true;
 	uint32_t clusterCount = 0;
+};
+
+// Swarms of point lights (RenderGPUScene::LightSwarmDesc) that wander the scene and flash, to stress the light
+// tree with millions of moving lights while no geometry moves. Sizes are shares of the scene's bounds.
+struct LightSwarmSettings
+{
+	bool enabled = true;
+	int swarmCount = 1024;
+	int lightsPerSwarm = 1024;
+	bool animate = true; // held still in the reference
+	float speed = 1.0f;
+	float flashRate = 1.5f; // flashes per second, on average
+	float intensity = 0.02f; // W/sr of a light at the peak of its flash
+	float radius = 0.02f; // of a swarm, a share of the scene's larger horizontal extent
+	float spread = 0.6f; // share of the scene across that the swarms wander, around its centre
+	float height = 0.2f; // share of the scene's height, from its floor, the swarms fly through
+	// Into the animation: the main loop advances it while it plays.
+	float seconds = 0.0f;
 };
 
 // The scene's glTF animations and skins (Animation::AnimationSystem), which play together and loop, except in the
@@ -248,6 +269,7 @@ struct RenderSettings
 
 	SunSettings sun;
 	LightSettings lights;
+	LightSwarmSettings swarms;
 	AnimationSettings animation;
 	SpecularAASettings specularAA;
 	PhotonSettings photons;

@@ -167,7 +167,8 @@ struct FrameConstants
 	float fireflyFilterThreshold;
 	uint exposureBuffer;
 	// The light tree's shape, whose links are implicit (LightTreeShape in LightTree.slang): its leaf level (its depth
-	// less one), the lights it holds and the lights per leaf.
+	// less one), the lights it holds and the lights per leaf. In the two-level hierarchy, the TLAS's: its "lights" are
+	// the BLASes, one per leaf.
 	uint lightTreeLeafLevel;
 	uint lightTreeLightCount;
 	uint lightTreeLeafSize;
@@ -214,7 +215,14 @@ struct FrameConstants
 	// object-space position as last frame traced it.
 	uint skinnedPrimitiveBases;
 	uint previousSkinnedPositions;
-	uint2 padSkinned;
+	// The two-level light hierarchy (LightTreeShape in LightTree.slang): bindless SRVs of the BLASes (GpuLightBlas) and
+	// of each light's BLAS (uint), the BLASes' lights per leaf (0 = the single-level tree, whose shape is
+	// lightTreeLeafLevel and on) and where the TLAS's entries start in the leaf buffers (the light count).
+	uint lightTreeBlases;
+	uint lightTreeLightBlas;
+	uint lightTreeBlasLeafSize;
+	uint lightTreeTlasEntryOffset;
+	uint2 padLightTree;
 };
 
 // Lens flare after Hullin et al., "Physically-Based Real-Time Lens Flare Rendering" (SIGGRAPH 2011). FlareRayGen
@@ -840,7 +848,7 @@ struct AutoExposureConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(AutoExposureConstants) <= 16 * 4, "AutoExposureConstants must fit the root constants");
-static_assert(sizeof(FrameConstants) == 912,"FrameConstants must match the HLSL cbuffer layout");
+static_assert(sizeof(FrameConstants) == 928,"FrameConstants must match the HLSL cbuffer layout");
 static_assert(sizeof(GpuFlareLight) == 32 && sizeof(GpuFlareSurface) == 32 && sizeof(GpuFlareResult) == 32,
 			  "Lens flare structs must match their structured buffer strides");
 static_assert(sizeof(LensFlareConstants) % 16 == 0, "LensFlareConstants must match the HLSL cbuffer layout");

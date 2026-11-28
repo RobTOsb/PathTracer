@@ -29,7 +29,16 @@ void TransformDynamicLights(uint3 dispatchThread : SV_DispatchThreadID)
     StructuredBuffer<GpuLight> objectLights = ResourceDescriptorHeap[g_PushConstants.objectLightsHandle];
     StructuredBuffer<uint> lightInstances = ResourceDescriptorHeap[g_PushConstants.lightInstancesHandle];
     StructuredBuffer<DynamicLightTransform> transforms = ResourceDescriptorHeap[g_PushConstants.transformsHandle];
-    GpuLight light = objectLights[i];
+    GpuLight light;
+    if (i >= g_PushConstants.skinnedLightStart)
+    {
+        StructuredBuffer<GpuLight> skinnedLights = ResourceDescriptorHeap[g_PushConstants.skinnedLightsHandle];
+        light = skinnedLights[i - g_PushConstants.skinnedLightStart];
+    }
+    else
+    {
+        light = objectLights[i];
+    }
     DynamicLightTransform t = transforms[lightInstances[i]];
     // The UVs in w stay with their corners.
     light.v1.xyz = TransformDynamicLightPoint(t, light.v1.xyz);

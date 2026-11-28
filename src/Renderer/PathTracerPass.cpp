@@ -763,6 +763,19 @@ void PathTracerPass::AddPasses(FrameGraph &frame)
 	constants.lightTreeLightCount = scene_.GetLightTreeLightCount();
 	constants.lightTreeLeafSize = scene_.GetLightTreeLeafSize();
 	constants.lightTreeOrigin = scene_.GetLightTreeOrigin();
+	// The two-level hierarchy's tables, bindless; the stand-ins keep the descriptors valid for the single-level tree.
+	constants.lightTreeBlasLeafSize = scene_.GetLightTreeBlasLeafSize();
+	constants.lightTreeTlasEntryOffset = scene_.GetLightTreeTlasEntryOffset();
+	{
+		const ResourceHandle blases = scene_.GetLightTreeBlasBuffer();
+		const ResourceHandle lightBlas = scene_.GetLightTreeLightBlasBuffer();
+		constants.lightTreeBlases = blases != InvalidResourceHandle
+											? renderContext->GetResourceViewInfo(blases).descriptorIndex
+											: INVALIDDESCRIPTORHANDLE;
+		constants.lightTreeLightBlas = lightBlas != InvalidResourceHandle
+											   ? renderContext->GetResourceViewInfo(lightBlas).descriptorIndex
+											   : INVALIDDESCRIPTORHANDLE;
+	}
 	constants.lightTreeStep = scene_.GetLightTreeStep();
 	const rg::ResourceId skyImportance = atmosphere ? atmosphere_.GetSkyImportance() : rg::ResourceId{};
 	const bool skyActive = skyImportance.IsValid() && settings_.atmosphere.skySampleShare > 0.0f &&

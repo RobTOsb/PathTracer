@@ -16,6 +16,10 @@
 // one below, rounded up, until one fits a group, the root group. Each level is padded with empty nodes to whole
 // groups, so node j of a level has the children 4j to 4j + 3 of the level below. Levels are stored from the root group
 // down, so the root group is at node 0 where the traversal starts.
+//
+// That is the single-level tree, rebuilt from scratch every frame. The two-level hierarchy (see the end of the file
+// and GpuLightBlas) lays the same implicit tree out once per BLAS after the TLAS, refits the BLASes and rebuilds only
+// the TLAS with the kernels above.
 
 #include "ShaderInterop.h"
 #include "LightTreeInterop.h"
@@ -471,7 +475,8 @@ void RadixScatter(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
 
 // Leaf j: the sorted lights from j * leafSize on, picked within it in proportion to their flux. Each light's entry
 // holds j, its leaf's position along the leaf level. The lights without flux, sorted to the end, get no share of the
-// leaf, a leaf slot with a PMF of 0 and a PMF of 0 at leaf 0, which the PMF walk turns into 0.
+// leaf, a leaf slot with a PMF of 0 and a PMF of 0 at leaf 0, which the PMF walk turns into 0. For the TLAS
+// (LIGHT_TREE_BUILD_TLAS, leafSize 1) the "lights" are the BLASes, and the entries go after the lights' ones.
 [shader("compute")]
 [numthreads(LIGHT_TREE_BUILD_GROUP_SIZE, 1, 1)]
 void BuildLeaves(uint3 dispatchThread : SV_DispatchThreadID)
@@ -484,11 +489,15 @@ void BuildLeaves(uint3 dispatchThread : SV_DispatchThreadID)
 
     RWStructuredBuffer<uint> keys = ResourceDescriptorHeap[g_Resources.keysA];
     RWStructuredBuffer<uint> values = ResourceDescriptorHeap[g_Resources.valuesA];
-    RWStructuredBuffer<GpuLightTreeCluster> lightClusters = ResourceDescriptorHeap[g_Resources.lightClusters];
+    // The TLAS's lights are the BLASes, its clusters theirs.
+    bool tlas = (g_PushConstants.flags & LIGHT_TREE_BUILD_TLAS) != 0;
+    RWStructuredBuffer<GpuLightTreeCluster> lightClusters =
+        ResourceDescriptorHeap[tlas ? g_Resources.blasClusters : g_Resources.lightClusters];
     RWStructuredBuffer<GpuLightTreeCluster> nodeClusters = ResourceDescriptorHeap[g_Resources.nodeClusters];
     RWStructuredBuffer<GpuLightTreeNode> nodes = ResourceDescriptorHeap[g_Resources.nodes];
     RWStructuredBuffer<GpuLightTreeLeafEntry> leafLights = ResourceDescriptorHeap[g_Resources.leafLights];
     RWStructuredBuffer<GpuLightTreeLeafEntry> leafOfLight = ResourceDescriptorHeap[g_Resources.leafOfLight];
+    uint entryOffset = g_PushConstants.entryOffset;
 
     uint node = layout.Offset(d) + j;
     uint first = j * g_PushConstants.leafSize;
@@ -520,9 +529,9 @@ void BuildLeaves(uint3 dispatchThread : SV_DispatchThreadID)
         {
             float pmf = i < valid ? children[i].flux / leaf.flux : 0.0;
             GpuLightTreeLeafEntry slot = { lights[i], pmf };
-            leafLights[first + i] = slot;
+            leafLights[entryOffset + first + i] = slot;
             GpuLightTreeLeafEntry entry = { i < valid ? j : 0, pmf };
-            leafOfLight[lights[i]] = entry;
+            leafOfLight[entryOffset + lights[i]] = entry;
         }
     }
 
@@ -709,4 +718,236 @@ void PowerGuide(uint3 dispatchThread : SV_DispatchThreadID)
             lo = mid + 1;
     }
     power[bucket].guide = lo;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Two-level hierarchy (Moreau, Pharr and Clarberg 2019). The BLASes' topology, once per BLAS layout:
+//
+//   ClearBlasBounds, BlasBounds      per BLAS, the bounds of its lights' positions
+//   TopologyKeys                     per light, (its BLAS, its Morton code within the BLAS's bounds)
+//   RadixCount, ...                  the sort above, so each BLAS's lights are in Morton order in its own slots
+//   TopologySlots                    per slot, the light in it, and per light its leaf within its BLAS
+//
+// then every frame:
+//
+//   RefitLeaves                      per leaf node of the BLASes refit (the dynamic ones, or all), its lights' clusters
+//   RefitInterior                    per node of one height above the leaves, of every BLAS refit at once
+//   BlasClusters                     per BLAS, its root group's cluster and its TLAS key
+//   RadixCount, ...                  the TLAS keys, one per BLAS
+//   BuildLeaves, BuildLevel,         the TLAS (LIGHT_TREE_BUILD_TLAS), its leaves the BLASes, at node 0
+//   BuildTopLevels
+//   PowerReduce, ...                 power selection over every light, as for the single-level tree
+//
+// Every light keeps its slot whatever its flux, unlike in the single-level tree, so that a light flashing back on
+// finds its place; one without flux gets a PMF of 0 within its leaf.
+
+// Floats as uints that order as they do, for atomic min and max.
+uint OrderedFromFloat(float f)
+{
+    uint u = asuint(f);
+    return (u & 0x80000000u) != 0 ? ~u : u | 0x80000000u;
+}
+
+float FloatFromOrdered(uint u)
+{
+    return asfloat((u & 0x80000000u) != 0 ? u & 0x7FFFFFFFu : ~u);
+}
+
+// Where the light is: a triangle's centroid, a punctual light's position (MakeLightCluster's mean, whatever its flux).
+float3 LightPosition(GpuLight light)
+{
+    if (light.GetLightType() != kLight_Area)
+        return light.v1.xyz;
+    return (light.v1.xyz + light.v2.xyz + light.v3.xyz) * (1.0 / 3.0);
+}
+
+// The first g_PushConstants.first BLASes' bounds, empty.
+[shader("compute")]
+[numthreads(LIGHT_TREE_BUILD_GROUP_SIZE, 1, 1)]
+void ClearBlasBounds(uint3 dispatchThread : SV_DispatchThreadID)
+{
+    uint blas = dispatchThread.x;
+    if (blas >= g_PushConstants.first)
+        return;
+    RWStructuredBuffer<uint> bounds = ResourceDescriptorHeap[g_Resources.blasBounds];
+    [unroll]
+    for (uint i = 0; i < 3; ++i)
+    {
+        bounds[blas * 6 + i] = 0xFFFFFFFFu;
+        bounds[blas * 6 + 3 + i] = 0u;
+    }
+}
+
+// Atomics straight to the BLAS's bounds: this runs only when the topology is built.
+[shader("compute")]
+[numthreads(LIGHT_TREE_BUILD_GROUP_SIZE, 1, 1)]
+void BlasBounds(uint3 dispatchThread : SV_DispatchThreadID)
+{
+    uint light = dispatchThread.x;
+    if (light >= g_PushConstants.lightCount)
+        return;
+    RWStructuredBuffer<GpuLight> lights = ResourceDescriptorHeap[g_PushConstants.lightsHandle];
+    StructuredBuffer<uint> lightBlas = ResourceDescriptorHeap[g_Resources.lightBlas];
+    RWStructuredBuffer<uint> bounds = ResourceDescriptorHeap[g_Resources.blasBounds];
+    float3 p = LightPosition(lights[light]);
+    uint blas = lightBlas[light];
+    [unroll]
+    for (uint i = 0; i < 3; ++i)
+    {
+        InterlockedMin(bounds[blas * 6 + i], OrderedFromFloat(p[i]));
+        InterlockedMax(bounds[blas * 6 + 3 + i], OrderedFromFloat(p[i]));
+    }
+}
+
+// The BLAS index above mortonBits of the Morton code over the BLAS's own bounds, so that the sort puts the BLASes in
+// order, each one's lights along its own curve however small it is next to the scene.
+[shader("compute")]
+[numthreads(LIGHT_TREE_BUILD_GROUP_SIZE, 1, 1)]
+void TopologyKeys(uint3 dispatchThread : SV_DispatchThreadID)
+{
+    uint light = dispatchThread.x;
+    if (light >= g_PushConstants.lightCount)
+        return;
+    RWStructuredBuffer<GpuLight> lights = ResourceDescriptorHeap[g_PushConstants.lightsHandle];
+    StructuredBuffer<uint> lightBlas = ResourceDescriptorHeap[g_Resources.lightBlas];
+    RWStructuredBuffer<uint> bounds = ResourceDescriptorHeap[g_Resources.blasBounds];
+    RWStructuredBuffer<uint> keys = ResourceDescriptorHeap[g_Resources.keysA];
+    RWStructuredBuffer<uint> values = ResourceDescriptorHeap[g_Resources.valuesA];
+
+    uint blas = lightBlas[light];
+    float3 lo = float3(FloatFromOrdered(bounds[blas * 6 + 0]), FloatFromOrdered(bounds[blas * 6 + 1]),
+                       FloatFromOrdered(bounds[blas * 6 + 2]));
+    float3 hi = float3(FloatFromOrdered(bounds[blas * 6 + 3]), FloatFromOrdered(bounds[blas * 6 + 4]),
+                       FloatFromOrdered(bounds[blas * 6 + 5]));
+    float extent = max(max(hi.x - lo.x, hi.y - lo.y), hi.z - lo.z);
+    float scale = extent > 0.0 ? 1024.0 / extent : 0.0;
+    uint3 cell = uint3(clamp((LightPosition(lights[light]) - lo) * scale, 0.0, 1023.0));
+    uint morton = (ExpandBits10(cell.x) << 2) | (ExpandBits10(cell.y) << 1) | ExpandBits10(cell.z);
+    // mortonBits is at most 30, so the BLAS index has at least the top 2 bits.
+    uint bits = g_PushConstants.mortonBits;
+    keys[light] = (blas << bits) | (morton >> (30 - bits));
+    values[light] = light;
+}
+
+// Slot s holds the s-th sorted light, and as every BLAS's lights come before the next one's, the slots of BLAS b are
+// its light range. The PMFs are the refit's.
+[shader("compute")]
+[numthreads(LIGHT_TREE_BUILD_GROUP_SIZE, 1, 1)]
+void TopologySlots(uint3 dispatchThread : SV_DispatchThreadID)
+{
+    uint slot = dispatchThread.x;
+    if (slot >= g_PushConstants.lightCount)
+        return;
+    RWStructuredBuffer<uint> values = ResourceDescriptorHeap[g_Resources.valuesA];
+    StructuredBuffer<uint> lightBlas = ResourceDescriptorHeap[g_Resources.lightBlas];
+    StructuredBuffer<GpuLightBlas> blases = ResourceDescriptorHeap[g_Resources.blases];
+    RWStructuredBuffer<GpuLightTreeLeafEntry> leafLights = ResourceDescriptorHeap[g_Resources.leafLights];
+    RWStructuredBuffer<GpuLightTreeLeafEntry> leafOfLight = ResourceDescriptorHeap[g_Resources.leafOfLight];
+
+    uint light = values[slot];
+    GpuLightBlas blas = blases[lightBlas[light]];
+    GpuLightTreeLeafEntry slotEntry = { light, 0.0 };
+    leafLights[slot] = slotEntry;
+    GpuLightTreeLeafEntry lightEntry = { (slot - blas.firstLight) / g_PushConstants.leafSize, 0.0 };
+    leafOfLight[light] = lightEntry;
+}
+
+// Entries [first, first + count) of the leaves' list: each leaf's lights' clusters at their flux now (which also
+// feed power selection), and their shares of it.
+[shader("compute")]
+[numthreads(LIGHT_TREE_BUILD_GROUP_SIZE, 1, 1)]
+void RefitLeaves(uint3 dispatchThread : SV_DispatchThreadID)
+{
+    if (dispatchThread.x >= g_PushConstants.count)
+        return;
+    StructuredBuffer<GpuLightRefitEntry> entries = ResourceDescriptorHeap[g_Resources.refitEntries];
+    RWStructuredBuffer<GpuLight> lights = ResourceDescriptorHeap[g_PushConstants.lightsHandle];
+    StructuredBuffer<float> emissionScales = ResourceDescriptorHeap[g_PushConstants.emissionScalesHandle];
+    StructuredBuffer<float> fluxScales = ResourceDescriptorHeap[g_Resources.fluxScales];
+    StructuredBuffer<uint> lightEmitters = ResourceDescriptorHeap[g_Resources.lightEmitters];
+    RWStructuredBuffer<GpuLightTreeCluster> lightClusters = ResourceDescriptorHeap[g_Resources.lightClusters];
+    RWStructuredBuffer<GpuLightTreeCluster> nodeClusters = ResourceDescriptorHeap[g_Resources.nodeClusters];
+    RWStructuredBuffer<GpuLightTreeNode> nodes = ResourceDescriptorHeap[g_Resources.nodes];
+    RWStructuredBuffer<GpuLightTreeLeafEntry> leafLights = ResourceDescriptorHeap[g_Resources.leafLights];
+    RWStructuredBuffer<GpuLightTreeLeafEntry> leafOfLight = ResourceDescriptorHeap[g_Resources.leafOfLight];
+
+    GpuLightRefitEntry entry = entries[g_PushConstants.first + dispatchThread.x];
+    GpuLightTreeCluster children[LIGHT_TREE_MAX_LEAF_LIGHTS];
+    uint leafLightIndex[LIGHT_TREE_MAX_LEAF_LIGHTS];
+    [unroll]
+    for (uint i = 0; i < LIGHT_TREE_MAX_LEAF_LIGHTS; ++i)
+    {
+        children[i] = (GpuLightTreeCluster)0;
+        leafLightIndex[i] = 0;
+        if (i < entry.count)
+        {
+            uint light = leafLights[entry.first + i].index;
+            leafLightIndex[i] = light;
+            float fluxScale = fluxScales[light] * max(emissionScales[lightEmitters[light]], 0.0);
+            children[i] = MakeLightCluster(lights[light], fluxScale);
+            lightClusters[light] = children[i];
+        }
+    }
+
+    GpuLightTreeCluster leaf = CombineClusters(children, entry.count);
+    [unroll]
+    for (uint i = 0; i < LIGHT_TREE_MAX_LEAF_LIGHTS; ++i)
+    {
+        if (i < entry.count)
+        {
+            float pmf = leaf.flux > 0.0 ? children[i].flux / leaf.flux : 0.0;
+            GpuLightTreeLeafEntry slot = { leafLightIndex[i], pmf };
+            leafLights[entry.first + i] = slot;
+            leafOfLight[leafLightIndex[i]].pmf = pmf;
+        }
+    }
+    nodes[entry.node].packed = PackLightTreeNode(leaf);
+    nodeClusters[entry.node] = leaf;
+}
+
+// Entries [first, first + count) of one height's list, whose children the dispatch before wrote.
+[shader("compute")]
+[numthreads(LIGHT_TREE_BUILD_GROUP_SIZE, 1, 1)]
+void RefitInterior(uint3 dispatchThread : SV_DispatchThreadID)
+{
+    if (dispatchThread.x >= g_PushConstants.count)
+        return;
+    StructuredBuffer<GpuLightRefitEntry> entries = ResourceDescriptorHeap[g_Resources.refitEntries];
+    RWStructuredBuffer<GpuLightTreeCluster> nodeClusters = ResourceDescriptorHeap[g_Resources.nodeClusters];
+    RWStructuredBuffer<GpuLightTreeNode> nodes = ResourceDescriptorHeap[g_Resources.nodes];
+
+    GpuLightRefitEntry entry = entries[g_PushConstants.first + dispatchThread.x];
+    GpuLightTreeCluster children[LIGHT_TREE_WIDTH];
+    [unroll]
+    for (uint c = 0; c < LIGHT_TREE_WIDTH; ++c)
+        children[c] = entry.count > 0 ? nodeClusters[entry.first + c] : (GpuLightTreeCluster)0;
+    GpuLightTreeCluster cluster = CombineClusters(children, entry.count > 0 ? LIGHT_TREE_WIDTH : 0);
+    nodes[entry.node].packed = PackLightTreeNode(cluster);
+    nodeClusters[entry.node] = cluster;
+}
+
+// Per BLAS (lightCount of them), its root group's cluster, which is the TLAS's leaf for it, and the key that sorts it
+// along the TLAS's Morton curve over the scene's bounds; a BLAS without flux sorts to the end and gets no leaf.
+[shader("compute")]
+[numthreads(LIGHT_TREE_BUILD_GROUP_SIZE, 1, 1)]
+void BlasClusters(uint3 dispatchThread : SV_DispatchThreadID)
+{
+    uint b = dispatchThread.x;
+    if (b >= g_PushConstants.lightCount)
+        return;
+    StructuredBuffer<GpuLightBlas> blases = ResourceDescriptorHeap[g_Resources.blases];
+    RWStructuredBuffer<GpuLightTreeCluster> nodeClusters = ResourceDescriptorHeap[g_Resources.nodeClusters];
+    RWStructuredBuffer<GpuLightTreeCluster> blasClusters = ResourceDescriptorHeap[g_Resources.blasClusters];
+    RWStructuredBuffer<uint> keys = ResourceDescriptorHeap[g_Resources.keysA];
+    RWStructuredBuffer<uint> values = ResourceDescriptorHeap[g_Resources.valuesA];
+
+    uint root = blases[b].nodeOffset;
+    GpuLightTreeCluster children[LIGHT_TREE_WIDTH];
+    [unroll]
+    for (uint c = 0; c < LIGHT_TREE_WIDTH; ++c)
+        children[c] = nodeClusters[root + c];
+    GpuLightTreeCluster cluster = CombineClusters(children, LIGHT_TREE_WIDTH);
+    blasClusters[b] = cluster;
+    keys[b] = cluster.flux > 0.0 ? MortonKey(cluster.mean) : LIGHT_TREE_INVALID_KEY;
+    values[b] = b;
 }
