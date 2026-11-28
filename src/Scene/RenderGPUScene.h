@@ -179,16 +179,40 @@ public:
 		return previousTransforms_.empty() ? InvalidResourceHandle : previousTransforms_[previousTransformFrame_];
 	}
 
+	// Swarms of moving, flashing point lights (AnimateLightSwarms in LightSwarms.slang) after the scene's lights in the
+	// light buffer, to stress the light tree: each swarm is a BLAS of the two-level hierarchy. Scene-relative sizes, so
+	// any scene gets them in a sensible place.
+	struct LightSwarmDesc
+	{
+		uint32_t swarmCount = 0; // 0 = none
+		uint32_t lightsPerSwarm = 0;
+		float seconds = 0.0f; // where the animation is
+		float speed = 1.0f;
+		float flashRate = 1.5f; // flashes per second, on average
+		float intensity = 0.02f; // W/sr of a light at the peak of its flash
+		float radius = 0.02f; // of a swarm, a share of the scene's larger horizontal extent
+		float spread = 0.6f; // share of the scene's horizontal extent, around its centre, the swarms wander
+		float height = 0.2f; // share of the scene's height, from its floor, the swarms' centres fly through
+		uint32_t seed = 1;
+	};
+
+	// The light tree's form and leaf size (see LightTreeBuilder).
+	struct LightTreeOptions
+	{
+		bool twoLevel = true;
+		uint32_t maxLeafLights = 4;
+	};
+
 	// Writes the current frame's uploads: the dynamic instances' transforms if they moved, the punctual (point and spot) lights and the
-	// emission scales. After a scene load it also makes the light buffer and the light tree builder's buffers, which
-	// waits for the GPU. Call after BeginFrame, which frees the current frame's buffers, and before
-	// BeginGraphicsCommandList.
-	void UpdateLights();
+	// emission scales. After a scene load, or when the swarms' counts change, it also makes the light buffer and the
+	// light tree builder's buffers, which waits for the GPU, and so does a new two-level layout. Call after BeginFrame,
+	// which frees the current frame's buffers, and before BeginGraphicsCommandList.
+	void UpdateLights(const LightTreeOptions &tree, const LightSwarmDesc &swarms);
 
 	// Adds the move of the dynamic lights and the punctual lights into the light buffer (Lights/Dynamic lights,
-	// TransformDynamicLights in DynamicLights.slang), then the build of the light tree over every light, static and
-	// dynamic alike (LightTreeBuilder::AddPasses). Call every frame after UpdateLights, before any pass that traces.
-	void AddLightPasses(FrameGraph &frame, uint32_t maxLeafLights);
+	// TransformDynamicLights in DynamicLights.slang), the light swarms (Lights/Swarms), then the light tree's build
+	// over every light (LightTreeBuilder::AddPasses). Call every frame after UpdateLights, before any pass that traces.
+	void AddLightPasses(FrameGraph &frame);
 
 	// Attaches to a ray tracing pass what the GPU writes of the scene that rays read: the current frame's TLAS (the
 	// micromap one with opacityMicromaps) and its 2-state twin, last frame's shadow TLAS with previousShadows, and the
@@ -323,6 +347,48 @@ public:
 		return lightTreeBuilder_->GetPower();
 	}
 
+	// The two-level hierarchy's tables, SRVs (stand-ins for the single-level tree), and its shape.
+	ResourceHandle GetLightTreeBlasBuffer() const
+	{
+		return lightTreeBuilder_->GetBlasBuffer();
+	}
+
+	ResourceHandle GetLightTreeLightBlasBuffer() const
+	{
+		return lightTreeBuilder_->GetLightBlasBuffer();
+	}
+
+	uint32_t GetLightTreeBlasLeafSize() const
+	{
+		return lightTreeBuilder_->GetBlasLeafSize();
+	}
+
+	uint32_t GetLightTreeTlasEntryOffset() const
+	{
+		return lightTreeBuilder_->GetTlasEntryOffset();
+	}
+
+	bool IsLightTreeTwoLevel() const
+	{
+		return lightTreeBuilder_->IsTwoLevel();
+	}
+
+	uint32_t GetLightTreeBlasCount() const
+	{
+		return lightTreeBuilder_->GetBlasCount();
+	}
+
+	uint32_t GetLightTreeMaxBlasDepth() const
+	{
+		return lightTreeBuilder_->GetMaxBlasDepth();
+	}
+
+	// The swarms' point lights, at the end of the light buffer.
+	uint32_t GetSwarmLightCount() const
+	{
+		return swarmLightCount_;
+	}
+
 	// Maps a ray hit to the light of the emissive triangle it hit (uint). The first entry per TLAS
 	// instance (indexed by InstanceIndex()) is the offset of that instance's triangle table in the
 	// same buffer, or INVALID_LIGHT_INDEX if it does not emit; the table then holds the light index
@@ -333,10 +399,11 @@ public:
 		return tlasEmitterBuffer_ != InvalidResourceHandle ? tlasEmitterBuffer_ : emitterBuffer_;
 	}
 
-	// Per light, its emissive instance (uint): where its scale is in the emission scale buffer.
+	// Per light, its emissive instance (uint): where its scale is in the emission scale buffer. The swarms' lights
+	// share one slot after the scene's.
 	ResourceHandle GetLightEmitterBuffer() const
 	{
-		return lightEmitterBuffer_;
+		return allLightEmitters_ != InvalidResourceHandle ? allLightEmitters_ : lightEmitterBuffer_;
 	}
 
 	// Per emissive instance, the factor SetEmissionScale gave its emission (float).
@@ -619,6 +686,27 @@ private:
 	ResourceHandle dynamicObjectLightBuffer_ = InvalidResourceHandle; // dynamicObjectLights_
 	ResourceHandle dynamicLightInstanceBuffer_ = InvalidResourceHandle; // dynamicLightInstance_
 	PipelineHandle dynamicLightsPipeline_ = InvalidPipelineHandle;
+	// lightEmitters_ and a slot for every swarm light, made with the light buffer.
+	ResourceHandle allLightEmitters_ = InvalidResourceHandle;
+
+	// The light swarms (LightSwarmDesc): their lights from swarmFirstLight_ on in the light buffer, written on the GPU
+	// whenever their constants change (their time moves, or a setting), and once after the light buffer is made.
+	PipelineHandle swarmPipeline_ = InvalidPipelineHandle;
+	LightSwarmDesc swarms_;
+	uint32_t swarmLightCount_ = 0;
+	uint32_t swarmFirstLight_ = 0;
+	bool swarmLightsWritten_ = false;
+	LightSwarmConstants swarmWrittenConstants_ = {}; // what the light buffer's swarm lights were written with
+	// Where the swarms fly this frame (scene units), for the kernel and the light tree's bounds.
+	float3 swarmRegionMin_ = {};
+	float3 swarmRegionSize_ = {};
+	float swarmRadius_ = 0.0f;
+	LightTreeOptions lightTreeOptions_;
+	// The emission scales the static BLASes were last refit with.
+	std::vector<float> refitEmissionScales_;
+	// The light buffer's ranges as the two-level hierarchy's BLASes: one per run of a triangle emitter's lights, one per
+	// punctual light, one per swarm.
+	std::vector<LightBlasDesc> MakeLightBlases() const;
 	uint32_t lightsPose_ = UINT32_MAX; // dynamicLightPose_ of the dynamic lights in lights_, UINT32_MAX for none
 	bool transformsWritten_ = false; // this frame's upload holds the dynamic instances' transforms
 

@@ -74,24 +74,74 @@ struct GpuLightTreeCluster
 	float radius;
 };
 
+// Two-level light hierarchy after "Dynamic Many-Light Sampling for Real-Time Ray Tracing" (Moreau, Pharr and Clarberg
+// 2019): the light buffer is cut into contiguous ranges, each a bottom-level tree (BLAS) of its own, and a top-level
+// tree (TLAS) over the BLASes' root clusters picks the BLAS. A BLAS's topology (which lights share a leaf, in Morton
+// order within the BLAS's bounds) is built once on the GPU and refit every frame, bottom up, as its lights move and
+// flash; the TLAS is rebuilt on the GPU every frame. Every node is a GpuLightTreeNode, so either importance ranks
+// both levels.
+//
+// One BLAS: its nodes are an implicit 4-wide tree laid out as the single-level tree (LightTreeLayout in
+// LightTreeBuild.slang) from nodeOffset, its leaf slots the lights' sorted order from firstLight on.
+struct GpuLightBlas
+{
+#ifdef __cplusplus
+	uint32_t nodeOffset; // first node of its root group in the node buffer
+	uint32_t firstLight; // its lights are [firstLight, firstLight + lightCount) of the light buffer, and so its leaf slots
+	uint32_t lightCount;
+	uint32_t leafLevel; // its depth less one, with the frame's leaf size
+#else
+	uint nodeOffset;
+	uint firstLight;
+	uint lightCount;
+	uint leafLevel;
+#endif
+};
+
+// One node the refit computes (RefitLeaves, RefitInterior), from count children: lights in the leaf slots from first
+// for a leaf, nodes from first (always 4, or 0 for the empty nodes that pad a level) for an interior node.
+struct GpuLightRefitEntry
+{
+#ifdef __cplusplus
+	uint32_t node;
+	uint32_t first;
+	uint32_t count;
+#else
+	uint node;
+	uint first;
+	uint count;
+#endif
+};
+
 #define LIGHT_TREE_BUILD_GROUP_SIZE 256u
 #define LIGHT_TREE_RADIX_BITS 4u
 #define LIGHT_TREE_RADIX_PASSES 8u // of 32 bit keys
 #define LIGHT_TREE_BUILD_BLOCK_SIZE 1024u // keys per radix sort or scan block, four per thread
 // Interior levels of at most this many nodes are built together, by one group.
 #define LIGHT_TREE_BUILD_TOP_NODES 256u
+// The most BLASes: the topology's sort key holds the BLAS index above the Morton code.
+#define LIGHT_TREE_MAX_BLAS_BITS 20u
+
+// LightTreeBuildConstants::flags
+#define LIGHT_TREE_BUILD_TLAS 1u // the tree kernels build the TLAS: its "lights" are the BLASes' clusters
 
 // Root constants of the light tree build kernels (LightTreeBuild.slang), at most 16 dwords.
 struct LightTreeBuildConstants
 {
 	float3 boundsMin; // of the light centroids, which the Morton keys quantise
 	float boundsScale; // 1024 over the bounds' largest extent, so the cells are cubes
-	uint lightCount;
-	uint leafSize; // lights per leaf, 1 to LIGHT_TREE_MAX_LEAF_LIGHTS
+	uint lightCount; // of the tree the kernel builds: the lights, or for the TLAS the BLASes
+	uint leafSize; // lights per leaf, 1 to LIGHT_TREE_MAX_LEAF_LIGHTS (1 for the TLAS)
 	uint pass; // per kernel: the radix sort pass, the tree level, or the first of the levels built together
 	uint lightsHandle; // RWStructuredBuffer<GpuLight>, only read: the light buffer has a UAV descriptor alone
 	uint emissionScalesHandle; // StructuredBuffer<float>, per emissive instance
 	float quantStep; // the node means' 16-bit steps from boundsMin (LightTreeBuilder::GetStep)
+	uint entryOffset; // of the tree's entries in the leaf buffers: 0, or for the TLAS the light count
+	uint flags; // LIGHT_TREE_BUILD_*
+	uint first; // refit: the first entry of the height's list; topology: the BLAS count
+	uint count; // refit: entries of the height's list to compute
+	uint mortonBits; // topology: bits of the sort key below the BLAS index, at most 30
+	uint pad;
 };
 
 // One dynamic instance's world transform for TransformDynamicLights (DynamicLights.slang), in the CPU's float3x4
@@ -130,6 +180,27 @@ struct DynamicLightConstants
 	uint skinnedLightsHandle;
 };
 
+#define LIGHT_SWARM_GROUP_SIZE 256u
+
+// Root constants of AnimateLightSwarms (DynamicLights.slang): swarms of point lights, lightsPerSwarm each, written to
+// the light buffer from firstLight on. Each swarm's centre wanders the region on a path of its own, its lights orbit
+// home positions within radius of it, and each light flashes on a clock of its own.
+struct LightSwarmConstants
+{
+	float3 regionMin; // where the swarms' centres go
+	float time; // seconds
+	float3 regionSize;
+	float radius; // of a swarm, scene units
+	uint firstLight;
+	uint lightsPerSwarm;
+	uint lightCount; // of every swarm
+	uint lightsHandle; // RWStructuredBuffer<GpuLight>
+	float intensity; // radiant intensity of a light at the peak of a flash, W/sr
+	float flashRate; // flashes per second, on average
+	float speed; // how fast the swarms wander and their lights orbit, 1 = as designed
+	uint seed;
+};
+
 // Descriptor heap indices of the build's buffers, which only change when the light count does; a constant
 // buffer, as they do not fit the root constants. RW buffers unless noted.
 struct LightTreeBuildResources
@@ -148,6 +219,12 @@ struct LightTreeBuildResources
 	uint leafLights; // GpuLightTreeLeafEntry per leaf slot
 	uint leafOfLight; // GpuLightTreeLeafEntry per light
 	uint power; // GpuLightPowerEntry per light
+	// Two-level only.
+	uint blasClusters; // GpuLightTreeCluster per BLAS, of its root group: the TLAS's "light" clusters
+	uint blasBounds; // uint per BLAS times 6: its lights' bounds as ordered floats, min then max, for the topology
+	uint blases; // StructuredBuffer<GpuLightBlas>
+	uint lightBlas; // StructuredBuffer<uint>, per light, its BLAS
+	uint refitEntries; // StructuredBuffer<GpuLightRefitEntry>, the nodes per height, leaves first
 };
 
 #ifdef __cplusplus
@@ -155,6 +232,9 @@ static_assert(sizeof(GpuLightTreeNode) == 16, "GpuLightTreeNode must match the s
 static_assert(sizeof(GpuLightTreeLeafEntry) == 8, "GpuLightTreeLeafEntry must match the structured buffer stride");
 static_assert(sizeof(GpuLightPowerEntry) == 16, "GpuLightPowerEntry must match the structured buffer stride");
 static_assert(sizeof(GpuLightTreeCluster) == 36, "GpuLightTreeCluster must match the structured buffer stride");
+static_assert(sizeof(GpuLightBlas) == 16, "GpuLightBlas must match the structured buffer stride");
+static_assert(sizeof(GpuLightRefitEntry) == 12, "GpuLightRefitEntry must match the structured buffer stride");
+static_assert(sizeof(LightSwarmConstants) <= 16 * 4, "LightSwarmConstants must fit the root constants");
 static_assert(sizeof(LightTreeBuildConstants) <= 16 * 4, "LightTreeBuildConstants must fit the root constants");
 static_assert(sizeof(DynamicLightTransform) == 64, "DynamicLightTransform must match the structured buffer stride");
 static_assert(sizeof(DynamicLightConstants) <= 16 * 4, "DynamicLightConstants must fit the root constants");

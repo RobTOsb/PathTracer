@@ -75,7 +75,7 @@ static float QueryDisplayPeakNits(void *hwnd)
 }
 
 //constexpr const char *kDefaultScenePath = "h:\\AMD-GI1\\assets\\EmissiveMeshes\\EmissiveMeshes.glb";
-constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
+//constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\gltf-research-scenes\\scenes\\crown\\gltf\\crown_extended.gltf";
 //constexpr const char *kDefaultScenePath = "h:\\glTF-Sample-Assets\\Models\\TransmissionThinwallTestGrid\\glTF-Binary\\TransmissionThinwallTestGrid.glb";
 //constexpr const char *kDefaultScenePath = "H:\\bistro_roughmetal.glb";
@@ -87,7 +87,7 @@ constexpr const char *kDefaultScenePath = "h:\\Intelsponza\\glTF\\Intelsponza.gl
 //constexpr const char *kDefaultScenePath = "h:\\landscape\\view-0.glb";
 //constexpr const char *kDefaultScenePath = "h:\\modern_apartment.glb";
 //constexpr const char *kDefaultScenePath = "h:\\LucyCheckerboard.glb";
-//constexpr const char *kDefaultScenePath = "h:\\StressTest\\StressTest.glb";
+constexpr const char *kDefaultScenePath = "h:\\StressTest\\StressTest.glb";
 //constexpr const char *kDefaultScenePath = "h:\\TheMetro.glb";
 //constexpr const char *kDefaultScenePath = "h:\\AncientCathedral.glb";
 //constexpr const char *kDefaultScenePath = "h:\\DarkFantasyChurch.glb";
@@ -714,10 +714,46 @@ int Run(const char *scenePath)
 			settings.clouds.windOffsetKm.y += cosf(direction) * distanceKm;
 		}
 
+		// The light swarms, held still in the reference, which starts over when they move or change.
+		if (settings.swarms.enabled && settings.swarms.animate && settings.renderMode != RenderMode::Reference)
+		{
+			settings.swarms.seconds += deltaSeconds;
+		}
+		{
+			static LightSwarmSettings shownSwarms = {};
+			const LightSwarmSettings &s = settings.swarms;
+			const bool changed = s.enabled != shownSwarms.enabled || s.swarmCount != shownSwarms.swarmCount ||
+								 s.lightsPerSwarm != shownSwarms.lightsPerSwarm || s.seconds != shownSwarms.seconds ||
+								 s.speed != shownSwarms.speed || s.flashRate != shownSwarms.flashRate ||
+								 s.intensity != shownSwarms.intensity || s.radius != shownSwarms.radius ||
+								 s.spread != shownSwarms.spread || s.height != shownSwarms.height;
+			if (changed)
+			{
+				shownSwarms = s;
+				++settings.reference.restartCount;
+			}
+		}
+
 		renderContext->BeginFrame();
 
 		// After BeginFrame, which frees this frame's light buffers.
-		gpuScene.UpdateLights();
+		{
+			RenderGPUScene::LightTreeOptions tree;
+			tree.twoLevel = settings.lights.twoLevelTree;
+			tree.maxLeafLights = static_cast<uint32_t>(std::max(settings.lights.maxLeafLights, 1));
+			const LightSwarmSettings &swarmSettings = settings.swarms;
+			RenderGPUScene::LightSwarmDesc swarms;
+			swarms.swarmCount = swarmSettings.enabled ? static_cast<uint32_t>(std::max(swarmSettings.swarmCount, 0)) : 0u;
+			swarms.lightsPerSwarm = static_cast<uint32_t>(std::max(swarmSettings.lightsPerSwarm, 1));
+			swarms.seconds = swarmSettings.seconds;
+			swarms.speed = swarmSettings.speed;
+			swarms.flashRate = swarmSettings.flashRate;
+			swarms.intensity = swarmSettings.intensity;
+			swarms.radius = swarmSettings.radius;
+			swarms.spread = swarmSettings.spread;
+			swarms.height = swarmSettings.height;
+			gpuScene.UpdateLights(tree, swarms);
+		}
 
 		renderContext->BeginGraphicsCommandList();
 		renderContext->SetDescriptorHeaps();
@@ -747,8 +783,9 @@ int Run(const char *scenePath)
 		}
 		frame.queue = QueueType::Graphics;
 		gpuScene.AddAccelerationStructurePasses(frame);
-		// Every light, static and dynamic, into a new tree on the GPU each frame.
-		gpuScene.AddLightPasses(frame, static_cast<uint32_t>(settings.lights.maxLeafLights));
+		// Every light, static and dynamic, into the light tree on the GPU each frame: rebuilt whole, or its BLASes
+		// refit under a new TLAS.
+		gpuScene.AddLightPasses(frame);
 		if (settings.asyncCompute)
 		{
 			graph.Submit();
